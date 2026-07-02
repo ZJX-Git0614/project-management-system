@@ -1,0 +1,106 @@
+import { NextRequest } from "next/server"
+import { prisma } from "@/lib/prisma"
+import { getUserFromRequest } from "@/lib/auth"
+import { ok, err, unauthorized, notFound } from "@/lib/api-utils"
+
+const SERIALIZE_KEYS = [
+  "id", "projectId", "title", "description", "dueDate", "status", "owner", "priority",
+  "plannedStartDate", "actualStartDate", "plannedEndDate", "actualEndDate",
+  "progress", "health", "issueAndAction", "dependency", "risk", "riskStatus", "remark",
+] as const
+
+function serializeItem(item: Record<string, unknown>) {
+  const out: Record<string, unknown> = { project: (item as { project?: unknown }).project }
+  for (const k of SERIALIZE_KEYS) {
+    out[k] = item[k]
+  }
+  out.createdAt = (item.createdAt as Date).toISOString()
+  out.updatedAt = (item.updatedAt as Date).toISOString()
+  return out
+}
+
+const PUTTABLE_FIELDS: readonly string[] = [
+  "title", "description", "dueDate", "status", "owner", "priority",
+  "plannedStartDate", "actualStartDate", "plannedEndDate", "actualEndDate",
+  "progress", "health", "issueAndAction", "dependency", "risk", "riskStatus", "remark",
+]
+
+// PUT /api/monthly-items/[id]
+export async function PUT(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params
+  const user = getUserFromRequest(req)
+  if (!user) return unauthorized()
+
+  const existing = await prisma.monthlyItem.findUnique({ where: { id } })
+  if (!existing) return notFound("本月事项")
+
+  const project = await prisma.project.findUnique({ where: { id: existing.projectId } })
+  if (project && (project.status === "COMPLETED" || project.status === "VOIDED")) {
+    return err("项目已作废或已完成，不允许修改事项")
+  }
+
+  const body = await req.json()
+  const updateData: Record<string, unknown> = {}
+  for (const k of PUTTABLE_FIELDS) {
+    if (body[k] !== undefined) updateData[k] = body[k]
+  }
+
+  const item = await prisma.monthlyItem.update({
+    where: { id },
+    data: updateData,
+    include: {
+      project: { select: { id: true, name: true, code: true, status: true } },
+    },
+  })
+
+  await prisma.operationHistory.create({
+    data: {
+      projectId: item.projectId,
+      entityType: "MONTHLY_ITEM",
+      entityId: item.id,
+      actionType: body.status && body.status !== existing.status ? "STATUS_CHANGED" : "UPDATE",
+      operator: user.displayName,
+      detail: body.status && body.status !== existing.status
+        ? `本月事项「${item.title}」状态变更为 ${body.status}`
+        : `更新本月事项「${item.title}」`,
+    },
+  })
+
+  return ok(serializeItem(item as unknown as Record<string, unknown>))
+}
+
+// DELETE /api/monthly-items/[id]
+export async function DELETE(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params
+  const user = getUserFromRequest(req)
+  if (!user) return unauthorized()
+
+  const existing = await prisma.monthlyItem.findUnique({ where: { id } })
+  if (!existing) return notFound("本月事项")
+
+  const project = await prisma.project.findUnique({ where: { id: existing.projectId } })
+  if (project && (project.status === "COMPLETED" || project.status === "VOIDED")) {
+    return err("项目已作废或已完成，不允许删除事项")
+  }
+
+  await prisma.monthlyItem.delete({ where: { id } })
+
+  await prisma.operationHistory.create({
+    data: {
+      projectId: existing.projectId,
+      entityType: "MONTHLY_ITEM",
+      entityId: id,
+      actionType: "DELETE",
+      operator: user.displayName,
+      detail: `删除本月事项「${existing.title}」`,
+    },
+  })
+
+  return ok({ message: "已删除" })
+}

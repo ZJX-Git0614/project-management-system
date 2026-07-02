@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  rpms:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rpms
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=file:/app/data/dev.db
+      - JWT_SECRET=rpms-production-jwt-secret-2026
+      - NODE_ENV=production
+    volumes:
+      - rpms-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  rpms-data:

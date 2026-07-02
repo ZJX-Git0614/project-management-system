@@ -1,0 +1,9 @@
+node_modules
+.next
+.git
+.vscode
+docs
+__tests__
+prisma/dev.db
+*.md
+*.log

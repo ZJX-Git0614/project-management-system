@@ -1,0 +1,239 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model UserAccount {
+  id                    String    @id @default(cuid())
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  username              String    @unique
+  displayName           String
+  enabled               Boolean   @default(true)
+  assignedRoleNames     String    // JSON array of roleConfig roleName
+  passwordHash          String
+  passwordResetRequired Boolean  @default(true)
+  passwordUpdatedAt     DateTime?
+}
+
+model Project {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  name            String
+  code            String   @default("")
+  clientName      String   @default("")
+  amountWan       Float    @default(0)
+  deviceCount     Int      @default(0)
+  repairCycleDays Int      @default(0)
+  startDate       String   @default("")
+  expectedEndDate String   @default("")
+  status          String   @default("DRAFT") // ProjectStatus
+
+  projectMembers     ProjectMember[]
+  ganttTasks         ProjectGanttTask[]
+  budgetCategories   ProjectBudgetCategory[]
+  budgetItems        ProjectBudgetItem[]
+  budgetSetting      ProjectBudgetSetting?
+  monthlyItems       MonthlyItem[]
+  weeklyItems        WeeklyItem[]
+  todos              TodoItem[]
+  operationHistories OperationHistory[]
+}
+
+model ProjectGanttTask {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  projectId       String
+  taskCategory    String
+  taskName        String
+  startDate       String
+  durationDays    Int
+  predecessorTask String   @default("")
+  sortOrder       Int      @default(0)
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+// 项目预算归属（一个项目可建多个分类，每个分类决定下挂条目的 kind）
+model ProjectBudgetCategory {
+  id           String   @id @default(cuid())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now()) @updatedAt
+  projectId    String
+  name         String
+  kind         String   // MANPOWER / PURCHASE / OTHER(差旅型) / RATE
+  description  String   @default("")
+  sortOrder    Int      @default(0)
+
+  project Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  items   ProjectBudgetItem[]
+
+  @@unique([projectId, name])
+}
+
+// 项目预算明细条目（自由结构，按分类 kind 决定有效字段）
+model ProjectBudgetItem {
+  id                   String   @id @default(cuid())
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @default(now()) @updatedAt
+  projectId            String
+  categoryId           String
+  sortOrder            Int      @default(0)
+  // 通用
+  title                String   @default("")
+  // 人力型
+  groupName            String   @default("")
+  person               String   @default("")
+  personMonths         Float    @default(0)
+  monthlyCostPerPerson Float    @default(0)
+  // 采购型
+  unitPrice            Float    @default(0)
+  sampleQuantity       Float    @default(0)
+  productionQuantity   Float    @default(0)
+  // 差旅型
+  amount               Float    @default(0)
+  // 费率型（RATE）：min/max 为建议上下限，current 为当前使用值；defaultRate 为历史兼容字段，不参与业务
+  minRate              Float    @default(0)
+  maxRate              Float    @default(0)
+  defaultRate          Float    @default(0)
+  currentRate          Float    @default(0)
+  // 备注
+  remark               String   @default("")
+
+  category ProjectBudgetCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  project  Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+// 项目预算设置（合同 + 利润率目标，每项目一条；公摊/审价/风险已迁入 RATE 分类）
+model ProjectBudgetSetting {
+  id                String   @id @default(cuid())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @default(now()) @updatedAt
+  projectId         String   @unique
+  contractAmount    Float    @default(0)  // 合同金额（元），自动从项目信息的 amountWan 同步
+  profitTargetRate  Float    @default(0)  // 利润率目标（%）
+  note              String   @default("")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+
+model RoleConfig {
+  id            String   @id @default(cuid())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  roleName      String   @unique
+  allowMultiple Boolean  @default(false)
+  systemPreset  Boolean  @default(false)
+  persons       String   // JSON array
+}
+
+model SystemPerson {
+  id         String   @id @default(cuid())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  personName String   @unique
+}
+
+model ProjectMember {
+  id         String   @id @default(cuid())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  projectId  String
+  roleName   String
+  personName String
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model MonthlyItem {
+  id                String   @id @default(cuid())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  projectId         String
+  title             String
+  description       String   @default("")
+  dueDate           String
+  status            String   @default("PENDING") // PENDING / IN_PROGRESS / DONE
+  owner             String
+  priority          String   @default("NORMAL")   // LOW / NORMAL / HIGH
+  plannedStartDate  String   @default("")          // 计划开始时间
+  actualStartDate   String   @default("")          // 实际开始时间
+  plannedEndDate    String   @default("")          // 计划结束时间
+  actualEndDate     String   @default("")          // 实际结束时间
+  progress          Int      @default(0)           // 0-100
+  health            String   @default("UNKNOWN")   // HEALTHY / AT_RISK / OFF_TRACK / UNKNOWN
+  issueAndAction    String   @default("")          // 当前问题/措施
+  dependency        String   @default("")          // 依赖条件
+  risk              String   @default("")          // 风险描述
+  riskStatus        String   @default("NONE")      // OPEN / MITIGATED / CLOSED / NONE
+  remark            String   @default("")          // 备注
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model WeeklyItem {
+  id                String   @id @default(cuid())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  projectId         String
+  title             String
+  description       String   @default("")
+  dueDate           String
+  status            String   @default("PENDING") // PENDING / IN_PROGRESS / DONE
+  owner             String
+  priority          String   @default("NORMAL")   // LOW / NORMAL / HIGH
+  plannedStartDate  String   @default("")
+  actualStartDate   String   @default("")
+  plannedEndDate    String   @default("")
+  actualEndDate     String   @default("")
+  progress          Int      @default(0)
+  health            String   @default("UNKNOWN")
+  issueAndAction    String   @default("")
+  dependency        String   @default("")
+  risk              String   @default("")
+  riskStatus        String   @default("NONE")
+  remark            String   @default("")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model TodoItem {
+  id               String     @id @default(cuid())
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  projectId        String
+  title            String
+  detail           String
+  targetRole       String
+  targetPersonName String?
+  type             String
+  status           String     @default("OPEN")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model OperationHistory {
+  id         String   @id @default(cuid())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  projectId  String
+  entityType String
+  entityId   String
+  actionType String
+  operator   String
+  detail     String
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model PermissionTree {
+  id   String @id
+  data String // JSON
+}

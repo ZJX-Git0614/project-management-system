@@ -1,0 +1,11 @@
+node_modules
+.next
+out
+build
+coverage
+*.log
+.DS_Store
+tsconfig.tsbuildinfo
+.local-runtime
+
+.worktrees
