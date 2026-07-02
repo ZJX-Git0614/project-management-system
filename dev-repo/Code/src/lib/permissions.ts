@@ -142,6 +142,9 @@ export const PERMISSION_TREE = [
         type: "page",
         children: [
           { key: "risk-register:view", label: "查看风险登记册", type: "section" },
+          { key: "risk-register:create", label: "新增风险", type: "action" },
+          { key: "risk-register:edit", label: "编辑风险", type: "action" },
+          { key: "risk-register:delete", label: "删除风险", type: "action" },
         ],
       },
     ],

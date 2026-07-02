@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, KeyboardEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { KeyboardEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { Plus, Upload, Search } from "lucide-react";
 import { ItemHealth, ItemRiskStatus, ItemStatus, ItemPriority } from "@/domain/enums";
 import {
@@ -166,6 +166,9 @@ export const ItemPanel = ({
     null
   );
   const [saving, setSaving] = useState(false);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [deletingSelected, setDeletingSelected] = useState(false);
 
   const canView = can(`${kind}-items:view`);
   const canCreate = can(`${kind}-items:create`);
@@ -173,7 +176,7 @@ export const ItemPanel = ({
   const canDelete = can(`${kind}-items:delete`);
   const canExport = can(`${kind}-items:export`);
   const isWeekly = kind === "weekly";
-  const tableColSpan = isWeekly ? 22 : 20;
+  const tableColSpan = (isWeekly ? 22 : 20) + (selectionMode ? 1 : 0);
 
   const fetchData = useCallback(async () => {
     if (!canView) {
@@ -223,6 +226,21 @@ export const ItemPanel = ({
       }),
     [filtered]
   );
+
+  useEffect(() => {
+    setSelectedIds((prev) => prev.filter((id) => sorted.some((item) => item.id === id)));
+  }, [sorted]);
+
+  const toggleSelectionMode = () => {
+    setSelectionMode((prev) => !prev);
+    setSelectedIds([]);
+  };
+
+  const toggleSelected = (id: string) => {
+    setSelectedIds((prev) => (
+      prev.includes(id) ? prev.filter((itemId) => itemId !== id) : [...prev, id]
+    ));
+  };
 
   const handleExport = () => {
     const rows = sorted.map((it) => {
@@ -414,13 +432,20 @@ export const ItemPanel = ({
     };
   };
 
-  const handleDelete = async (item: ItemRecord) => {
-    if (!(await confirm(`确认删除事项「${item.title}」？`))) return;
+  const handleDeleteSelected = async () => {
+    const selectedItems = sorted.filter((item) => selectedIds.includes(item.id));
+    if (selectedItems.length === 0) return;
+    if (!(await confirm(`确认删除选中的 ${selectedItems.length} 个事项？`))) return;
+    setDeletingSelected(true);
     try {
-      await api.delete(`${apiPath}/${item.id}`);
+      await Promise.all(selectedItems.map((item) => api.delete(`${apiPath}/${item.id}`)));
+      setSelectedIds([]);
+      setSelectionMode(false);
       await fetchData();
     } catch (err) {
       alert(err instanceof Error ? err.message : "删除失败");
+    } finally {
+      setDeletingSelected(false);
     }
   };
 
@@ -519,6 +544,28 @@ export const ItemPanel = ({
                 <Plus className="size-3" /> 新增
               </Button>
             )}
+            {canDelete && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs"
+                onClick={toggleSelectionMode}
+                disabled={deletingSelected}
+              >
+                {selectionMode ? "取消选择" : "选择"}
+              </Button>
+            )}
+            {canDelete && selectionMode && (
+              <Button
+                variant="destructive"
+                size="sm"
+                className="h-8 text-xs"
+                onClick={() => void handleDeleteSelected()}
+                disabled={selectedIds.length === 0 || deletingSelected}
+              >
+                {deletingSelected ? "删除中..." : `删除 ${selectedIds.length}`}
+              </Button>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -529,6 +576,7 @@ export const ItemPanel = ({
             <Table>
               <TableHeader>
                 <TableRow>
+                  {selectionMode && <TableHead className="w-[48px] whitespace-nowrap">选择</TableHead>}
                   <TableHead className="whitespace-nowrap">月份</TableHead>
                   <TableHead className="whitespace-nowrap">周重点事件</TableHead>
                   <TableHead className="whitespace-nowrap">周</TableHead>
@@ -555,6 +603,7 @@ export const ItemPanel = ({
               <TableBody>
                 {draft && editingId === null && (
                   <TableRow className="h-8 align-top bg-primary/5">
+                    {selectionMode && <TableCell className="text-xs" />}
                     <TableCell className="text-xs">{formatYearMonth(draft.plannedStartDate || draft.dueDate)}</TableCell>
                     <TableCell className="text-xs">
                       {draft.priority === ItemPriority.HIGH || draft.priority === ItemPriority.URGENT ? "是" : "否"}
@@ -781,6 +830,17 @@ export const ItemPanel = ({
                             : "h-8 align-top"
                       }
                     >
+                      {selectionMode && (
+                        <TableCell className="text-xs">
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.includes(item.id)}
+                            onChange={() => toggleSelected(item.id)}
+                            onClick={(event) => event.stopPropagation()}
+                            className="h-3.5 w-3.5 rounded border-border bg-background"
+                          />
+                        </TableCell>
+                      )}
                       <TableCell className="text-xs">{formatYearMonth(monthAnchor)}</TableCell>
                       <TableCell className="text-xs">
                         {row.priority === ItemPriority.HIGH || row.priority === ItemPriority.URGENT ? "是" : "否"}
@@ -1082,23 +1142,7 @@ export const ItemPanel = ({
                                 取消
                               </Button>
                             </>
-                          ) : (
-                            <>
-                              {canDelete && (
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-7 text-xs text-destructive"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    void handleDelete(item);
-                                  }}
-                                >
-                                  删除
-                                </Button>
-                              )}
-                            </>
-                          )}
+                          ) : null}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -1464,16 +1508,3 @@ export const ItemPanel = ({
     </div>
   );
 };
-
-const itemRiskLevel = (progress: number): "low" | "high" =>
-  progress >= 70 ? "low" : "high";
-
-const FormField = ({ label, required, children }: { label: string; required?: boolean; children: React.ReactNode }) => (
-  <div className="space-y-1">
-    <label className="text-[11px] font-medium text-muted-foreground">
-      {label}
-      {required && <span className="text-destructive ml-0.5">*</span>}
-    </label>
-    {children}
-  </div>
-);

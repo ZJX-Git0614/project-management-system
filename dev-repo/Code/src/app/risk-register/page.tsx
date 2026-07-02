@@ -2,6 +2,7 @@
 
 import { KeyboardEvent, useState } from "react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
@@ -14,6 +15,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { useConfirm } from "@/components/confirm-provider";
 import { usePermission } from "@/lib/use-permission";
 
 type RiskLevel = "高" | "中" | "低";
@@ -132,10 +134,26 @@ const statusVariant: Record<RiskStatus, "secondary" | "default" | "warning" | "s
   已关闭: "success",
 };
 
+const nextRiskId = (items: RiskRegisterItem[]) => {
+  const next = items.reduce((max, item) => {
+    const value = Number.parseInt(item.id.replace(/^Risk/, ""), 10);
+    return Number.isFinite(value) ? Math.max(max, value) : max;
+  }, 0) + 1;
+  return `Risk${String(next).padStart(3, "0")}`;
+};
+
 export default function RiskRegisterPage() {
   const { can } = usePermission();
+  const confirm = useConfirm();
   const [riskItems, setRiskItems] = useState<RiskRegisterItem[]>(initialRiskItems);
   const [editingCell, setEditingCell] = useState<{ id: string; field: EditableRiskField } | null>(null);
+  const [draft, setDraft] = useState<RiskRegisterItem | null>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+
+  const canCreate = can("risk-register:create");
+  const canEdit = can("risk-register:edit");
+  const canDelete = can("risk-register:delete");
 
   const closeEdit = () => setEditingCell(null);
 
@@ -151,6 +169,56 @@ export default function RiskRegisterPage() {
 
   const isEditing = (item: RiskRegisterItem, field: EditableRiskField) =>
     editingCell?.id === item.id && editingCell.field === field;
+
+  const openCreate = () => {
+    setDraft({
+      id: nextRiskId(riskItems),
+      riskName: "",
+      linkedItemName: itemNameOptions[0] ?? "",
+      category: "",
+      trigger: "",
+      probability: "中",
+      impact: "中",
+      level: "中",
+      response: "",
+      owner: "",
+      status: "识别中",
+      targetDate: "",
+    });
+  };
+
+  const updateDraft = <K extends EditableRiskField>(field: K, value: RiskRegisterItem[K]) => {
+    setDraft((prev) => (prev ? { ...prev, [field]: value } : prev));
+  };
+
+  const submitCreate = () => {
+    if (!draft) return;
+    if (!draft.riskName.trim() || !draft.owner.trim()) {
+      alert("请填写风险名称和责任人");
+      return;
+    }
+    setRiskItems((prev) => [...prev, draft]);
+    setDraft(null);
+  };
+
+  const toggleSelectionMode = () => {
+    setSelectionMode((prev) => !prev);
+    setSelectedIds([]);
+  };
+
+  const toggleSelected = (id: string) => {
+    setSelectedIds((prev) => (
+      prev.includes(id) ? prev.filter((itemId) => itemId !== id) : [...prev, id]
+    ));
+  };
+
+  const deleteSelected = async () => {
+    if (selectedIds.length === 0) return;
+    if (!(await confirm(`确认删除选中的 ${selectedIds.length} 条风险？`))) return;
+    setRiskItems((prev) => prev.filter((item) => !selectedIds.includes(item.id)));
+    setSelectedIds([]);
+    setSelectionMode(false);
+  };
 
   const handleEditKeyDown = (
     event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>
@@ -168,17 +236,19 @@ export default function RiskRegisterPage() {
     closeEdit();
   };
 
-  const editTriggerProps = (item: RiskRegisterItem, field: EditableRiskField) => ({
-    role: "button" as const,
-    tabIndex: 0,
-    onClick: () => setEditingCell({ id: item.id, field }),
-    onKeyDown: (event: KeyboardEvent<HTMLElement>) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        setEditingCell({ id: item.id, field });
-      }
-    },
-  });
+  const editTriggerProps = (item: RiskRegisterItem, field: EditableRiskField) => (
+    canEdit ? {
+      role: "button" as const,
+      tabIndex: 0,
+      onClick: () => setEditingCell({ id: item.id, field }),
+      onKeyDown: (event: KeyboardEvent<HTMLElement>) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          setEditingCell({ id: item.id, field });
+        }
+      },
+    } : {}
+  );
 
   if (!can("risk-register:view")) {
     return (
@@ -191,12 +261,38 @@ export default function RiskRegisterPage() {
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-sm">风险登记册</CardTitle>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle className="text-sm">风险登记册</CardTitle>
+          <div className="flex items-center gap-2">
+            {canCreate && (
+              <Button size="sm" className="h-8 text-xs" onClick={openCreate} disabled={draft !== null}>
+                新增风险
+              </Button>
+            )}
+            {canDelete && (
+              <Button variant="outline" size="sm" className="h-8 text-xs" onClick={toggleSelectionMode}>
+                {selectionMode ? "取消选择" : "选择"}
+              </Button>
+            )}
+            {canDelete && selectionMode && (
+              <Button
+                variant="destructive"
+                size="sm"
+                className="h-8 text-xs"
+                onClick={() => void deleteSelected()}
+                disabled={selectedIds.length === 0}
+              >
+                删除 {selectedIds.length}
+              </Button>
+            )}
+          </div>
+        </div>
       </CardHeader>
       <CardContent className="p-0">
         <Table>
           <TableHeader>
             <TableRow>
+              {selectionMode && <TableHead className="w-[48px] whitespace-nowrap">选择</TableHead>}
               <TableHead className="whitespace-nowrap">风险ID</TableHead>
               <TableHead className="min-w-[180px] whitespace-nowrap">风险名称</TableHead>
               <TableHead className="min-w-[180px] whitespace-nowrap">关联事项名称</TableHead>
@@ -212,11 +308,138 @@ export default function RiskRegisterPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
+            {draft && (
+              <TableRow className="align-top bg-primary/5">
+                {selectionMode && <TableCell />}
+                <TableCell className="whitespace-nowrap font-mono text-xs font-semibold text-muted-foreground">
+                  {draft.id}
+                </TableCell>
+                <TableCell>
+                  <Input
+                    value={draft.riskName}
+                    onChange={(event) => updateDraft("riskName", event.target.value)}
+                    className={`${inlineInputClass} min-w-[160px]`}
+                    placeholder="风险名称"
+                    autoFocus
+                  />
+                </TableCell>
+                <TableCell>
+                  <Select
+                    value={draft.linkedItemName}
+                    onChange={(event) => updateDraft("linkedItemName", event.target.value)}
+                    className={`${inlineSelectClass} min-w-[170px]`}
+                  >
+                    {itemNameOptions.map((option) => (
+                      <option key={option} value={option}>{option}</option>
+                    ))}
+                  </Select>
+                </TableCell>
+                <TableCell>
+                  <Input
+                    value={draft.category}
+                    onChange={(event) => updateDraft("category", event.target.value)}
+                    className={`${inlineInputClass} w-[96px]`}
+                    placeholder="类别"
+                  />
+                </TableCell>
+                <TableCell>
+                  <Textarea
+                    value={draft.trigger}
+                    onChange={(event) => updateDraft("trigger", event.target.value)}
+                    className={inlineTextareaClass}
+                    placeholder="触发条件"
+                  />
+                </TableCell>
+                <TableCell>
+                  <Select
+                    value={draft.probability}
+                    onChange={(event) => updateDraft("probability", event.target.value as RiskLevel)}
+                    className={inlineSelectClass}
+                  >
+                    {riskLevelOptions.map((option) => (
+                      <option key={option} value={option}>{option}</option>
+                    ))}
+                  </Select>
+                </TableCell>
+                <TableCell>
+                  <Select
+                    value={draft.impact}
+                    onChange={(event) => updateDraft("impact", event.target.value as RiskLevel)}
+                    className={inlineSelectClass}
+                  >
+                    {riskLevelOptions.map((option) => (
+                      <option key={option} value={option}>{option}</option>
+                    ))}
+                  </Select>
+                </TableCell>
+                <TableCell>
+                  <Select
+                    value={draft.level}
+                    onChange={(event) => updateDraft("level", event.target.value as RiskLevel)}
+                    className={inlineSelectClass}
+                  >
+                    {riskLevelOptions.map((option) => (
+                      <option key={option} value={option}>{option}</option>
+                    ))}
+                  </Select>
+                </TableCell>
+                <TableCell>
+                  <Textarea
+                    value={draft.response}
+                    onChange={(event) => updateDraft("response", event.target.value)}
+                    className={inlineTextareaClass}
+                    placeholder="应对措施"
+                  />
+                </TableCell>
+                <TableCell>
+                  <Input
+                    value={draft.owner}
+                    onChange={(event) => updateDraft("owner", event.target.value)}
+                    className={`${inlineInputClass} w-[96px]`}
+                    placeholder="责任人"
+                  />
+                </TableCell>
+                <TableCell>
+                  <Select
+                    value={draft.status}
+                    onChange={(event) => updateDraft("status", event.target.value as RiskStatus)}
+                    className={inlineSelectClass}
+                  >
+                    {riskStatusOptions.map((option) => (
+                      <option key={option} value={option}>{option}</option>
+                    ))}
+                  </Select>
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="date"
+                      value={draft.targetDate}
+                      onChange={(event) => updateDraft("targetDate", event.target.value)}
+                      className={`${inlineInputClass} w-[122px]`}
+                    />
+                    <Button size="sm" className="h-7 text-xs" onClick={submitCreate}>保存</Button>
+                    <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setDraft(null)}>取消</Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            )}
             {riskItems.map((item) => (
               <TableRow
                 key={item.id}
                 className={editingCell?.id === item.id ? "align-top bg-primary/5" : "align-top"}
               >
+                {selectionMode && (
+                  <TableCell>
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.includes(item.id)}
+                      onChange={() => toggleSelected(item.id)}
+                      onClick={(event) => event.stopPropagation()}
+                      className="h-3.5 w-3.5 rounded border-border bg-background"
+                    />
+                  </TableCell>
+                )}
                 <TableCell className="whitespace-nowrap font-mono text-xs font-semibold text-muted-foreground">
                   {item.id}
                 </TableCell>

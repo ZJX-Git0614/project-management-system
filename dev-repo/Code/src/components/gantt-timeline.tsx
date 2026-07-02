@@ -75,13 +75,17 @@ const leftPanelWidth = (collapsed: boolean) => (
 
 const inlineFieldClass = cn(
   "h-7 w-full min-w-0 rounded px-2 text-xs shadow-none transition-colors",
-  "border-transparent bg-transparent hover:border-border hover:bg-background focus:border-primary/50 focus:bg-background focus:ring-1 focus:ring-primary/20",
+  "!border-transparent !bg-transparent !ring-0 !ring-offset-0",
+  "hover:!border-border/50 group-hover:!bg-muted/10",
+  "focus:!border-primary/50 focus:!bg-background focus:!ring-1 focus:!ring-primary/20",
   "disabled:cursor-default disabled:opacity-100"
 );
 
 const inlineSelectClass = cn(
-  "h-7 w-full min-w-0 rounded border-transparent bg-transparent px-2 text-xs shadow-none transition-colors",
-  "hover:border-border hover:bg-background focus:border-primary/50 focus:bg-background focus:ring-1 focus:ring-primary/20",
+  "h-7 w-full min-w-0 rounded px-2 text-xs shadow-none transition-colors",
+  "!border-transparent !bg-transparent !ring-0 !ring-offset-0",
+  "hover:!border-border/50 group-hover:!bg-muted/10",
+  "focus:!border-primary/50 focus:!bg-background focus:!ring-1 focus:!ring-primary/20",
   "disabled:cursor-default disabled:opacity-100"
 );
 
