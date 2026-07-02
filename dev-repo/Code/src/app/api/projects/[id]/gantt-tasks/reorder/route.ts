@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getUserFromRequest } from "@/lib/auth";
 import { ensureMutableProject, err, notFound, ok, unauthorized } from "@/lib/api-utils";
+import { renumberProjectGanttTaskCodes } from "@/lib/gantt-task-service";
 
 export async function PUT(
   req: NextRequest,
@@ -33,6 +34,7 @@ export async function PUT(
       })
     ))
   );
+  await renumberProjectGanttTaskCodes(id);
 
   return ok({ message: "甘特任务排序已更新" });
 }

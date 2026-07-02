@@ -132,6 +132,21 @@ export const PERMISSION_TREE = [
     ],
   },
   {
+    key: "project-risk",
+    label: "项目风险管理",
+    type: "group",
+    children: [
+      {
+        key: "risk-register",
+        label: "风险登记册",
+        type: "page",
+        children: [
+          { key: "risk-register:view", label: "查看风险登记册", type: "section" },
+        ],
+      },
+    ],
+  },
+  {
     key: "system-settings",
     label: "系统设置",
     type: "group",
@@ -220,6 +235,7 @@ export const NAV_GROUP_PERMISSION_KEYS = {
   projectList: "project-list",
   projectDashboard: "project-dashboard",
   projectProgress: "project-progress",
+  projectRisk: "project-risk",
   systemSettings: "system-settings",
 } as const;
 
@@ -234,6 +250,7 @@ export const PERMISSION_ROUTE_RULES: PermissionRouteRule[] = [
   { pathname: "/overview", permissionKey: "overview:view" },
   { pathname: "/monthly-items", permissionKey: "monthly-items:view" },
   { pathname: "/weekly-items", permissionKey: "weekly-items:view" },
+  { pathname: "/risk-register", permissionKey: "risk-register:view" },
 ];
 
 const cloneKeys = (keys: readonly string[]) => [...keys];
@@ -246,6 +263,7 @@ export const DEFAULT_PERMISSION_TREE: PermissionTreeState = {
     ...allNodeKeysFor("project-list"),
     ...allNodeKeysFor("project-dashboard"),
     ...allNodeKeysFor("project-progress"),
+    ...allNodeKeysFor("project-risk"),
   ],
   "项目成员": [
     "project-list",
@@ -268,6 +286,9 @@ export const DEFAULT_PERMISSION_TREE: PermissionTreeState = {
     "monthly-items:view",
     "weekly-items",
     "weekly-items:view",
+    "project-risk",
+    "risk-register",
+    "risk-register:view",
   ],
 };
 

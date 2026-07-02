@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useDraftedState } from "@/lib/use-drafted-state";
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { GanttTimeline, type GanttTaskDraft } from "@/components/gantt-timeline";
@@ -17,22 +16,10 @@ interface ProjectGanttPanelProps {
   projectStatus: ProjectStatus;
 }
 
-const EMPTY_DRAFT: GanttTaskDraft = {
-  taskCategory: "",
-  taskName: "",
-  startDate: "",
-  durationDays: 1,
-  predecessorTask: "",
-};
-
 export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPanelProps) => {
   const [tasks, setTasks] = useState<ProjectGanttTask[]>([]);
   const [loading, setLoading] = useState(true);
-  const [newDraft, setNewDraft, clearNewDraft] = useDraftedState<GanttTaskDraft | null>(
-    `pmms.draft.gantt.${projectId}.new`,
-    null
-  );
-  const [newSubmitting, setNewSubmitting] = useState(false);
+  const [creatingParentId, setCreatingParentId] = useState<string | null>(null);
   const [savingTaskId, setSavingTaskId] = useState<string | null>(null);
   const [deletingSelected, setDeletingSelected] = useState(false);
   const [reordering, setReordering] = useState(false);
@@ -49,8 +36,10 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       setLoading(true);
       const data = await api.get<ProjectGanttTask[]>(`/api/projects/${projectId}/gantt-tasks`);
       setTasks(data);
+      return data;
     } catch {
       setTasks([]);
+      return [];
     } finally {
       setLoading(false);
     }
@@ -60,39 +49,30 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     void Promise.resolve().then(fetchTasks);
   }, [fetchTasks]);
 
-  const startCreate = () => {
-    setNewDraft({ ...EMPTY_DRAFT });
-  };
-
-  const cancelCreate = () => {
-    clearNewDraft();
-  };
-
-  const updateNewDraft = <K extends keyof GanttTaskDraft>(key: K, value: GanttTaskDraft[K]) => {
-    setNewDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
-  };
-
-  const submitCreate = async () => {
-    if (!newDraft) return;
-    if (!newDraft.taskCategory.trim() || !newDraft.taskName.trim() || !newDraft.startDate || newDraft.durationDays < 1) {
-      alert("请填写任务类别、任务名称、开始时间，且任务周期 ≥ 1 天");
-      return;
-    }
-    setNewSubmitting(true);
+  const startCreate = async (parentTask?: ProjectGanttTask) => {
+    const parentId = parentTask?.id ?? null;
+    setCreatingParentId(parentId ?? "root");
     try {
-      await api.post(`/api/projects/${projectId}/gantt-tasks`, newDraft);
-      clearNewDraft();
+      const startDate = parentTask?.startDate || new Date().toISOString().slice(0, 10);
+      await api.post(`/api/projects/${projectId}/gantt-tasks`, {
+        parentId,
+        taskCategory: parentTask?.taskCategory ?? "",
+        taskName: "",
+        startDate,
+        durationDays: 1,
+        predecessorTask: "",
+      });
       await fetchTasks();
     } catch (error) {
-      alert(error instanceof Error ? error.message : "保存失败");
+      alert(error instanceof Error ? error.message : "新建失败");
     } finally {
-      setNewSubmitting(false);
+      setCreatingParentId(null);
     }
   };
 
   const handleUpdateTask = async (task: ProjectGanttTask, draft: GanttTaskDraft) => {
-    if (!draft.taskCategory.trim() || !draft.taskName.trim() || !draft.startDate || draft.durationDays < 1) {
-      alert("请填写任务类别、任务名称、开始时间，且任务周期 ≥ 1 天");
+    if (!draft.startDate || draft.durationDays < 1) {
+      alert("请填写开始时间，且任务周期 ≥ 1 天");
       return;
     }
     setSavingTaskId(task.id);
@@ -179,15 +159,11 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
             canCreate={canCreate}
             canDelete={canDelete}
             canEdit={canEdit}
+            creatingParentId={creatingParentId}
             deletingSelected={deletingSelected}
-            newDraft={newDraft}
-            newSubmitting={newSubmitting}
-            onCancelCreate={cancelCreate}
+            onCreateTask={startCreate}
             onDeleteSelected={handleDeleteSelected}
             onReorderTasks={handleReorderTasks}
-            onStartCreate={startCreate}
-            onSubmitCreate={submitCreate}
-            onUpdateNewDraft={updateNewDraft}
             onUpdateTask={handleUpdateTask}
             reordering={reordering}
             savingTaskId={savingTaskId}

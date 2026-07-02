@@ -4,30 +4,22 @@ import { hashSync } from "bcryptjs";
 const prisma = new PrismaClient();
 
 async function main() {
-  // 清空（按依赖顺序）
-  await prisma.permissionTree.deleteMany();
-  await prisma.operationHistory.deleteMany();
-  await prisma.todoItem.deleteMany();
-  await prisma.weeklyItem.deleteMany();
-  await prisma.monthlyItem.deleteMany();
-  await prisma.projectBudgetItem.deleteMany();
-  await prisma.projectBudgetCategory.deleteMany();
-  await prisma.projectBudgetSetting.deleteMany();
-  await prisma.projectGanttTask.deleteMany();
-  await prisma.projectMember.deleteMany();
-  await prisma.project.deleteMany();
-  await prisma.roleConfig.deleteMany();
-  await prisma.systemPerson.deleteMany();
-  await prisma.userAccount.deleteMany();
+  // Seed must be non-destructive: production/business data may already exist.
+  // Only create missing baseline records and never reset project data.
 
   // ============= 角色 =============
-  await prisma.roleConfig.createMany({
-    data: [
-      { roleName: "管理员", allowMultiple: true, systemPreset: true, persons: JSON.stringify([]) },
-      { roleName: "项目经理", allowMultiple: false, systemPreset: true, persons: JSON.stringify([]) },
-      { roleName: "项目成员", allowMultiple: true, systemPreset: true, persons: JSON.stringify([]) },
-    ],
-  });
+  const defaultRoles = [
+    { roleName: "管理员", allowMultiple: true, systemPreset: true, persons: JSON.stringify([]) },
+    { roleName: "项目经理", allowMultiple: false, systemPreset: true, persons: JSON.stringify([]) },
+    { roleName: "项目成员", allowMultiple: true, systemPreset: true, persons: JSON.stringify([]) },
+  ];
+  for (const role of defaultRoles) {
+    await prisma.roleConfig.upsert({
+      where: { roleName: role.roleName },
+      update: {},
+      create: role,
+    });
+  }
 
   // ============= 系统人员库 =============
   const personNames = [
@@ -36,13 +28,17 @@ async function main() {
     "姚家福", "陈顺", "葛福星", "丁荣盛", "孟洵", "高路路", "王凤",
     "郑礼文", "周蕊", "赵佳鑫", "张国庆",
   ];
-  await prisma.systemPerson.createMany({
-    data: personNames.map((personName) => ({ personName })),
-  });
+  for (const personName of personNames) {
+    await prisma.systemPerson.upsert({
+      where: { personName },
+      update: {},
+      create: { personName },
+    });
+  }
 
   // ============= 账号 =============
-  await prisma.userAccount.create({
-    data: {
+  const defaultAccounts = [
+    {
       username: "admin",
       displayName: "系统管理员",
       enabled: true,
@@ -51,9 +47,7 @@ async function main() {
       passwordResetRequired: false,
       passwordUpdatedAt: new Date(),
     },
-  });
-  await prisma.userAccount.create({
-    data: {
+    {
       username: "pm1",
       displayName: "赵佳鑫",
       enabled: true,
@@ -62,9 +56,7 @@ async function main() {
       passwordResetRequired: false,
       passwordUpdatedAt: new Date(),
     },
-  });
-  await prisma.userAccount.create({
-    data: {
+    {
       username: "user1",
       displayName: "张三",
       enabled: true,
@@ -73,16 +65,31 @@ async function main() {
       passwordResetRequired: false,
       passwordUpdatedAt: new Date(),
     },
-  });
+  ];
+  for (const account of defaultAccounts) {
+    await prisma.userAccount.upsert({
+      where: { username: account.username },
+      update: {},
+      create: account,
+    });
+  }
 
   // ============= 权限树 =============
   const { cloneDefaultPermissionTree } = await import("../src/lib/permissions");
-  await prisma.permissionTree.create({
-    data: {
+  await prisma.permissionTree.upsert({
+    where: { id: "default_tree" },
+    update: {},
+    create: {
       id: "default_tree",
       data: JSON.stringify(cloneDefaultPermissionTree()),
     },
   });
+
+  const existingProjectCount = await prisma.project.count();
+  if (existingProjectCount > 0) {
+    console.log("基础数据已补齐；检测到已有项目，跳过示例业务数据导入。");
+    return;
+  }
 
   // ============= 项目 =============
   const project = await prisma.project.create({
@@ -279,8 +286,10 @@ async function main() {
     { title: "结构件图纸会签", description: "与客户确认结构件图纸", dueDate: "2026-07-03", status: "IN_PROGRESS", owner: "李瑞鸣", priority: "NORMAL", progress: 30, health: "AT_RISK", plannedStartDate: "2026-06-30", plannedEndDate: "2026-07-03", issueAndAction: "客户反馈延迟", dependency: "客户技术部确认" },
     { title: "质量检验报告整理", description: "汇总本月质检数据", dueDate: "2026-07-04", status: "PENDING", owner: "潘露萍", priority: "LOW", progress: 0, health: "UNKNOWN", plannedStartDate: "2026-07-02", plannedEndDate: "2026-07-04" },
   ]
-  for (const item of weeklyItems) {
-    await prisma.weeklyItem.create({ data: { projectId: project.id, ...item } })
+  for (const [index, item] of weeklyItems.entries()) {
+    await prisma.weeklyItem.create({
+      data: { projectId: project.id, matterCode: `Matter${String(index + 1).padStart(3, "0")}`, ...item },
+    })
   }
 
   // ============= 待办事项 =============

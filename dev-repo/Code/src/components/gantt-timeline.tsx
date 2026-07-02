@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,21 +24,18 @@ interface GanttTimelineProps {
   canCreate?: boolean;
   canEdit?: boolean;
   canDelete?: boolean;
-  newDraft?: GanttTaskDraft | null;
-  newSubmitting?: boolean;
+  creatingParentId?: string | null;
   savingTaskId?: string | null;
   deletingSelected?: boolean;
   reordering?: boolean;
-  onStartCreate?: () => void;
-  onCancelCreate?: () => void;
-  onUpdateNewDraft?: <K extends keyof GanttTaskDraft>(key: K, value: GanttTaskDraft[K]) => void;
-  onSubmitCreate?: () => void;
+  onCreateTask?: (parentTask?: ProjectGanttTask) => void;
   onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft) => void | Promise<void>;
   onDeleteSelected?: (taskIds: string[]) => void | Promise<void>;
   onReorderTasks?: (taskIds: string[]) => void | Promise<void>;
 }
 
 export type GanttTaskDraft = {
+  parentId?: string | null;
   taskCategory: string;
   taskName: string;
   startDate: string;
@@ -49,10 +47,10 @@ const ROW_HEIGHT = 38;
 const HEADER_HEIGHT = 58;
 const BAR_HEIGHT = 14;
 const MIN_TIMELINE_WIDTH = 860;
-const LEFT_WIDTH_EXPANDED = 900;
-const LEFT_WIDTH_COLLAPSED = 380;
-const LEFT_COLUMNS_EXPANDED = "78px 240px 116px 58px 102px 102px 122px";
-const LEFT_COLUMNS_COLLAPSED = "78px 260px";
+const LEFT_WIDTH_EXPANDED = 940;
+const LEFT_WIDTH_COLLAPSED = 420;
+const LEFT_COLUMNS_EXPANDED = "152px 240px 116px 58px 102px 102px 122px";
+const LEFT_COLUMNS_COLLAPSED = "152px 260px";
 const MIN_ZOOM = 6;
 const MAX_ZOOM = 46;
 const DEFAULT_ZOOM = 18;
@@ -63,7 +61,9 @@ const getTickEvery = (dayWidth: number) => {
   return 14;
 };
 
-const getTaskCode = (index: number) => `Task${String(index + 1).padStart(3, "0")}`;
+const getTaskDepth = (taskCode?: string) => (
+  taskCode ? Math.max(0, taskCode.replace(/^Task/, "").split(".").length - 1) : 0
+);
 
 const taskGridColumns = (collapsed: boolean) => (
   collapsed ? LEFT_COLUMNS_COLLAPSED : LEFT_COLUMNS_EXPANDED
@@ -86,6 +86,7 @@ const inlineSelectClass = cn(
 );
 
 const toTaskDraft = (task: ProjectGanttTask): GanttTaskDraft => ({
+  parentId: task.parentId ?? null,
   taskCategory: task.taskCategory,
   taskName: task.taskName,
   startDate: task.startDate,
@@ -99,6 +100,7 @@ const taskDraftEquals = (task: ProjectGanttTask, draft: GanttTaskDraft) => (
     && task.startDate === draft.startDate
     && task.durationDays === draft.durationDays
     && task.predecessorTask === draft.predecessorTask
+    && (task.parentId ?? null) === (draft.parentId ?? null)
 );
 
 export const GanttTimeline = ({
@@ -107,15 +109,11 @@ export const GanttTimeline = ({
   canCreate = false,
   canEdit = false,
   canDelete = false,
-  newDraft = null,
-  newSubmitting = false,
+  creatingParentId = null,
   savingTaskId = null,
   deletingSelected = false,
   reordering = false,
-  onStartCreate,
-  onCancelCreate,
-  onUpdateNewDraft,
-  onSubmitCreate,
+  onCreateTask,
   onUpdateTask,
   onDeleteSelected,
   onReorderTasks,
@@ -151,6 +149,10 @@ export const GanttTimeline = ({
 
   const reorderTask = (targetTaskId: string) => {
     if (!draggedTaskId || draggedTaskId === targetTaskId) return;
+    const draggedRow = rows.find((row) => row.id === draggedTaskId);
+    const targetRow = rows.find((row) => row.id === targetTaskId);
+    if (!draggedRow || !targetRow) return;
+    if ((draggedRow.parentId ?? null) !== (targetRow.parentId ?? null)) return;
     const taskIds = rows.map((row) => row.id);
     const fromIndex = taskIds.indexOf(draggedTaskId);
     const toIndex = taskIds.indexOf(targetTaskId);
@@ -170,12 +172,8 @@ export const GanttTimeline = ({
         setDayWidth={setDayWidth}
         setDetailsCollapsed={setDetailsCollapsed}
         canCreate={canCreate}
-        newDraft={newDraft}
-        newSubmitting={newSubmitting}
-        onCancelCreate={onCancelCreate}
-        onStartCreate={onStartCreate}
-        onSubmitCreate={onSubmitCreate}
-        onUpdateNewDraft={onUpdateNewDraft}
+        creatingParentId={creatingParentId}
+        onCreateTask={onCreateTask}
       />
     );
   }
@@ -186,11 +184,12 @@ export const GanttTimeline = ({
   const visibleDays = diffDays(visibleStartDate, visibleEndDate) + 1;
   const timelineWidth = Math.max(MIN_TIMELINE_WIDTH, visibleDays * config.dayWidth);
   const leftWidth = leftPanelWidth(detailsCollapsed);
-  const rowOffset = newDraft ? 1 : 0;
-  const bodyHeight = (rows.length + rowOffset) * ROW_HEIGHT;
+  const bodyHeight = rows.length * ROW_HEIGHT;
   const todayOffset = diffDays(visibleStartDate, new Date().toISOString().slice(0, 10));
   const todayX = todayOffset >= 0 && todayOffset < visibleDays ? todayOffset * config.dayWidth : null;
-  const rowById = new Map(rows.map((row, index) => [row.id, { row, index: index + rowOffset }]));
+  const rowById = new Map(
+    rows.map((row, index) => [row.id, { row, index }])
+  );
   const categoryCount = new Set(rows.map((row) => row.taskCategory)).size;
   const criticalCount = rows.filter((row) => row.isCritical).length;
 
@@ -242,16 +241,12 @@ export const GanttTimeline = ({
               variant="outline"
               className="h-7 text-xs"
               onClick={() => {
-                if (newDraft) {
-                  onCancelCreate?.();
-                  return;
-                }
                 setDetailsCollapsed(false);
-                onStartCreate?.();
+                onCreateTask?.();
               }}
-              disabled={newSubmitting}
+              disabled={creatingParentId === "root"}
             >
-              {newDraft ? "取消新增" : "新增任务"}
+              新增任务
             </Button>
           )}
           {canDelete && (
@@ -290,35 +285,30 @@ export const GanttTimeline = ({
           />
 
           <div className="border-r border-border">
-            {newDraft && onUpdateNewDraft && (
-              <DraftTaskRow
-                draft={newDraft}
-                indexLabel="新"
-                isSubmitting={newSubmitting}
-                onSubmit={onSubmitCreate}
-                onUpdate={onUpdateNewDraft}
-                predecessorOptions={[]}
-                collapsed={detailsCollapsed}
-              />
-            )}
             {rows.map((row, index) => (
-              <EditableTaskRow
-                key={row.id}
-                canEdit={canEdit}
-                dragged={draggedTaskId === row.id}
-                index={index}
-                isSaving={savingTaskId === row.id}
-                onDragEnd={() => setDraggedTaskId(null)}
-                onDragEnter={() => reorderTask(row.id)}
-                onDragStart={() => setDraggedTaskId(row.id)}
-                onToggleSelected={() => toggleTaskSelection(row.id)}
-                onUpdateTask={onUpdateTask}
-                predecessorOptions={tasks.filter((task) => task.id !== row.id)}
-                row={row}
-                selected={selectedTaskIds.includes(row.id)}
-                selectionMode={selectionMode}
-                collapsed={detailsCollapsed}
-              />
+                <EditableTaskRow
+                  key={row.id}
+                  canCreate={canCreate}
+                  canEdit={canEdit}
+                  creatingChild={creatingParentId === row.id}
+                  dragged={draggedTaskId === row.id}
+                  index={index}
+                  isSaving={savingTaskId === row.id}
+                  onDragEnd={() => setDraggedTaskId(null)}
+                  onDragEnter={() => reorderTask(row.id)}
+                  onDragStart={() => setDraggedTaskId(row.id)}
+                  onStartChild={() => {
+                    setDetailsCollapsed(false);
+                    onCreateTask?.(row);
+                  }}
+                  onToggleSelected={() => toggleTaskSelection(row.id)}
+                  onUpdateTask={onUpdateTask}
+                  predecessorOptions={tasks.filter((task) => task.id !== row.id && task.taskName.trim())}
+                  row={row}
+                  selected={selectedTaskIds.includes(row.id)}
+                  selectionMode={selectionMode}
+                  collapsed={detailsCollapsed}
+                />
             ))}
           </div>
 
@@ -366,17 +356,19 @@ export const GanttTimeline = ({
               })}
             </svg>
 
-            {rows.map((row, index) => {
+            {rows.map((row) => {
+              const visualIndex = rowById.get(row.id)?.index ?? 0;
               const left = diffDays(visibleStartDate, row.startDate) * config.dayWidth;
               const width = Math.max(config.dayWidth * Math.max(1, row.durationDays), 16);
               const showBarLabel = width >= 72;
+              const barLabel = row.taskName || row.taskCode;
               return (
                 <div
                   key={row.id}
                   className="absolute flex items-center"
                   style={{
                     left,
-                    top: (index + rowOffset) * ROW_HEIGHT + (ROW_HEIGHT - BAR_HEIGHT) / 2,
+                    top: visualIndex * ROW_HEIGHT + (ROW_HEIGHT - BAR_HEIGHT) / 2,
                     width,
                     height: BAR_HEIGHT,
                   }}
@@ -388,11 +380,11 @@ export const GanttTimeline = ({
                         ? "border-destructive/60 bg-destructive"
                         : "border-primary/60 bg-primary"
                     )}
-                    title={`${row.taskName}: ${row.startDate} ~ ${row.endDate}`}
+                    title={`${barLabel}: ${row.startDate} ~ ${row.endDate}`}
                   />
                   {showBarLabel && (
                     <span className="pointer-events-none ml-2 max-w-[180px] truncate text-[11px] text-muted-foreground">
-                      {row.taskName}
+                      {barLabel}
                     </span>
                   )}
                 </div>
@@ -407,28 +399,20 @@ export const GanttTimeline = ({
 
 const EmptyGanttTimeline = ({
   canCreate,
+  creatingParentId,
   dayWidth,
   detailsCollapsed,
   emptyText,
-  newDraft,
-  newSubmitting,
-  onCancelCreate,
-  onStartCreate,
-  onSubmitCreate,
-  onUpdateNewDraft,
+  onCreateTask,
   setDayWidth,
   setDetailsCollapsed,
 }: {
   canCreate: boolean;
+  creatingParentId: string | null;
   dayWidth: number;
   detailsCollapsed: boolean;
   emptyText: string;
-  newDraft: GanttTaskDraft | null;
-  newSubmitting: boolean;
-  onCancelCreate?: () => void;
-  onStartCreate?: () => void;
-  onSubmitCreate?: () => void;
-  onUpdateNewDraft?: <K extends keyof GanttTaskDraft>(key: K, value: GanttTaskDraft[K]) => void;
+  onCreateTask?: (parentTask?: ProjectGanttTask) => void;
   setDayWidth: (value: number) => void;
   setDetailsCollapsed: (value: boolean | ((prev: boolean) => boolean)) => void;
 }) => {
@@ -485,16 +469,12 @@ const EmptyGanttTimeline = ({
               variant="outline"
               className="h-7 text-xs"
               onClick={() => {
-                if (newDraft) {
-                  onCancelCreate?.();
-                  return;
-                }
                 setDetailsCollapsed(false);
-                onStartCreate?.();
+                onCreateTask?.();
               }}
-              disabled={newSubmitting}
+              disabled={creatingParentId === "root"}
             >
-              {newDraft ? "取消新增" : "新增任务"}
+              新增任务
             </Button>
           )}
         </div>
@@ -510,22 +490,8 @@ const EmptyGanttTimeline = ({
             width={timelineWidth}
           />
 
-          <div className="border-r border-border bg-background" style={{ height: bodyHeight }}>
-            {newDraft && onUpdateNewDraft ? (
-              <DraftTaskRow
-                draft={newDraft}
-                indexLabel="新"
-                isSubmitting={newSubmitting}
-                onSubmit={onSubmitCreate}
-                onUpdate={onUpdateNewDraft}
-                predecessorOptions={[]}
-                collapsed={detailsCollapsed}
-              />
-            ) : (
-              <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-                {emptyText}
-              </div>
-            )}
+          <div className="flex items-center justify-center border-r border-border bg-background text-xs text-muted-foreground" style={{ height: bodyHeight }}>
+            {emptyText}
           </div>
           <div className="relative" style={{ width: timelineWidth, height: bodyHeight }}>
             <svg aria-hidden="true" className="absolute inset-0" height={bodyHeight} width={timelineWidth}>
@@ -569,13 +535,16 @@ const TaskGridHeader = ({ collapsed }: { collapsed: boolean }) => (
 );
 
 const EditableTaskRow = ({
+  canCreate,
   canEdit,
+  creatingChild,
   dragged,
   index,
   isSaving,
   onDragEnd,
   onDragEnter,
   onDragStart,
+  onStartChild,
   onToggleSelected,
   onUpdateTask,
   predecessorOptions,
@@ -584,14 +553,17 @@ const EditableTaskRow = ({
   selectionMode,
   collapsed,
 }: {
+  canCreate: boolean;
   canEdit: boolean;
   collapsed: boolean;
+  creatingChild: boolean;
   dragged: boolean;
   index: number;
   isSaving: boolean;
   onDragEnd: () => void;
   onDragEnter: () => void;
   onDragStart: () => void;
+  onStartChild?: () => void;
   onToggleSelected: () => void;
   onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft) => void | Promise<void>;
   predecessorOptions: ProjectGanttTask[];
@@ -601,6 +573,8 @@ const EditableTaskRow = ({
 }) => {
   const [draft, setDraft] = useState<GanttTaskDraft>(() => toTaskDraft(row));
   const taskNameDisplay = row.isCritical ? `${draft.taskName}【关键路径】` : draft.taskName;
+  const taskDepth = getTaskDepth(row.taskCode);
+  const isChildTask = taskDepth > 0;
 
   const updateDraft = <K extends keyof GanttTaskDraft>(key: K, value: GanttTaskDraft[K]) => {
     setDraft((prev) => ({ ...prev, [key]: value }));
@@ -633,11 +607,13 @@ const EditableTaskRow = ({
     <div
       className={cn(
         "group grid cursor-grab items-center gap-2 border-b border-border px-3 text-xs active:cursor-grabbing",
-        index % 2 === 0 ? "bg-background" : "bg-muted/25",
-        row.isCritical && "shadow-[inset_2px_0_0_hsl(var(--destructive))]",
+        isChildTask ? "bg-primary/5" : index % 2 === 0 ? "bg-background" : "bg-muted/25",
+        row.isCritical
+          ? "shadow-[inset_3px_0_0_hsl(var(--destructive))]"
+          : isChildTask && "shadow-[inset_3px_0_0_hsl(var(--primary))]",
         selected && "bg-primary/15",
         dragged && "opacity-50",
-        "hover:bg-primary/5"
+        "hover:bg-primary/10"
       )}
       draggable={canEdit}
       onDragEnd={onDragEnd}
@@ -646,7 +622,7 @@ const EditableTaskRow = ({
       onDragStart={onDragStart}
       style={{ height: ROW_HEIGHT, gridTemplateColumns: taskGridColumns(collapsed) }}
     >
-      <div className="flex min-w-0 items-center gap-2">
+      <div className="flex min-w-0 items-center gap-1.5" style={{ paddingLeft: `${taskDepth * 10}px` }}>
         {selectionMode && (
           <input
             type="checkbox"
@@ -656,9 +632,28 @@ const EditableTaskRow = ({
             onClick={(event) => event.stopPropagation()}
           />
         )}
-        <span className="truncate font-mono text-[11px] font-semibold text-muted-foreground" title={row.id}>
-          {getTaskCode(index)}
+        {isChildTask && <span className="h-px w-3 shrink-0 bg-primary/60" />}
+        <span
+          className="shrink-0 whitespace-nowrap font-mono text-[11px] font-semibold text-muted-foreground"
+          title={row.taskCode || row.id}
+        >
+          {row.taskCode || `Task${index + 1}`}
         </span>
+        {canCreate && (
+          <button
+            type="button"
+            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border border-border bg-background text-muted-foreground opacity-0 transition hover:border-primary/50 hover:text-primary group-hover:opacity-100"
+            onClick={(event) => {
+              event.stopPropagation();
+              onStartChild?.();
+            }}
+            disabled={creatingChild}
+            title={creatingChild ? "创建中..." : "新增子任务"}
+            aria-label={creatingChild ? "创建中..." : "新增子任务"}
+          >
+            <Plus className="h-3 w-3" />
+          </button>
+        )}
       </div>
       <Input
         value={taskNameDisplay}
@@ -667,6 +662,8 @@ const EditableTaskRow = ({
         onKeyDown={handleKeyDown}
         className={cn(inlineFieldClass, "font-medium", row.isCritical && "text-destructive")}
         disabled={!canEdit || isSaving}
+        style={{ paddingLeft: `${8 + taskDepth * 18}px` }}
+        placeholder="任务名称"
         title={taskNameDisplay}
       />
       {!collapsed && (
@@ -678,6 +675,7 @@ const EditableTaskRow = ({
             onKeyDown={handleKeyDown}
             className={inlineFieldClass}
             disabled={!canEdit || isSaving}
+            placeholder="任务类别"
           />
           <Input
             type="number"
@@ -716,78 +714,6 @@ const EditableTaskRow = ({
     </div>
   );
 };
-
-const DraftTaskRow = ({
-  draft,
-  indexLabel,
-  isSubmitting,
-  onSubmit,
-  onUpdate,
-  predecessorOptions,
-  collapsed,
-}: {
-  collapsed: boolean;
-  draft: GanttTaskDraft;
-  indexLabel: string;
-  isSubmitting: boolean;
-  onSubmit?: () => void;
-  onUpdate: <K extends keyof GanttTaskDraft>(key: K, value: GanttTaskDraft[K]) => void;
-  predecessorOptions: ProjectGanttTask[];
-}) => (
-  <div
-    className="grid items-center gap-2 border-b border-border bg-muted/30 px-3 text-xs"
-    style={{ height: ROW_HEIGHT, gridTemplateColumns: taskGridColumns(collapsed) }}
-  >
-    <span className="text-muted-foreground">{indexLabel}</span>
-    <Input
-      value={draft.taskName}
-      onChange={(event) => onUpdate("taskName", event.target.value)}
-      className="h-7 w-full text-xs"
-      placeholder="任务名称"
-      autoFocus={indexLabel === "新"}
-    />
-    {!collapsed && (
-      <>
-        <Input
-          value={draft.taskCategory}
-          onChange={(event) => onUpdate("taskCategory", event.target.value)}
-          className="h-7 w-full text-xs"
-          placeholder="任务类别"
-        />
-        <Input
-          type="number"
-          min={1}
-          value={draft.durationDays}
-          onChange={(event) => onUpdate("durationDays", Number(event.target.value) || 1)}
-          className="h-7 w-full text-xs"
-        />
-        <Input
-          type="date"
-          value={draft.startDate}
-          onChange={(event) => onUpdate("startDate", event.target.value)}
-          className="h-7 w-full text-xs"
-        />
-        <span className="truncate px-2 text-xs text-muted-foreground">保存后计算</span>
-        <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
-          <PredecessorSelect
-            value={draft.predecessorTask}
-            onChange={(value) => onUpdate("predecessorTask", value)}
-            options={predecessorOptions}
-            disabled={predecessorOptions.length === 0}
-          />
-          <Button size="sm" className="h-7 text-xs" onClick={onSubmit} disabled={isSubmitting}>
-            {isSubmitting ? "保存中..." : "保存"}
-          </Button>
-        </div>
-      </>
-    )}
-    {collapsed && (
-      <Button size="sm" className="h-7 justify-self-end text-xs" onClick={onSubmit} disabled={isSubmitting}>
-        {isSubmitting ? "保存中..." : "保存"}
-      </Button>
-    )}
-  </div>
-);
 
 const PredecessorSelect = ({
   disabled,

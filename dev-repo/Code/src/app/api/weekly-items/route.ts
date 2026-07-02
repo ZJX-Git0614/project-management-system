@@ -3,9 +3,10 @@ import { prisma } from "@/lib/prisma"
 import { getUserFromRequest } from "@/lib/auth"
 import { ok, err, unauthorized } from "@/lib/api-utils"
 import { ItemStatus } from "@/domain/enums"
+import { assignMissingWeeklyMatterCodes, nextWeeklyMatterCode } from "@/lib/weekly-matter-codes"
 
 const SERIALIZE_KEYS = [
-  "id", "projectId", "title", "description", "dueDate", "status", "owner", "priority",
+  "id", "projectId", "matterCode", "title", "taskName", "description", "dueDate", "status", "owner", "priority",
   "plannedStartDate", "actualStartDate", "plannedEndDate", "actualEndDate",
   "progress", "health", "issueAndAction", "dependency", "risk", "riskStatus", "remark",
 ] as const
@@ -33,6 +34,23 @@ function buildExtraData(body: Record<string, unknown>): Record<string, unknown> 
   return data
 }
 
+async function ensureWeeklyMatterCodes() {
+  const items = await prisma.weeklyItem.findMany({
+    select: { id: true, matterCode: true, createdAt: true },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  })
+  const codedItems = assignMissingWeeklyMatterCodes(items)
+  await Promise.all(
+    codedItems
+      .filter((item, index) => item.matterCode !== items[index].matterCode)
+      .map((item) => prisma.weeklyItem.update({
+        where: { id: item.id },
+        data: { matterCode: item.matterCode },
+      }))
+  )
+  return codedItems
+}
+
 // GET /api/weekly-items?projectId=&startDate=&endDate=
 export async function GET(req: NextRequest) {
   const user = getUserFromRequest(req)
@@ -50,6 +68,8 @@ export async function GET(req: NextRequest) {
     if (startDate) (where.dueDate as Record<string, string>).gte = startDate
     if (endDate) (where.dueDate as Record<string, string>).lte = endDate
   }
+
+  await ensureWeeklyMatterCodes()
 
   const items = await prisma.weeklyItem.findMany({
     where,
@@ -70,7 +90,7 @@ export async function POST(req: NextRequest) {
 
   const body = await req.json()
   if (!body.projectId) return err("项目 ID 不能为空")
-  if (!body.title) return err("事项标题不能为空")
+  if (!body.title) return err("事项名称不能为空")
   if (!body.dueDate) return err("截止日期不能为空")
   if (!body.owner) return err("负责人不能为空")
 
@@ -80,10 +100,15 @@ export async function POST(req: NextRequest) {
     return err("项目已作废或已完成，不允许添加事项")
   }
 
+  const existingItems = await ensureWeeklyMatterCodes()
+  const matterCode = nextWeeklyMatterCode(existingItems)
+
   const item = await prisma.weeklyItem.create({
     data: {
       projectId: body.projectId,
+      matterCode,
       title: body.title,
+      taskName: body.taskName || "",
       description: body.description || "",
       dueDate: body.dueDate,
       status: body.status || ItemStatus.PENDING,

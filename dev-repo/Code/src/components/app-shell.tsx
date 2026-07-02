@@ -12,6 +12,7 @@ import {
   LogOut,
   Menu,
   Search,
+  ShieldAlert,
   TrendingUp,
   User,
   Wallet,
@@ -318,6 +319,20 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
               active: pathname === "/weekly-items",
               permissionKey: "weekly-items:view",
               icon: <CalendarDays className="size-4" />,
+            },
+          ]
+        : [],
+    },
+    {
+      title: "项目风险管理",
+      items: hasSelectedProject
+        ? [
+            {
+              href: "/risk-register",
+              label: "风险登记册",
+              active: pathname === "/risk-register",
+              permissionKey: "risk-register:view",
+              icon: <ShieldAlert className="size-4" />,
             },
           ]
         : [],

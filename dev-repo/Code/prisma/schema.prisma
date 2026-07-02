@@ -50,6 +50,8 @@ model ProjectGanttTask {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   projectId       String
+  parentId        String?
+  taskCode        String   @default("")
   taskCategory    String
   taskName        String
   startDate       String
@@ -57,7 +59,9 @@ model ProjectGanttTask {
   predecessorTask String   @default("")
   sortOrder       Int      @default(0)
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project  Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  parent   ProjectGanttTask?    @relation("GanttTaskChildren", fields: [parentId], references: [id], onDelete: Cascade)
+  children ProjectGanttTask[]   @relation("GanttTaskChildren")
 }
 
 // 项目预算归属（一个项目可建多个分类，每个分类决定下挂条目的 kind）
@@ -183,7 +187,9 @@ model WeeklyItem {
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
   projectId         String
+  matterCode        String   @default("")
   title             String
+  taskName          String   @default("")
   description       String   @default("")
   dueDate           String
   status            String   @default("PENDING") // PENDING / IN_PROGRESS / DONE

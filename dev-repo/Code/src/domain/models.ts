@@ -20,6 +20,8 @@ export interface Project extends BaseEntity {
 
 export interface ProjectGanttTask extends BaseEntity {
   projectId: string;
+  parentId?: string | null;
+  taskCode: string;
   taskCategory: string;
   taskName: string;
   startDate: string;
@@ -124,7 +126,9 @@ export interface MonthlyItem extends BaseEntity {
 
 export interface WeeklyItem extends BaseEntity {
   projectId: string;
+  matterCode: string;
   title: string;
+  taskName: string;
   description: string;
   dueDate: string;
   status: ItemStatus;

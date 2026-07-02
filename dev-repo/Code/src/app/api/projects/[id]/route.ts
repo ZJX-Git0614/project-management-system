@@ -2,6 +2,7 @@ import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { getUserFromRequest } from "@/lib/auth"
 import { ok, unauthorized, notFound, ensureMutableProject, isStatusTransitionAllowed } from "@/lib/api-utils"
+import { getOrderedGanttTasks, serializeGanttTask } from "@/lib/gantt-task-service"
 
 export async function GET(
   req: NextRequest,
@@ -15,7 +16,6 @@ export async function GET(
     where: { id },
     include: {
       projectMembers: true,
-      ganttTasks: { orderBy: [{ startDate: "asc" }, { createdAt: "asc" }] },
       monthlyItems: { orderBy: { dueDate: "asc" } },
       weeklyItems: { orderBy: { dueDate: "asc" } },
       todos: { orderBy: { createdAt: "desc" } },
@@ -24,6 +24,7 @@ export async function GET(
   })
 
   if (!project) return notFound("项目")
+  const ganttTasks = await getOrderedGanttTasks(id)
 
   return ok({
     ...project,
@@ -33,11 +34,7 @@ export async function GET(
       ...m,
       createdAt: m.createdAt.toISOString(),
     })),
-    ganttTasks: project.ganttTasks.map((task) => ({
-      ...task,
-      createdAt: task.createdAt.toISOString(),
-      updatedAt: task.updatedAt.toISOString(),
-    })),
+    ganttTasks: ganttTasks.map(serializeGanttTask),
     monthlyItems: project.monthlyItems.map((m) => ({
       ...m,
       createdAt: m.createdAt.toISOString(),

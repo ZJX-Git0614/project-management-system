@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, KeyboardEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { Plus, Upload, Search } from "lucide-react";
 import { ItemHealth, ItemRiskStatus, ItemStatus, ItemPriority } from "@/domain/enums";
 import {
@@ -43,7 +43,9 @@ interface Project {
 interface ItemRecord {
   id: string;
   projectId: string;
+  matterCode?: string;
   title: string;
+  taskName?: string;
   description: string;
   dueDate: string;
   status: ItemStatus;
@@ -68,6 +70,29 @@ interface ItemRecord {
     code: string;
     status: string;
   };
+}
+
+type EditableField =
+  | "title"
+  | "description"
+  | "taskName"
+  | "owner"
+  | "priority"
+  | "plannedStartDate"
+  | "actualStartDate"
+  | "plannedEndDate"
+  | "actualEndDate"
+  | "progress"
+  | "status"
+  | "health"
+  | "issueAndAction"
+  | "dependency"
+  | "risk";
+
+interface ProjectGanttTaskOption {
+  id: string;
+  taskName: string;
+  taskCode: string;
 }
 
 interface ItemPanelProps {
@@ -109,6 +134,9 @@ const PROGRESS_BAR_COLOR = (p: number) => {
 };
 
 const DATE_CELL = (s?: string) => (s && s.length >= 10 ? s.slice(5) : "-");
+const INLINE_INPUT_CLASS = "h-7 min-w-0 rounded border-border bg-background px-2 text-xs";
+const INLINE_SELECT_CLASS = "h-7 min-w-0 rounded border-border bg-background px-2 text-xs";
+const INLINE_TEXTAREA_CLASS = "min-h-14 min-w-[160px] resize-y rounded border-border bg-background px-2 py-1 text-xs";
 
 export const ItemPanel = ({
   kind,
@@ -125,12 +153,14 @@ export const ItemPanel = ({
   const { currentProject, currentProjectId } = useCurrentProject();
   const [items, setItems] = useState<ItemRecord[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [taskOptions, setTaskOptions] = useState<ProjectGanttTaskOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
   const [projectFilter, setProjectFilter] = useState("ALL");
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [healthFilter, setHealthFilter] = useState("ALL");
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingField, setEditingField] = useState<EditableField | null>(null);
   const [draft, setDraft, clearDraft] = useDraftedState<ItemRecord | null>(
     `pmms.draft.item.${kind}`,
     null
@@ -139,9 +169,11 @@ export const ItemPanel = ({
 
   const canView = can(`${kind}-items:view`);
   const canCreate = can(`${kind}-items:create`);
-  const canEdit = can(`${kind}-items:edit`);
+  const canEdit = can(`${kind}-items:edit`) || can("account-management:view");
   const canDelete = can(`${kind}-items:delete`);
   const canExport = can(`${kind}-items:export`);
+  const isWeekly = kind === "weekly";
+  const tableColSpan = isWeekly ? 22 : 20;
 
   const fetchData = useCallback(async () => {
     if (!canView) {
@@ -170,7 +202,11 @@ export const ItemPanel = ({
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
     return items.filter((item) => {
-      const hitKw = !kw || item.title.toLowerCase().includes(kw) || item.owner.toLowerCase().includes(kw);
+      const hitKw = !kw
+        || item.title.toLowerCase().includes(kw)
+        || item.owner.toLowerCase().includes(kw)
+        || (item.matterCode ?? "").toLowerCase().includes(kw)
+        || (item.taskName ?? "").toLowerCase().includes(kw);
       const hitProject = projectFilter === "ALL" || item.projectId === projectFilter;
       const hitStatus = statusFilter === "ALL" || item.status === statusFilter;
       const hitHealth = healthFilter === "ALL" || item.health === healthFilter;
@@ -196,6 +232,7 @@ export const ItemPanel = ({
         formatYearMonth(it.plannedStartDate || it.dueDate),
         it.priority === ItemPriority.HIGH || it.priority === ItemPriority.URGENT ? "是" : "否",
         `第${getWeekOfMonth(it.plannedStartDate || it.dueDate) || "-"}周`,
+        ...(isWeekly ? [it.matterCode || "-", it.taskName || "-"] : []),
         it.title,
         p ? `${p.name}(${p.code})` : "-",
         it.owner,
@@ -221,10 +258,13 @@ export const ItemPanel = ({
 
   const openCreate = () => {
     setEditingId(null);
+    setEditingField(null);
     setDraft({
       id: "",
       projectId: currentProjectId ?? "",
+      matterCode: "",
       title: "",
+      taskName: "",
       description: "",
       dueDate: "",
       status: ItemStatus.PENDING,
@@ -254,19 +294,46 @@ export const ItemPanel = ({
     });
   };
 
-  const openEdit = (item: ItemRecord) => {
+  const openEdit = (item: ItemRecord, field: EditableField) => {
+    if (editingId === item.id && draft?.id === item.id) {
+      setEditingField(field);
+      return;
+    }
     setEditingId(item.id);
+    setEditingField(field);
     setDraft({ ...item });
   };
 
   const cancelEdit = () => {
     setEditingId(null);
+    setEditingField(null);
     clearDraft();
   };
 
   const updateDraft = <K extends keyof ItemRecord>(key: K, value: ItemRecord[K]) => {
     setDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
   };
+
+  useEffect(() => {
+    if (!isWeekly || !draft?.projectId) {
+      setTaskOptions([]);
+      return;
+    }
+
+    let alive = true;
+    api.get<ProjectGanttTaskOption[]>(`/api/projects/${draft.projectId}/gantt-tasks`)
+      .then((tasks) => {
+        if (!alive) return;
+        setTaskOptions(tasks.filter((task) => task.taskName.trim()));
+      })
+      .catch(() => {
+        if (alive) setTaskOptions([]);
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [draft?.projectId, isWeekly]);
 
   const submitCreate = async () => {
     if (!draft) return;
@@ -275,13 +342,13 @@ export const ItemPanel = ({
       return;
     }
     if (!draft.title.trim() || !draft.dueDate || draft.progress < 0) {
-      alert("请填写标题、截止日期，且进度 ≥ 0");
+      alert("请填写事项名称、截止日期，且进度 ≥ 0");
       return;
     }
     setSaving(true);
     try {
-      const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, ...payload } = draft;
-      void _id; void _ca; void _ua; void _p;
+      const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, ...payload } = draft;
+      void _id; void _ca; void _ua; void _p; void _mc;
       await api.post(apiPath, payload);
       clearDraft();
       await fetchData();
@@ -294,10 +361,14 @@ export const ItemPanel = ({
 
   const submitEdit = async () => {
     if (!draft) return;
+    if (!draft.title.trim() || !draft.dueDate || draft.progress < 0) {
+      alert("请填写事项名称、截止日期，且进度 ≥ 0");
+      return;
+    }
     setSaving(true);
     try {
-      const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, ...payload } = draft;
-      void _id; void _ca; void _ua; void _p;
+      const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, ...payload } = draft;
+      void _id; void _ca; void _ua; void _p; void _mc;
       await api.put(`${apiPath}/${draft.id}`, payload);
       cancelEdit();
       await fetchData();
@@ -306,6 +377,41 @@ export const ItemPanel = ({
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleEditKeyDown = (
+    event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>
+  ) => {
+    if (event.key !== "Enter") return;
+    if (event.currentTarget instanceof HTMLTextAreaElement && event.shiftKey) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void submitEdit();
+  };
+
+  const handleCreateKeyDown = (
+    event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>
+  ) => {
+    if (event.key !== "Enter") return;
+    if (event.currentTarget instanceof HTMLTextAreaElement && event.shiftKey) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void submitCreate();
+  };
+
+  const editTriggerProps = (item: ItemRecord, field: EditableField) => {
+    if (!canEdit) return {};
+    return {
+      role: "button" as const,
+      tabIndex: 0,
+      onClick: () => openEdit(item, field),
+      onKeyDown: (event: KeyboardEvent<HTMLElement>) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openEdit(item, field);
+        }
+      },
+    };
   };
 
   const handleDelete = async (item: ItemRecord) => {
@@ -342,7 +448,7 @@ export const ItemPanel = ({
         <CardContent className="flex flex-wrap items-end gap-3 p-3">
           <div className="flex-1 min-w-[160px]">
             <label className="mb-1 block text-[11px] font-medium text-muted-foreground">
-              <Search className="mr-1 inline size-3" /> 标题/负责人
+              <Search className="mr-1 inline size-3" /> {isWeekly ? "事项ID/事项名称/任务名称/负责人" : "事项名称/负责人"}
             </label>
             <Input
               value={keyword}
@@ -426,7 +532,9 @@ export const ItemPanel = ({
                   <TableHead className="whitespace-nowrap">月份</TableHead>
                   <TableHead className="whitespace-nowrap">周重点事件</TableHead>
                   <TableHead className="whitespace-nowrap">周</TableHead>
-                  <TableHead className="whitespace-nowrap min-w-[200px]">事项</TableHead>
+                  {isWeekly && <TableHead className="whitespace-nowrap">事项ID</TableHead>}
+                  <TableHead className="whitespace-nowrap min-w-[200px]">事项名称</TableHead>
+                  {isWeekly && <TableHead className="whitespace-nowrap min-w-[140px]">关联任务名称</TableHead>}
                   <TableHead className="whitespace-nowrap min-w-[160px]">归属方</TableHead>
                   <TableHead className="whitespace-nowrap">责任人</TableHead>
                   <TableHead className="whitespace-nowrap">优先级</TableHead>
@@ -445,26 +553,308 @@ export const ItemPanel = ({
                 </TableRow>
               </TableHeader>
               <TableBody>
+                {draft && editingId === null && (
+                  <TableRow className="h-8 align-top bg-primary/5">
+                    <TableCell className="text-xs">{formatYearMonth(draft.plannedStartDate || draft.dueDate)}</TableCell>
+                    <TableCell className="text-xs">
+                      {draft.priority === ItemPriority.HIGH || draft.priority === ItemPriority.URGENT ? "是" : "否"}
+                    </TableCell>
+                    <TableCell className="text-xs">第{getWeekOfMonth(draft.plannedStartDate || draft.dueDate) || "-"}周</TableCell>
+                    {isWeekly && (
+                      <TableCell className="whitespace-nowrap font-mono text-xs font-semibold text-muted-foreground">
+                        保存后生成
+                      </TableCell>
+                    )}
+                    <TableCell>
+                      <div className="flex min-w-[220px] flex-col gap-1">
+                        <Input
+                          value={draft.title}
+                          onChange={(e) => updateDraft("title", e.target.value)}
+                          onKeyDown={handleCreateKeyDown}
+                          className={INLINE_INPUT_CLASS}
+                          placeholder="事项名称"
+                          autoFocus
+                        />
+                        <Textarea
+                          value={draft.description}
+                          onChange={(e) => updateDraft("description", e.target.value)}
+                          onKeyDown={handleCreateKeyDown}
+                          className={INLINE_TEXTAREA_CLASS}
+                          placeholder="事项描述"
+                        />
+                      </div>
+                    </TableCell>
+                    {isWeekly && (
+                      <TableCell className="text-xs">
+                        <Select
+                          value={draft.taskName ?? ""}
+                          onChange={(e) => updateDraft("taskName", e.target.value)}
+                          onKeyDown={handleCreateKeyDown}
+                          className={INLINE_SELECT_CLASS}
+                        >
+                          <option value="">不关联</option>
+                          {taskOptions.map((task) => (
+                            <option key={task.id} value={task.taskName}>
+                              {task.taskCode ? `${task.taskCode} · ${task.taskName}` : task.taskName}
+                            </option>
+                          ))}
+                        </Select>
+                      </TableCell>
+                    )}
+                    <TableCell className="text-xs">
+                      {currentProject ? (
+                        <>
+                          <div className="font-medium">{currentProject.name}</div>
+                          <div className="text-[10px] text-muted-foreground">{currentProject.code}</div>
+                        </>
+                      ) : "-"}
+                    </TableCell>
+                    <TableCell className="text-xs">
+                      <Input
+                        value={draft.owner}
+                        onChange={(e) => updateDraft("owner", e.target.value)}
+                        onKeyDown={handleCreateKeyDown}
+                        className={`${INLINE_INPUT_CLASS} w-[96px]`}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Select
+                        value={draft.priority}
+                        onChange={(e) => updateDraft("priority", e.target.value as ItemPriority)}
+                        onKeyDown={handleCreateKeyDown}
+                        className={`${INLINE_SELECT_CLASS} w-[76px]`}
+                      >
+                        {Object.values(ItemPriority).map((priority) => (
+                          <option key={priority} value={priority}>{ITEM_PRIORITY_LABEL[priority]}</option>
+                        ))}
+                      </Select>
+                    </TableCell>
+                    <TableCell className="text-xs whitespace-nowrap">
+                      <Input
+                        type="date"
+                        value={formatDateInput(draft.plannedStartDate)}
+                        onChange={(e) => updateDraft("plannedStartDate", e.target.value)}
+                        onKeyDown={handleCreateKeyDown}
+                        className={`${INLINE_INPUT_CLASS} w-[122px]`}
+                      />
+                    </TableCell>
+                    <TableCell className="text-xs whitespace-nowrap">
+                      <Input
+                        type="date"
+                        value={formatDateInput(draft.actualStartDate)}
+                        onChange={(e) => updateDraft("actualStartDate", e.target.value)}
+                        onKeyDown={handleCreateKeyDown}
+                        className={`${INLINE_INPUT_CLASS} w-[122px]`}
+                      />
+                    </TableCell>
+                    <TableCell className="text-xs whitespace-nowrap">
+                      <Input
+                        type="date"
+                        value={formatDateInput(draft.plannedEndDate)}
+                        onChange={(e) => {
+                          updateDraft("plannedEndDate", e.target.value);
+                          updateDraft("dueDate", e.target.value || draft.dueDate);
+                        }}
+                        onKeyDown={handleCreateKeyDown}
+                        className={`${INLINE_INPUT_CLASS} w-[122px]`}
+                      />
+                    </TableCell>
+                    <TableCell className="text-xs whitespace-nowrap">
+                      <Input
+                        type="date"
+                        value={formatDateInput(draft.actualEndDate)}
+                        onChange={(e) => updateDraft("actualEndDate", e.target.value)}
+                        onKeyDown={handleCreateKeyDown}
+                        className={`${INLINE_INPUT_CLASS} w-[122px]`}
+                      />
+                    </TableCell>
+                    <TableCell className="text-xs whitespace-nowrap">-</TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1">
+                        <Input
+                          type="number"
+                          min={0}
+                          max={100}
+                          value={draft.progress}
+                          onChange={(e) => updateDraft("progress", Math.min(100, Math.max(0, Number.parseInt(e.target.value, 10) || 0)))}
+                          onKeyDown={handleCreateKeyDown}
+                          className={`${INLINE_INPUT_CLASS} w-[64px]`}
+                        />
+                        <span className="text-[10px] text-muted-foreground">%</span>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <Select
+                        value={draft.status}
+                        onChange={(e) => updateDraft("status", e.target.value as ItemStatus)}
+                        onKeyDown={handleCreateKeyDown}
+                        className={`${INLINE_SELECT_CLASS} w-[88px]`}
+                      >
+                        {Object.values(ItemStatus).map((status) => (
+                          <option key={status} value={status}>{ITEM_STATUS_LABEL[status]}</option>
+                        ))}
+                      </Select>
+                    </TableCell>
+                    <TableCell>
+                      <Select
+                        value={draft.health}
+                        onChange={(e) => updateDraft("health", e.target.value as ItemHealth)}
+                        onKeyDown={handleCreateKeyDown}
+                        className={`${INLINE_SELECT_CLASS} w-[88px]`}
+                      >
+                        {Object.values(ItemHealth).map((health) => (
+                          <option key={health} value={health}>{ITEM_HEALTH_LABEL[health]}</option>
+                        ))}
+                      </Select>
+                    </TableCell>
+                    <TableCell className="text-xs whitespace-pre-wrap break-words max-w-[200px]">
+                      <Textarea
+                        value={draft.issueAndAction}
+                        onChange={(e) => updateDraft("issueAndAction", e.target.value)}
+                        onKeyDown={handleCreateKeyDown}
+                        className={INLINE_TEXTAREA_CLASS}
+                      />
+                    </TableCell>
+                    <TableCell className="text-xs whitespace-pre-wrap break-words max-w-[160px]">
+                      <Textarea
+                        value={draft.dependency}
+                        onChange={(e) => updateDraft("dependency", e.target.value)}
+                        onKeyDown={handleCreateKeyDown}
+                        className={INLINE_TEXTAREA_CLASS}
+                      />
+                    </TableCell>
+                    <TableCell className="text-xs whitespace-pre-wrap break-words max-w-[160px]">
+                      <Textarea
+                        value={draft.risk}
+                        onChange={(e) => updateDraft("risk", e.target.value)}
+                        onKeyDown={handleCreateKeyDown}
+                        className={INLINE_TEXTAREA_CLASS}
+                      />
+                    </TableCell>
+                    <TableCell className="sticky right-0 bg-card">
+                      <div className="flex items-center gap-1">
+                        <Button
+                          size="sm"
+                          className="h-7 text-xs"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void submitCreate();
+                          }}
+                          disabled={saving}
+                        >
+                          {saving ? "保存中..." : "保存"}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-xs"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            cancelEdit();
+                          }}
+                          disabled={saving}
+                        >
+                          取消
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )}
                 {sorted.map((item) => {
-                  const monthAnchor = item.plannedStartDate || item.dueDate;
-                  const startDev = diffDays(item.plannedStartDate, item.actualStartDate);
-                  const endDev = diffDays(item.plannedEndDate, item.actualEndDate);
+                  const editing = editingId === item.id && draft?.id === item.id;
+                  const row = editing && draft ? draft : item;
+                  const monthAnchor = row.plannedStartDate || row.dueDate;
+                  const startDev = diffDays(row.plannedStartDate, row.actualStartDate);
+                  const endDev = diffDays(row.plannedEndDate, row.actualEndDate);
                   const showDev = startDev !== null || endDev !== null;
                   const devText = (n: number | null) =>
                     n === null ? null : n === 0 ? "0" : n > 0 ? `+${n}天` : `${n}天`;
+                  const isEditingField = (field: EditableField) => editing && editingField === field;
                   return (
-                    <TableRow key={item.id} className="h-8 align-top">
+                    <TableRow
+                      key={item.id}
+                      className={
+                        editing
+                          ? "h-8 align-top bg-primary/5"
+                          : canEdit
+                            ? "h-8 align-top hover:bg-primary/5"
+                            : "h-8 align-top"
+                      }
+                    >
                       <TableCell className="text-xs">{formatYearMonth(monthAnchor)}</TableCell>
                       <TableCell className="text-xs">
-                        {item.priority === ItemPriority.HIGH || item.priority === ItemPriority.URGENT ? "是" : "否"}
+                        {row.priority === ItemPriority.HIGH || row.priority === ItemPriority.URGENT ? "是" : "否"}
                       </TableCell>
                       <TableCell className="text-xs">第{getWeekOfMonth(monthAnchor) || "-"}周</TableCell>
+                      {isWeekly && (
+                        <TableCell className="whitespace-nowrap font-mono text-xs font-semibold text-muted-foreground">
+                          {row.matterCode || "-"}
+                        </TableCell>
+                      )}
                       <TableCell>
-                        <div className="font-medium text-xs leading-tight">{item.title}</div>
-                        {item.description && (
-                          <div className="text-[10px] text-muted-foreground line-clamp-1">{item.description}</div>
+                        {isEditingField("title") ? (
+                          <div className="min-w-[220px]">
+                            <Input
+                              value={row.title}
+                              onChange={(e) => updateDraft("title", e.target.value)}
+                              onKeyDown={handleEditKeyDown}
+                              className={INLINE_INPUT_CLASS}
+                              placeholder="事项名称"
+                              autoFocus
+                            />
+                          </div>
+                        ) : isEditingField("description") ? (
+                          <div className="min-w-[220px]">
+                            <Textarea
+                              value={row.description}
+                              onChange={(e) => updateDraft("description", e.target.value)}
+                              onKeyDown={handleEditKeyDown}
+                              className={INLINE_TEXTAREA_CLASS}
+                              placeholder="事项描述"
+                              autoFocus
+                            />
+                          </div>
+                        ) : (
+                          <>
+                            <div
+                              className={canEdit ? "cursor-pointer rounded px-1 py-0.5 font-medium text-xs leading-tight hover:bg-primary/10" : "font-medium text-xs leading-tight"}
+                              {...editTriggerProps(item, "title")}
+                            >
+                              {item.title}
+                            </div>
+                            {item.description && (
+                              <div
+                                className={canEdit ? "cursor-pointer rounded px-1 py-0.5 text-[10px] text-muted-foreground line-clamp-1 hover:bg-primary/10" : "text-[10px] text-muted-foreground line-clamp-1"}
+                                {...editTriggerProps(item, "description")}
+                              >
+                                {item.description}
+                              </div>
+                            )}
+                          </>
                         )}
                       </TableCell>
+                      {isWeekly && (
+                        <TableCell className={canEdit ? "cursor-pointer text-xs hover:bg-primary/5" : "text-xs"} {...editTriggerProps(item, "taskName")}>
+                          {isEditingField("taskName") ? (
+                            <Select
+                              value={row.taskName ?? ""}
+                              onChange={(e) => updateDraft("taskName", e.target.value)}
+                              onKeyDown={handleEditKeyDown}
+                              className={INLINE_SELECT_CLASS}
+                              autoFocus
+                            >
+                              <option value="">不关联</option>
+                              {taskOptions.map((task) => (
+                                <option key={task.id} value={task.taskName}>
+                                  {task.taskCode ? `${task.taskCode} · ${task.taskName}` : task.taskName}
+                                </option>
+                              ))}
+                            </Select>
+                          ) : (
+                            item.taskName || "-"
+                          )}
+                        </TableCell>
+                      )}
                       <TableCell className="text-xs">
                         {item.project ? (
                           <>
@@ -473,16 +863,89 @@ export const ItemPanel = ({
                           </>
                         ) : "-"}
                       </TableCell>
-                      <TableCell className="text-xs">{item.owner}</TableCell>
-                      <TableCell>
-                        <Badge variant={PRIORITY_BADGE_VARIANT[item.priority] ?? "default"}>
-                          {ITEM_PRIORITY_LABEL[item.priority as ItemPriority] ?? item.priority}
-                        </Badge>
+                      <TableCell className={canEdit ? "cursor-pointer text-xs hover:bg-primary/5" : "text-xs"} {...editTriggerProps(item, "owner")}>
+                        {isEditingField("owner") ? (
+                          <Input
+                            value={row.owner}
+                            onChange={(e) => updateDraft("owner", e.target.value)}
+                            onKeyDown={handleEditKeyDown}
+                            className={`${INLINE_INPUT_CLASS} w-[96px]`}
+                            autoFocus
+                          />
+                        ) : (
+                          item.owner
+                        )}
                       </TableCell>
-                      <TableCell className="text-xs whitespace-nowrap">{DATE_CELL(item.plannedStartDate)}</TableCell>
-                      <TableCell className="text-xs whitespace-nowrap">{DATE_CELL(item.actualStartDate)}</TableCell>
-                      <TableCell className="text-xs whitespace-nowrap">{DATE_CELL(item.plannedEndDate)}</TableCell>
-                      <TableCell className="text-xs whitespace-nowrap">{DATE_CELL(item.actualEndDate)}</TableCell>
+                      <TableCell className={canEdit ? "cursor-pointer hover:bg-primary/5" : undefined} {...editTriggerProps(item, "priority")}>
+                        {isEditingField("priority") ? (
+                          <Select
+                            value={row.priority}
+                            onChange={(e) => updateDraft("priority", e.target.value as ItemPriority)}
+                            onKeyDown={handleEditKeyDown}
+                            className={`${INLINE_SELECT_CLASS} w-[76px]`}
+                            autoFocus
+                          >
+                            {Object.values(ItemPriority).map((priority) => (
+                              <option key={priority} value={priority}>{ITEM_PRIORITY_LABEL[priority]}</option>
+                            ))}
+                          </Select>
+                        ) : (
+                          <Badge variant={PRIORITY_BADGE_VARIANT[item.priority] ?? "default"}>
+                            {ITEM_PRIORITY_LABEL[item.priority as ItemPriority] ?? item.priority}
+                          </Badge>
+                        )}
+                      </TableCell>
+                      <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-nowrap hover:bg-primary/5" : "text-xs whitespace-nowrap"} {...editTriggerProps(item, "plannedStartDate")}>
+                        {isEditingField("plannedStartDate") ? (
+                          <Input
+                            type="date"
+                            value={formatDateInput(row.plannedStartDate)}
+                            onChange={(e) => updateDraft("plannedStartDate", e.target.value)}
+                            onKeyDown={handleEditKeyDown}
+                            className={`${INLINE_INPUT_CLASS} w-[122px]`}
+                            autoFocus
+                          />
+                        ) : DATE_CELL(item.plannedStartDate)}
+                      </TableCell>
+                      <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-nowrap hover:bg-primary/5" : "text-xs whitespace-nowrap"} {...editTriggerProps(item, "actualStartDate")}>
+                        {isEditingField("actualStartDate") ? (
+                          <Input
+                            type="date"
+                            value={formatDateInput(row.actualStartDate)}
+                            onChange={(e) => updateDraft("actualStartDate", e.target.value)}
+                            onKeyDown={handleEditKeyDown}
+                            className={`${INLINE_INPUT_CLASS} w-[122px]`}
+                            autoFocus
+                          />
+                        ) : DATE_CELL(item.actualStartDate)}
+                      </TableCell>
+                      <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-nowrap hover:bg-primary/5" : "text-xs whitespace-nowrap"} {...editTriggerProps(item, "plannedEndDate")}>
+                        {isEditingField("plannedEndDate") ? (
+                          <Input
+                            type="date"
+                            value={formatDateInput(row.plannedEndDate)}
+                            onChange={(e) => {
+                              updateDraft("plannedEndDate", e.target.value);
+                              updateDraft("dueDate", e.target.value || row.dueDate);
+                            }}
+                            onKeyDown={handleEditKeyDown}
+                            className={`${INLINE_INPUT_CLASS} w-[122px]`}
+                            autoFocus
+                          />
+                        ) : DATE_CELL(item.plannedEndDate)}
+                      </TableCell>
+                      <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-nowrap hover:bg-primary/5" : "text-xs whitespace-nowrap"} {...editTriggerProps(item, "actualEndDate")}>
+                        {isEditingField("actualEndDate") ? (
+                          <Input
+                            type="date"
+                            value={formatDateInput(row.actualEndDate)}
+                            onChange={(e) => updateDraft("actualEndDate", e.target.value)}
+                            onKeyDown={handleEditKeyDown}
+                            className={`${INLINE_INPUT_CLASS} w-[122px]`}
+                            autoFocus
+                          />
+                        ) : DATE_CELL(item.actualEndDate)}
+                      </TableCell>
                       <TableCell className="text-xs whitespace-nowrap">
                         {showDev ? (
                           <div className="flex flex-col leading-tight">
@@ -493,47 +956,148 @@ export const ItemPanel = ({
                           "-"
                         )}
                       </TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-1">
-                          <div className="h-1.5 w-12 overflow-hidden rounded-full bg-muted">
-                            <div
-                              className={`h-full ${PROGRESS_BAR_COLOR(item.progress)}`}
-                              style={{ width: `${Math.min(100, Math.max(0, item.progress))}%` }}
+                      <TableCell className={canEdit ? "cursor-pointer hover:bg-primary/5" : undefined} {...editTriggerProps(item, "progress")}>
+                        {isEditingField("progress") ? (
+                          <div className="flex items-center gap-1">
+                            <Input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={row.progress}
+                              onChange={(e) => updateDraft("progress", Math.min(100, Math.max(0, Number.parseInt(e.target.value, 10) || 0)))}
+                              onKeyDown={handleEditKeyDown}
+                              className={`${INLINE_INPUT_CLASS} w-[64px]`}
+                              autoFocus
                             />
+                            <span className="text-[10px] text-muted-foreground">%</span>
                           </div>
-                          <span className="text-[10px] text-muted-foreground tabular-nums">{item.progress}%</span>
-                        </div>
+                        ) : (
+                          <div className="flex items-center gap-1">
+                            <div className="h-1.5 w-12 overflow-hidden rounded-full bg-muted">
+                              <div
+                                className={`h-full ${PROGRESS_BAR_COLOR(item.progress)}`}
+                                style={{ width: `${Math.min(100, Math.max(0, item.progress))}%` }}
+                              />
+                            </div>
+                            <span className="text-[10px] text-muted-foreground tabular-nums">{item.progress}%</span>
+                          </div>
+                        )}
                       </TableCell>
-                      <TableCell>
-                        <Badge variant={STATUS_BADGE_VARIANT[item.status] ?? "default"}>
-                          {ITEM_STATUS_LABEL[item.status as ItemStatus] ?? item.status}
-                        </Badge>
+                      <TableCell className={canEdit ? "cursor-pointer hover:bg-primary/5" : undefined} {...editTriggerProps(item, "status")}>
+                        {isEditingField("status") ? (
+                          <Select
+                            value={row.status}
+                            onChange={(e) => updateDraft("status", e.target.value as ItemStatus)}
+                            onKeyDown={handleEditKeyDown}
+                            className={`${INLINE_SELECT_CLASS} w-[88px]`}
+                            autoFocus
+                          >
+                            {Object.values(ItemStatus).map((status) => (
+                              <option key={status} value={status}>{ITEM_STATUS_LABEL[status]}</option>
+                            ))}
+                          </Select>
+                        ) : (
+                          <Badge variant={STATUS_BADGE_VARIANT[item.status] ?? "default"}>
+                            {ITEM_STATUS_LABEL[item.status as ItemStatus] ?? item.status}
+                          </Badge>
+                        )}
                       </TableCell>
-                      <TableCell>
-                        <Badge variant={HEALTH_BADGE_VARIANT[item.health] ?? "default"}>
-                          {ITEM_HEALTH_LABEL[item.health as ItemHealth] ?? item.health}
-                        </Badge>
+                      <TableCell className={canEdit ? "cursor-pointer hover:bg-primary/5" : undefined} {...editTriggerProps(item, "health")}>
+                        {isEditingField("health") ? (
+                          <Select
+                            value={row.health}
+                            onChange={(e) => updateDraft("health", e.target.value as ItemHealth)}
+                            onKeyDown={handleEditKeyDown}
+                            className={`${INLINE_SELECT_CLASS} w-[88px]`}
+                            autoFocus
+                          >
+                            {Object.values(ItemHealth).map((health) => (
+                              <option key={health} value={health}>{ITEM_HEALTH_LABEL[health]}</option>
+                            ))}
+                          </Select>
+                        ) : (
+                          <Badge variant={HEALTH_BADGE_VARIANT[item.health] ?? "default"}>
+                            {ITEM_HEALTH_LABEL[item.health as ItemHealth] ?? item.health}
+                          </Badge>
+                        )}
                       </TableCell>
-                      <TableCell className="text-xs whitespace-pre-wrap break-words max-w-[200px]">
-                        {item.issueAndAction || "-"}
+                      <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-pre-wrap break-words max-w-[200px] hover:bg-primary/5" : "text-xs whitespace-pre-wrap break-words max-w-[200px]"} {...editTriggerProps(item, "issueAndAction")}>
+                        {isEditingField("issueAndAction") ? (
+                          <Textarea
+                            value={row.issueAndAction}
+                            onChange={(e) => updateDraft("issueAndAction", e.target.value)}
+                            onKeyDown={handleEditKeyDown}
+                            className={INLINE_TEXTAREA_CLASS}
+                            autoFocus
+                          />
+                        ) : item.issueAndAction || "-"}
                       </TableCell>
-                      <TableCell className="text-xs whitespace-pre-wrap break-words max-w-[160px]">
-                        {item.dependency || "-"}
+                      <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-pre-wrap break-words max-w-[160px] hover:bg-primary/5" : "text-xs whitespace-pre-wrap break-words max-w-[160px]"} {...editTriggerProps(item, "dependency")}>
+                        {isEditingField("dependency") ? (
+                          <Textarea
+                            value={row.dependency}
+                            onChange={(e) => updateDraft("dependency", e.target.value)}
+                            onKeyDown={handleEditKeyDown}
+                            className={INLINE_TEXTAREA_CLASS}
+                            autoFocus
+                          />
+                        ) : item.dependency || "-"}
                       </TableCell>
-                      <TableCell className="text-xs whitespace-pre-wrap break-words max-w-[160px]">
-                        {item.risk || "-"}
+                      <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-pre-wrap break-words max-w-[160px] hover:bg-primary/5" : "text-xs whitespace-pre-wrap break-words max-w-[160px]"} {...editTriggerProps(item, "risk")}>
+                        {isEditingField("risk") ? (
+                          <Textarea
+                            value={row.risk}
+                            onChange={(e) => updateDraft("risk", e.target.value)}
+                            onKeyDown={handleEditKeyDown}
+                            className={INLINE_TEXTAREA_CLASS}
+                            autoFocus
+                          />
+                        ) : item.risk || "-"}
                       </TableCell>
                       <TableCell className="sticky right-0 bg-card">
                         <div className="flex items-center gap-1">
-                          {canEdit && (
-                            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => openEdit(item)}>
-                              编辑
-                            </Button>
-                          )}
-                          {canDelete && (
-                            <Button variant="ghost" size="sm" className="h-7 text-xs text-destructive" onClick={() => handleDelete(item)}>
-                              删除
-                            </Button>
+                          {editing ? (
+                            <>
+                              <Button
+                                size="sm"
+                                className="h-7 text-xs"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void submitEdit();
+                                }}
+                                disabled={saving}
+                              >
+                                {saving ? "保存中..." : "保存"}
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-7 text-xs"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  cancelEdit();
+                                }}
+                                disabled={saving}
+                              >
+                                取消
+                              </Button>
+                            </>
+                          ) : (
+                            <>
+                              {canDelete && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 text-xs text-destructive"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void handleDelete(item);
+                                  }}
+                                >
+                                  删除
+                                </Button>
+                              )}
+                            </>
                           )}
                         </div>
                       </TableCell>
@@ -542,7 +1106,7 @@ export const ItemPanel = ({
                 })}
                 {sorted.length === 0 && !loading && (
                   <TableRow>
-                    <TableCell colSpan={20} className="h-32 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={tableColSpan} className="h-32 text-center text-sm text-muted-foreground">
                       {items.length === 0
                         ? `时间窗口内暂无${title}。${
                             canCreate
@@ -557,7 +1121,7 @@ export const ItemPanel = ({
                 )}
                 {loading && (
                   <TableRow>
-                    <TableCell colSpan={20} className="h-24 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={tableColSpan} className="h-24 text-center text-sm text-muted-foreground">
                       加载中...
                     </TableCell>
                   </TableRow>
@@ -568,6 +1132,7 @@ export const ItemPanel = ({
         </CardContent>
       </Card>
 
+      {/* Legacy create card replaced by the inline table row above.
       {draft && editingId === null && (
         <Card>
           <CardHeader className="pb-2">
@@ -592,7 +1157,28 @@ export const ItemPanel = ({
                 <Input value={draft.owner} onChange={(e) => updateDraft("owner", e.target.value)} className="h-8 text-xs" required />
               </FormField>
             </div>
-            <FormField label="事项标题" required>
+            {isWeekly && (
+              <div className="grid grid-cols-2 gap-3">
+                <FormField label="事项ID">
+                  <Input value="保存后自动生成" disabled className="h-8 text-xs font-mono" />
+                </FormField>
+                <FormField label="关联任务名称">
+                  <Select
+                    value={draft.taskName ?? ""}
+                    onChange={(e) => updateDraft("taskName", e.target.value)}
+                    className="h-8 text-xs"
+                  >
+                    <option value="">不关联</option>
+                    {taskOptions.map((task) => (
+                      <option key={task.id} value={task.taskName}>
+                        {task.taskCode ? `${task.taskCode} · ${task.taskName}` : task.taskName}
+                      </option>
+                    ))}
+                  </Select>
+                </FormField>
+              </div>
+            )}
+            <FormField label="事项名称" required>
               <Input value={draft.title} onChange={(e: ChangeEvent<HTMLInputElement>) => updateDraft("title", e.target.value)} className="h-8 text-xs" required />
             </FormField>
             <FormField label="事项描述">
@@ -715,8 +1301,9 @@ export const ItemPanel = ({
           </CardContent>
         </Card>
       )}
+      */}
 
-      {draft && editingId !== null && (
+      {/* Legacy full-card edit form replaced by inline row editing.
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm">编辑事项</CardTitle>
@@ -730,7 +1317,28 @@ export const ItemPanel = ({
                 <Input value={draft.owner} onChange={(e) => updateDraft("owner", e.target.value)} className="h-8 text-xs" required />
               </FormField>
             </div>
-            <FormField label="事项标题" required>
+            {isWeekly && (
+              <div className="grid grid-cols-2 gap-3">
+                <FormField label="事项ID">
+                  <Input value={draft.matterCode || "-"} disabled className="h-8 text-xs font-mono" />
+                </FormField>
+                <FormField label="关联任务名称">
+                  <Select
+                    value={draft.taskName ?? ""}
+                    onChange={(e) => updateDraft("taskName", e.target.value)}
+                    className="h-8 text-xs"
+                  >
+                    <option value="">不关联</option>
+                    {taskOptions.map((task) => (
+                      <option key={task.id} value={task.taskName}>
+                        {task.taskCode ? `${task.taskCode} · ${task.taskName}` : task.taskName}
+                      </option>
+                    ))}
+                  </Select>
+                </FormField>
+              </div>
+            )}
+            <FormField label="事项名称" required>
               <Input value={draft.title} onChange={(e: ChangeEvent<HTMLInputElement>) => updateDraft("title", e.target.value)} className="h-8 text-xs" required />
             </FormField>
             <FormField label="事项描述">
@@ -852,7 +1460,7 @@ export const ItemPanel = ({
             </div>
           </CardContent>
         </Card>
-      )}
+      */}
     </div>
   );
 };

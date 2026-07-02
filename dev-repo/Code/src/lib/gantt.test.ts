@@ -13,6 +13,8 @@ const baseTask = (overrides: Partial<ProjectGanttTask>): ProjectGanttTask => ({
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
   projectId: "project-1",
+  parentId: null,
+  taskCode: "Task1",
   taskCategory: "设计",
   taskName: "方案设计",
   startDate: "2026-06-01",

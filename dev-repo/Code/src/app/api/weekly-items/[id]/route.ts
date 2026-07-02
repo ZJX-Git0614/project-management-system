@@ -4,7 +4,7 @@ import { getUserFromRequest } from "@/lib/auth"
 import { ok, err, unauthorized, notFound } from "@/lib/api-utils"
 
 const SERIALIZE_KEYS = [
-  "id", "projectId", "title", "description", "dueDate", "status", "owner", "priority",
+  "id", "projectId", "matterCode", "title", "taskName", "description", "dueDate", "status", "owner", "priority",
   "plannedStartDate", "actualStartDate", "plannedEndDate", "actualEndDate",
   "progress", "health", "issueAndAction", "dependency", "risk", "riskStatus", "remark",
 ] as const
@@ -20,7 +20,7 @@ function serializeItem(item: Record<string, unknown>) {
 }
 
 const PUTTABLE_FIELDS: readonly string[] = [
-  "title", "description", "dueDate", "status", "owner", "priority",
+  "title", "taskName", "description", "dueDate", "status", "owner", "priority",
   "plannedStartDate", "actualStartDate", "plannedEndDate", "actualEndDate",
   "progress", "health", "issueAndAction", "dependency", "risk", "riskStatus", "remark",
 ]

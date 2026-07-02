@@ -3,23 +3,7 @@ import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getUserFromRequest } from "@/lib/auth";
 import { ensureMutableProject, err, notFound, ok, unauthorized } from "@/lib/api-utils";
-
-const serializeTask = (task: {
-  id: string;
-  createdAt: Date;
-  updatedAt: Date;
-  projectId: string;
-  taskCategory: string;
-  taskName: string;
-  startDate: string;
-  durationDays: number;
-  predecessorTask: string;
-  sortOrder: number;
-}) => ({
-  ...task,
-  createdAt: task.createdAt.toISOString(),
-  updatedAt: task.updatedAt.toISOString(),
-});
+import { serializeGanttTask } from "@/lib/gantt-task-service";
 
 export async function PUT(
   req: NextRequest,
@@ -42,8 +26,6 @@ export async function PUT(
   const durationDays = Number(body.durationDays);
   const predecessorTask = String(body.predecessorTask ?? "").trim();
 
-  if (!taskCategory) return err("任务类别不能为空");
-  if (!taskName) return err("任务名称不能为空");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return err("开始时间格式应为 YYYY-MM-DD");
   if (!Number.isInteger(durationDays) || durationDays <= 0) return err("任务周期必须为大于 0 的整数天数");
 
@@ -58,7 +40,7 @@ export async function PUT(
     },
   });
 
-  return ok(serializeTask(task));
+  return ok(serializeGanttTask(task));
 }
 
 export async function DELETE(
