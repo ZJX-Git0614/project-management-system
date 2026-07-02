@@ -37,7 +37,6 @@ interface GanttTimelineProps {
   onReorderTasks?: (taskIds: string[]) => void | Promise<void>;
 }
 
-type ZoomMode = "day" | "week" | "month";
 export type GanttTaskDraft = {
   taskCategory: string;
   taskName: string;
@@ -46,20 +45,45 @@ export type GanttTaskDraft = {
   predecessorTask: string;
 };
 
-const ZOOM_CONFIG: Record<ZoomMode, { label: string; dayWidth: number; tickEvery: number }> = {
-  day: { label: "日", dayWidth: 34, tickEvery: 1 },
-  week: { label: "周", dayWidth: 14, tickEvery: 7 },
-  month: { label: "月", dayWidth: 6, tickEvery: 10 },
+const ROW_HEIGHT = 38;
+const HEADER_HEIGHT = 58;
+const BAR_HEIGHT = 14;
+const MIN_TIMELINE_WIDTH = 860;
+const LEFT_WIDTH_EXPANDED = 900;
+const LEFT_WIDTH_COLLAPSED = 380;
+const LEFT_COLUMNS_EXPANDED = "78px 240px 116px 58px 102px 102px 122px";
+const LEFT_COLUMNS_COLLAPSED = "78px 260px";
+const MIN_ZOOM = 6;
+const MAX_ZOOM = 46;
+const DEFAULT_ZOOM = 18;
+
+const getTickEvery = (dayWidth: number) => {
+  if (dayWidth >= 30) return 1;
+  if (dayWidth >= 14) return 7;
+  return 14;
 };
 
-const ROW_HEIGHT = 44;
-const HEADER_HEIGHT = 72;
-const LEFT_WIDTH = 920;
-const BAR_HEIGHT = 18;
-const taskGridColumns = (showProject: boolean) =>
-  showProject
-    ? "72px minmax(240px,1fr) 120px 70px 108px 108px 140px"
-    : "72px minmax(260px,1fr) 120px 70px 108px 108px 140px";
+const getTaskCode = (index: number) => `Task${String(index + 1).padStart(3, "0")}`;
+
+const taskGridColumns = (collapsed: boolean) => (
+  collapsed ? LEFT_COLUMNS_COLLAPSED : LEFT_COLUMNS_EXPANDED
+);
+
+const leftPanelWidth = (collapsed: boolean) => (
+  collapsed ? LEFT_WIDTH_COLLAPSED : LEFT_WIDTH_EXPANDED
+);
+
+const inlineFieldClass = cn(
+  "h-7 w-full min-w-0 rounded px-2 text-xs shadow-none transition-colors",
+  "border-transparent bg-transparent hover:border-border hover:bg-background focus:border-primary/50 focus:bg-background focus:ring-1 focus:ring-primary/20",
+  "disabled:cursor-default disabled:opacity-100"
+);
+
+const inlineSelectClass = cn(
+  "h-7 w-full min-w-0 rounded border-transparent bg-transparent px-2 text-xs shadow-none transition-colors",
+  "hover:border-border hover:bg-background focus:border-primary/50 focus:bg-background focus:ring-1 focus:ring-primary/20",
+  "disabled:cursor-default disabled:opacity-100"
+);
 
 const toTaskDraft = (task: ProjectGanttTask): GanttTaskDraft => ({
   taskCategory: task.taskCategory,
@@ -79,7 +103,6 @@ const taskDraftEquals = (task: ProjectGanttTask, draft: GanttTaskDraft) => (
 
 export const GanttTimeline = ({
   tasks,
-  showProject = false,
   emptyText = "暂无甘特任务",
   canCreate = false,
   canEdit = false,
@@ -97,7 +120,8 @@ export const GanttTimeline = ({
   onDeleteSelected,
   onReorderTasks,
 }: GanttTimelineProps) => {
-  const [zoom, setZoom] = useState<ZoomMode>("week");
+  const [dayWidth, setDayWidth] = useState(DEFAULT_ZOOM);
+  const [detailsCollapsed, setDetailsCollapsed] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
@@ -141,9 +165,10 @@ export const GanttTimeline = ({
     return (
       <EmptyGanttTimeline
         emptyText={emptyText}
-        setZoom={setZoom}
-        showProject={showProject}
-        zoom={zoom}
+        dayWidth={dayWidth}
+        detailsCollapsed={detailsCollapsed}
+        setDayWidth={setDayWidth}
+        setDetailsCollapsed={setDetailsCollapsed}
         canCreate={canCreate}
         newDraft={newDraft}
         newSubmitting={newSubmitting}
@@ -155,11 +180,12 @@ export const GanttTimeline = ({
     );
   }
 
-  const config = ZOOM_CONFIG[zoom];
+  const config = { dayWidth, tickEvery: getTickEvery(dayWidth) };
   const visibleStartDate = addCalendarDays(range.startDate, -1);
   const visibleEndDate = addCalendarDays(range.endDate, 7);
   const visibleDays = diffDays(visibleStartDate, visibleEndDate) + 1;
-  const timelineWidth = Math.max(760, visibleDays * config.dayWidth);
+  const timelineWidth = Math.max(MIN_TIMELINE_WIDTH, visibleDays * config.dayWidth);
+  const leftWidth = leftPanelWidth(detailsCollapsed);
   const rowOffset = newDraft ? 1 : 0;
   const bodyHeight = (rows.length + rowOffset) * ROW_HEIGHT;
   const todayOffset = diffDays(visibleStartDate, new Date().toISOString().slice(0, 10));
@@ -188,27 +214,41 @@ export const GanttTimeline = ({
             关键路径 {criticalCount}
           </div>
           {reordering && <span className="text-muted-foreground">排序保存中...</span>}
-          <div className="flex items-center overflow-hidden rounded-md border border-border">
-            {(Object.keys(ZOOM_CONFIG) as ZoomMode[]).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                className={cn(
-                  "h-7 px-3 text-xs transition-colors",
-                  zoom === mode ? "bg-primary text-primary-foreground" : "bg-card text-muted-foreground hover:bg-muted"
-                )}
-                onClick={() => setZoom(mode)}
-              >
-                {ZOOM_CONFIG[mode].label}
-              </button>
-            ))}
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 text-xs"
+            onClick={() => setDetailsCollapsed((prev) => !prev)}
+          >
+            {detailsCollapsed ? "展开列" : "折叠列"}
+          </Button>
+          <div className="flex items-center gap-2 rounded-md border border-border bg-card px-2 py-1">
+            <span className="text-muted-foreground">缩放</span>
+            <input
+              aria-label="甘特图缩放"
+              type="range"
+              min={MIN_ZOOM}
+              max={MAX_ZOOM}
+              step={2}
+              value={dayWidth}
+              onChange={(event) => setDayWidth(Number(event.target.value))}
+              className="h-4 w-28 accent-primary"
+            />
+            <span className="w-9 text-right text-muted-foreground">{dayWidth}px</span>
           </div>
           {canCreate && (
             <Button
               size="sm"
               variant="outline"
               className="h-7 text-xs"
-              onClick={newDraft ? onCancelCreate : onStartCreate}
+              onClick={() => {
+                if (newDraft) {
+                  onCancelCreate?.();
+                  return;
+                }
+                setDetailsCollapsed(false);
+                onStartCreate?.();
+              }}
               disabled={newSubmitting}
             >
               {newDraft ? "取消新增" : "新增任务"}
@@ -240,8 +280,8 @@ export const GanttTimeline = ({
       </div>
 
       <div className="overflow-auto">
-        <div className="grid min-w-max" style={{ gridTemplateColumns: `${LEFT_WIDTH}px ${timelineWidth}px` }}>
-          <TaskGridHeader showProject={showProject} />
+        <div className="grid min-w-max" style={{ gridTemplateColumns: `${leftWidth}px ${timelineWidth}px` }}>
+          <TaskGridHeader collapsed={detailsCollapsed} />
           <TimelineHeader
             config={config}
             visibleDays={visibleDays}
@@ -258,7 +298,7 @@ export const GanttTimeline = ({
                 onSubmit={onSubmitCreate}
                 onUpdate={onUpdateNewDraft}
                 predecessorOptions={[]}
-                showProject={showProject}
+                collapsed={detailsCollapsed}
               />
             )}
             {rows.map((row, index) => (
@@ -277,7 +317,7 @@ export const GanttTimeline = ({
                 row={row}
                 selected={selectedTaskIds.includes(row.id)}
                 selectionMode={selectionMode}
-                showProject={showProject}
+                collapsed={detailsCollapsed}
               />
             ))}
           </div>
@@ -367,6 +407,8 @@ export const GanttTimeline = ({
 
 const EmptyGanttTimeline = ({
   canCreate,
+  dayWidth,
+  detailsCollapsed,
   emptyText,
   newDraft,
   newSubmitting,
@@ -374,11 +416,12 @@ const EmptyGanttTimeline = ({
   onStartCreate,
   onSubmitCreate,
   onUpdateNewDraft,
-  setZoom,
-  showProject,
-  zoom,
+  setDayWidth,
+  setDetailsCollapsed,
 }: {
   canCreate: boolean;
+  dayWidth: number;
+  detailsCollapsed: boolean;
   emptyText: string;
   newDraft: GanttTaskDraft | null;
   newSubmitting: boolean;
@@ -386,14 +429,14 @@ const EmptyGanttTimeline = ({
   onStartCreate?: () => void;
   onSubmitCreate?: () => void;
   onUpdateNewDraft?: <K extends keyof GanttTaskDraft>(key: K, value: GanttTaskDraft[K]) => void;
-  setZoom: (zoom: ZoomMode) => void;
-  showProject: boolean;
-  zoom: ZoomMode;
+  setDayWidth: (value: number) => void;
+  setDetailsCollapsed: (value: boolean | ((prev: boolean) => boolean)) => void;
 }) => {
-  const config = ZOOM_CONFIG[zoom];
+  const config = { dayWidth, tickEvery: getTickEvery(dayWidth) };
   const visibleStartDate = new Date().toISOString().slice(0, 10);
   const visibleDays = 28;
-  const timelineWidth = Math.max(760, visibleDays * config.dayWidth);
+  const timelineWidth = Math.max(MIN_TIMELINE_WIDTH, visibleDays * config.dayWidth);
+  const leftWidth = leftPanelWidth(detailsCollapsed);
   const bodyHeight = ROW_HEIGHT * 3;
 
   return (
@@ -414,27 +457,41 @@ const EmptyGanttTimeline = ({
             <span className="inline-block h-2.5 w-5 rounded-full bg-destructive" />
             关键路径 0
           </div>
-          <div className="flex items-center overflow-hidden rounded-md border border-border">
-            {(Object.keys(ZOOM_CONFIG) as ZoomMode[]).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                className={cn(
-                  "h-7 px-3 text-xs transition-colors",
-                  zoom === mode ? "bg-primary text-primary-foreground" : "bg-card text-muted-foreground hover:bg-muted"
-                )}
-                onClick={() => setZoom(mode)}
-              >
-                {ZOOM_CONFIG[mode].label}
-              </button>
-            ))}
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 text-xs"
+            onClick={() => setDetailsCollapsed((prev) => !prev)}
+          >
+            {detailsCollapsed ? "展开列" : "折叠列"}
+          </Button>
+          <div className="flex items-center gap-2 rounded-md border border-border bg-card px-2 py-1">
+            <span className="text-muted-foreground">缩放</span>
+            <input
+              aria-label="甘特图缩放"
+              type="range"
+              min={MIN_ZOOM}
+              max={MAX_ZOOM}
+              step={2}
+              value={dayWidth}
+              onChange={(event) => setDayWidth(Number(event.target.value))}
+              className="h-4 w-28 accent-primary"
+            />
+            <span className="w-9 text-right text-muted-foreground">{dayWidth}px</span>
           </div>
           {canCreate && (
             <Button
               size="sm"
               variant="outline"
               className="h-7 text-xs"
-              onClick={newDraft ? onCancelCreate : onStartCreate}
+              onClick={() => {
+                if (newDraft) {
+                  onCancelCreate?.();
+                  return;
+                }
+                setDetailsCollapsed(false);
+                onStartCreate?.();
+              }}
               disabled={newSubmitting}
             >
               {newDraft ? "取消新增" : "新增任务"}
@@ -444,8 +501,8 @@ const EmptyGanttTimeline = ({
       </div>
 
       <div className="overflow-auto">
-        <div className="grid min-w-max" style={{ gridTemplateColumns: `${LEFT_WIDTH}px ${timelineWidth}px` }}>
-          <TaskGridHeader showProject={showProject} />
+        <div className="grid min-w-max" style={{ gridTemplateColumns: `${leftWidth}px ${timelineWidth}px` }}>
+          <TaskGridHeader collapsed={detailsCollapsed} />
           <TimelineHeader
             config={config}
             visibleDays={visibleDays}
@@ -462,7 +519,7 @@ const EmptyGanttTimeline = ({
                 onSubmit={onSubmitCreate}
                 onUpdate={onUpdateNewDraft}
                 predecessorOptions={[]}
-                showProject={showProject}
+                collapsed={detailsCollapsed}
               />
             ) : (
               <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
@@ -489,21 +546,25 @@ const EmptyGanttTimeline = ({
   );
 };
 
-const TaskGridHeader = ({ showProject }: { showProject: boolean }) => (
+const TaskGridHeader = ({ collapsed }: { collapsed: boolean }) => (
   <div
-    className="sticky top-0 z-10 grid items-center border-b border-r border-border bg-muted px-3 text-xs font-medium text-foreground"
+    className="sticky top-0 z-10 grid items-center gap-2 border-b border-r border-border bg-muted px-3 text-xs font-medium text-foreground"
     style={{
       height: HEADER_HEIGHT,
-      gridTemplateColumns: taskGridColumns(showProject),
+      gridTemplateColumns: taskGridColumns(collapsed),
     }}
   >
     <span>任务ID</span>
     <span>任务名称</span>
-    <span>类别</span>
-    <span>工期</span>
-    <span>开始</span>
-    <span>完成</span>
-    <span>紧前任务</span>
+    {!collapsed && (
+      <>
+        <span>类别</span>
+        <span>工期</span>
+        <span>开始</span>
+        <span>完成</span>
+        <span>紧前任务</span>
+      </>
+    )}
   </div>
 );
 
@@ -521,9 +582,10 @@ const EditableTaskRow = ({
   row,
   selected,
   selectionMode,
-  showProject,
+  collapsed,
 }: {
   canEdit: boolean;
+  collapsed: boolean;
   dragged: boolean;
   index: number;
   isSaving: boolean;
@@ -536,12 +598,16 @@ const EditableTaskRow = ({
   row: ReturnType<typeof buildGanttRows>[number];
   selected: boolean;
   selectionMode: boolean;
-  showProject: boolean;
 }) => {
   const [draft, setDraft] = useState<GanttTaskDraft>(() => toTaskDraft(row));
+  const taskNameDisplay = row.isCritical ? `${draft.taskName}【关键路径】` : draft.taskName;
 
   const updateDraft = <K extends keyof GanttTaskDraft>(key: K, value: GanttTaskDraft[K]) => {
     setDraft((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const updateTaskName = (value: string) => {
+    updateDraft("taskName", value.replace(/【关键路径】/g, ""));
   };
 
   const commitDraft = () => {
@@ -566,17 +632,19 @@ const EditableTaskRow = ({
   return (
     <div
       className={cn(
-        "grid cursor-grab items-center border-b border-border px-3 text-xs active:cursor-grabbing",
-        row.isCritical ? "bg-destructive/5" : index % 2 === 0 ? "bg-background" : "bg-muted/10",
+        "group grid cursor-grab items-center gap-2 border-b border-border px-3 text-xs active:cursor-grabbing",
+        index % 2 === 0 ? "bg-background" : "bg-muted/25",
+        row.isCritical && "shadow-[inset_2px_0_0_hsl(var(--destructive))]",
         selected && "bg-primary/15",
-        dragged && "opacity-50"
+        dragged && "opacity-50",
+        "hover:bg-primary/5"
       )}
       draggable={canEdit}
       onDragEnd={onDragEnd}
       onDragEnter={onDragEnter}
       onDragOver={(event) => event.preventDefault()}
       onDragStart={onDragStart}
-      style={{ height: ROW_HEIGHT, gridTemplateColumns: taskGridColumns(showProject) }}
+      style={{ height: ROW_HEIGHT, gridTemplateColumns: taskGridColumns(collapsed) }}
     >
       <div className="flex min-w-0 items-center gap-2">
         {selectionMode && (
@@ -588,72 +656,63 @@ const EditableTaskRow = ({
             onClick={(event) => event.stopPropagation()}
           />
         )}
-        <span className="truncate font-mono text-[11px] text-muted-foreground" title={row.id}>
-          {row.id.slice(-6)}
+        <span className="truncate font-mono text-[11px] font-semibold text-muted-foreground" title={row.id}>
+          {getTaskCode(index)}
         </span>
       </div>
-      <div className="min-w-0">
-        <div className="flex min-w-0 items-center gap-1">
+      <Input
+        value={taskNameDisplay}
+        onBlur={commitDraft}
+        onChange={(event) => updateTaskName(event.target.value)}
+        onKeyDown={handleKeyDown}
+        className={cn(inlineFieldClass, "font-medium", row.isCritical && "text-destructive")}
+        disabled={!canEdit || isSaving}
+        title={taskNameDisplay}
+      />
+      {!collapsed && (
+        <>
           <Input
-            value={draft.taskName}
+            value={draft.taskCategory}
             onBlur={commitDraft}
-            onChange={(event) => updateDraft("taskName", event.target.value)}
+            onChange={(event) => updateDraft("taskCategory", event.target.value)}
             onKeyDown={handleKeyDown}
-            className="h-7 text-xs font-medium"
+            className={inlineFieldClass}
             disabled={!canEdit || isSaving}
           />
-          {row.isCritical && (
-            <span className="shrink-0 rounded bg-destructive/15 px-1.5 py-0.5 text-[10px] text-destructive">
-              关键
-            </span>
-          )}
-        </div>
-        {showProject && row.project && (
-          <div className="truncate text-[11px] text-muted-foreground">
-            {row.project.name}{row.project.code ? ` · ${row.project.code}` : ""}
-          </div>
-        )}
-      </div>
-      <Input
-        value={draft.taskCategory}
-        onBlur={commitDraft}
-        onChange={(event) => updateDraft("taskCategory", event.target.value)}
-        onKeyDown={handleKeyDown}
-        className="h-7 text-xs"
-        disabled={!canEdit || isSaving}
-      />
-      <Input
-        type="number"
-        min={1}
-        value={draft.durationDays}
-        onBlur={commitDraft}
-        onChange={(event) => updateDraft("durationDays", Number(event.target.value) || 1)}
-        onKeyDown={handleKeyDown}
-        className="h-7 text-xs"
-        disabled={!canEdit || isSaving}
-      />
-      <Input
-        type="date"
-        value={draft.startDate}
-        onBlur={commitDraft}
-        onChange={(event) => updateDraft("startDate", event.target.value)}
-        onKeyDown={handleKeyDown}
-        className="h-7 text-xs"
-        disabled={!canEdit || isSaving}
-      />
-      <span className="text-muted-foreground">{row.endDate}</span>
-      <PredecessorSelect
-        value={draft.predecessorTask}
-        onChange={(value) => {
-          const nextDraft = { ...draft, predecessorTask: value };
-          setDraft(nextDraft);
-          if (canEdit && !taskDraftEquals(row, nextDraft)) {
-            void onUpdateTask?.(row, nextDraft);
-          }
-        }}
-        options={predecessorOptions}
-        disabled={!canEdit || isSaving}
-      />
+          <Input
+            type="number"
+            min={1}
+            value={draft.durationDays}
+            onBlur={commitDraft}
+            onChange={(event) => updateDraft("durationDays", Number(event.target.value) || 1)}
+            onKeyDown={handleKeyDown}
+            className={inlineFieldClass}
+            disabled={!canEdit || isSaving}
+          />
+          <Input
+            type="date"
+            value={draft.startDate}
+            onBlur={commitDraft}
+            onChange={(event) => updateDraft("startDate", event.target.value)}
+            onKeyDown={handleKeyDown}
+            className={inlineFieldClass}
+            disabled={!canEdit || isSaving}
+          />
+          <span className="truncate px-2 text-muted-foreground">{row.endDate}</span>
+          <PredecessorSelect
+            value={draft.predecessorTask}
+            onChange={(value) => {
+              const nextDraft = { ...draft, predecessorTask: value };
+              setDraft(nextDraft);
+              if (canEdit && !taskDraftEquals(row, nextDraft)) {
+                void onUpdateTask?.(row, nextDraft);
+              }
+            }}
+            options={predecessorOptions}
+            disabled={!canEdit || isSaving}
+          />
+        </>
+      )}
     </div>
   );
 };
@@ -665,59 +724,68 @@ const DraftTaskRow = ({
   onSubmit,
   onUpdate,
   predecessorOptions,
-  showProject,
+  collapsed,
 }: {
+  collapsed: boolean;
   draft: GanttTaskDraft;
   indexLabel: string;
   isSubmitting: boolean;
   onSubmit?: () => void;
   onUpdate: <K extends keyof GanttTaskDraft>(key: K, value: GanttTaskDraft[K]) => void;
   predecessorOptions: ProjectGanttTask[];
-  showProject: boolean;
 }) => (
   <div
-    className="grid items-center border-b border-border bg-muted/30 px-3 text-xs"
-    style={{ height: ROW_HEIGHT, gridTemplateColumns: taskGridColumns(showProject) }}
+    className="grid items-center gap-2 border-b border-border bg-muted/30 px-3 text-xs"
+    style={{ height: ROW_HEIGHT, gridTemplateColumns: taskGridColumns(collapsed) }}
   >
     <span className="text-muted-foreground">{indexLabel}</span>
     <Input
       value={draft.taskName}
       onChange={(event) => onUpdate("taskName", event.target.value)}
-      className="h-7 text-xs"
+      className="h-7 w-full text-xs"
       placeholder="任务名称"
       autoFocus={indexLabel === "新"}
     />
-    <Input
-      value={draft.taskCategory}
-      onChange={(event) => onUpdate("taskCategory", event.target.value)}
-      className="h-7 text-xs"
-      placeholder="任务类别"
-    />
-    <Input
-      type="number"
-      min={1}
-      value={draft.durationDays}
-      onChange={(event) => onUpdate("durationDays", Number(event.target.value) || 1)}
-      className="h-7 text-xs"
-    />
-    <Input
-      type="date"
-      value={draft.startDate}
-      onChange={(event) => onUpdate("startDate", event.target.value)}
-      className="h-7 text-xs"
-    />
-    <span className="text-xs text-muted-foreground">保存后计算</span>
-    <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
-      <PredecessorSelect
-        value={draft.predecessorTask}
-        onChange={(value) => onUpdate("predecessorTask", value)}
-        options={predecessorOptions}
-        disabled={predecessorOptions.length === 0}
-      />
-      <Button size="sm" className="h-7 text-xs" onClick={onSubmit} disabled={isSubmitting}>
+    {!collapsed && (
+      <>
+        <Input
+          value={draft.taskCategory}
+          onChange={(event) => onUpdate("taskCategory", event.target.value)}
+          className="h-7 w-full text-xs"
+          placeholder="任务类别"
+        />
+        <Input
+          type="number"
+          min={1}
+          value={draft.durationDays}
+          onChange={(event) => onUpdate("durationDays", Number(event.target.value) || 1)}
+          className="h-7 w-full text-xs"
+        />
+        <Input
+          type="date"
+          value={draft.startDate}
+          onChange={(event) => onUpdate("startDate", event.target.value)}
+          className="h-7 w-full text-xs"
+        />
+        <span className="truncate px-2 text-xs text-muted-foreground">保存后计算</span>
+        <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
+          <PredecessorSelect
+            value={draft.predecessorTask}
+            onChange={(value) => onUpdate("predecessorTask", value)}
+            options={predecessorOptions}
+            disabled={predecessorOptions.length === 0}
+          />
+          <Button size="sm" className="h-7 text-xs" onClick={onSubmit} disabled={isSubmitting}>
+            {isSubmitting ? "保存中..." : "保存"}
+          </Button>
+        </div>
+      </>
+    )}
+    {collapsed && (
+      <Button size="sm" className="h-7 justify-self-end text-xs" onClick={onSubmit} disabled={isSubmitting}>
         {isSubmitting ? "保存中..." : "保存"}
       </Button>
-    </div>
+    )}
   </div>
 );
 
@@ -735,7 +803,7 @@ const PredecessorSelect = ({
   <Select
     value={value}
     onChange={(event) => onChange(event.target.value)}
-    className="h-7 text-xs"
+    className={inlineSelectClass}
     disabled={disabled}
   >
     <option value="">无</option>
