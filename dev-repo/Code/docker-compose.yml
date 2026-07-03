@@ -1,20 +1,37 @@
 version: "3.8"
 
 services:
-  rpms:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pms-postgres
+    environment:
+      - POSTGRES_USER=pms
+      - POSTGRES_PASSWORD=pms-pwd-2026
+      - POSTGRES_DB=pms
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pms -d pms"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  pms:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: rpms
+    container_name: pms
     ports:
       - "3000:3000"
     environment:
-      - DATABASE_URL=file:/app/data/dev.db
-      - JWT_SECRET=rpms-production-jwt-secret-2026
+      - DATABASE_URL=postgresql://pms:pms-pwd-2026@postgres:5432/pms?schema=public
+      - JWT_SECRET=pms-production-jwt-secret-2026
       - NODE_ENV=production
-    volumes:
-      - rpms-data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
-  rpms-data:
+  pgdata:

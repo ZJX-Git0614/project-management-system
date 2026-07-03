@@ -2,7 +2,7 @@
  * 当前项目 hook 纯逻辑 — V0.6.1 入口改造。
  *
  * 职责：
- * 1. 维护 localStorage.rpms.currentProjectId
+ * 1. 维护 localStorage.pms.currentProjectId
  * 2. 拉取 /api/projects（默认全部状态）
  * 3. 按权限分级：拥有「项目启动/作废/完成/恢复」任一权限 → 全部状态；否则仅 IN_PROGRESS
   * 4. 当前项目只来自项目列表点击写入的 localStorage，不自动默认选择
@@ -22,7 +22,7 @@ import { usePermission } from "@/lib/use-permission";
 import { api } from "@/lib/api-client";
 import type { Project } from "@/domain/models";
 
-const STORAGE_KEY = "pmms.currentProjectId";
+const STORAGE_KEY = "pms.currentProjectId";
 const PROJECT_ADMIN_PERMISSIONS = [
   "project-list:start",
   "project-list:complete",

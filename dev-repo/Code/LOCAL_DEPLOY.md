@@ -1,6 +1,6 @@
 # 本机双环境部署说明
 
-项目路径：`/Users/zhaojiaxin/Desktop/RPMS系统/Code`
+项目路径：`/Users/zhaojiaxin/Documents/项目管理系统/dev-repo/Code`
 
 ## 目标
 
@@ -19,14 +19,14 @@
 
 已提供脚本：
 
-`/Users/zhaojiaxin/Desktop/RPMS系统/Code/scripts/local-env.sh`
+`/Users/zhaojiaxin/Documents/项目管理系统/dev-repo/Code/scripts/local-env.sh`
 
 ## 命令行用法
 
 先进入项目目录：
 
 ```bash
-cd "/Users/zhaojiaxin/Desktop/RPMS系统/Code"
+cd "/Users/zhaojiaxin/Documents/项目管理系统/dev-repo/Code"
 ```
 
 ### 启动
@@ -87,17 +87,17 @@ cd "/Users/zhaojiaxin/Desktop/RPMS系统/Code"
 
 可直接在 Finder 中双击运行：
 
-- `/Users/zhaojiaxin/Desktop/RPMS系统/Code/启动开发环境.command`
-- `/Users/zhaojiaxin/Desktop/RPMS系统/Code/启动生产环境.command`
-- `/Users/zhaojiaxin/Desktop/RPMS系统/Code/启动全部环境.command`
-- `/Users/zhaojiaxin/Desktop/RPMS系统/Code/停止全部环境.command`
-- `/Users/zhaojiaxin/Desktop/RPMS系统/Code/查看环境状态.command`
+- `/Users/zhaojiaxin/Documents/项目管理系统/dev-repo/Code/启动开发环境.command`
+- `/Users/zhaojiaxin/Documents/项目管理系统/dev-repo/Code/启动生产环境.command`
+- `/Users/zhaojiaxin/Documents/项目管理系统/dev-repo/Code/启动全部环境.command`
+- `/Users/zhaojiaxin/Documents/项目管理系统/dev-repo/Code/停止全部环境.command`
+- `/Users/zhaojiaxin/Documents/项目管理系统/dev-repo/Code/查看环境状态.command`
 
 另外还提供了“启动后顺便显示状态”的版本：
 
-- `/Users/zhaojiaxin/Desktop/RPMS系统/Code/启动开发并查看状态.command`
-- `/Users/zhaojiaxin/Desktop/RPMS系统/Code/启动生产并查看状态.command`
-- `/Users/zhaojiaxin/Desktop/RPMS系统/Code/启动全部并查看状态.command`
+- `/Users/zhaojiaxin/Documents/项目管理系统/dev-repo/Code/启动开发并查看状态.command`
+- `/Users/zhaojiaxin/Documents/项目管理系统/dev-repo/Code/启动生产并查看状态.command`
+- `/Users/zhaojiaxin/Documents/项目管理系统/dev-repo/Code/启动全部并查看状态.command`
 
 这些文件执行后会停在终端窗口，等你按回车再关闭，方便你查看结果。
 
@@ -109,7 +109,7 @@ cd "/Users/zhaojiaxin/Desktop/RPMS系统/Code"
 ## 日志与运行信息
 
 运行目录：
-`/Users/zhaojiaxin/Desktop/RPMS系统/Code/.local-runtime`
+`/Users/zhaojiaxin/Documents/项目管理系统/dev-repo/Code/.local-runtime`
 
 日志文件：
 - 开发环境日志：`.local-runtime/dev.log`

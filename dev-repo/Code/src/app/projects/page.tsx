@@ -9,7 +9,7 @@ import { ProjectStatus } from "@/domain/enums";
 import { PROJECT_STATUS_LABEL } from "@/lib/constants";
 import { downloadTextFile, toCsv } from "@/lib/utils";
 import { usePermission } from "@/lib/use-permission";
-import { useProjectFilter } from "@/state/rpms-context";
+import { useProjectFilter } from "@/state/project-filter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";

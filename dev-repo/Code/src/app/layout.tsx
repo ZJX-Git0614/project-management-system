@@ -5,7 +5,7 @@ import { AuthProvider } from "@/contexts/auth-context";
 import { PermissionProvider } from "@/contexts/permission-context";
 import { AppShell } from "@/components/app-shell";
 import { ConfirmProvider } from "@/components/confirm-provider";
-import { RpmsProvider } from "@/state/rpms-context";
+
 import { CurrentProjectProvider } from "@/contexts/current-project-context";
 
 export const metadata: Metadata = {
@@ -19,15 +19,13 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <body>
         <AuthProvider>
           <PermissionProvider>
-            <RpmsProvider>
-              <ConfirmProvider>
-                <CurrentProjectProvider>
+            <ConfirmProvider>
+              <CurrentProjectProvider>
                 <Suspense>
                   <AppShell>{children}</AppShell>
                 </Suspense>
-                </CurrentProjectProvider>
-              </ConfirmProvider>
-            </RpmsProvider>
+              </CurrentProjectProvider>
+            </ConfirmProvider>
           </PermissionProvider>
         </AuthProvider>
       </body>

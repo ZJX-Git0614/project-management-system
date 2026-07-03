@@ -1,5 +1,5 @@
-export const TODO_CHANGED_EVENT = "rpms:todo-changed";
-export const TODO_CHANGED_STORAGE_KEY = "rpms:todo-changed-at";
+export const TODO_CHANGED_EVENT = "pms:todo-changed";
+export const TODO_CHANGED_STORAGE_KEY = "pms:todo-changed-at";
 
 export function emitTodoChanged() {
   if (typeof window === "undefined") return;

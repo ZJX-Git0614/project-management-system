@@ -2,7 +2,7 @@ import jwt from "jsonwebtoken"
 import bcrypt from "bcryptjs"
 import { NextRequest } from "next/server"
 
-const JWT_SECRET = process.env.JWT_SECRET || "pmms-dev-jwt-secret-change-in-production"
+const JWT_SECRET = process.env.JWT_SECRET || "pms-dev-jwt-secret-change-in-production"
 const JWT_EXPIRES_IN = "24h"
 
 export type TokenErrorCode = "TOKEN_EXPIRED" | "TOKEN_INVALID" | "TOKEN_MISSING"

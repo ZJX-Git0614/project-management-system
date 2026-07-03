@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { verifyTokenForRefresh, verifyTokenWithReason } from "@/lib/auth";
 
-const secret = process.env.JWT_SECRET || "pmms-dev-jwt-secret-change-in-production";
+const secret = process.env.JWT_SECRET || "pms-dev-jwt-secret-change-in-production";
 
 describe("auth token verification", () => {
   it("keeps expired but signed tokens refreshable", () => {

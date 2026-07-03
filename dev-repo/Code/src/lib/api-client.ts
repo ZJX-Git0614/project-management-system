@@ -1,5 +1,5 @@
-const TOKEN_KEY = "pmms-auth-token"
-const USER_KEY = "pmms-auth-user"
+const TOKEN_KEY = "pms-auth-token"
+const USER_KEY = "pms-auth-user"
 
 interface StoredUser {
   id: string

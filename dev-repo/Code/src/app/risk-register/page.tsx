@@ -167,6 +167,7 @@ export default function RiskRegisterPage() {
       setRiskItems((prev) =>
         prev.map((item) => (item.id === id ? { ...item, [field]: value } : item))
       );
+      setEditingCell(null);
     });
   };
 

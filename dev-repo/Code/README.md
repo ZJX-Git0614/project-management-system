@@ -1,6 +1,6 @@
 # Ceastar项目管理系统
 
-**项目管理与进度追踪后台** | 基于 Next.js + Prisma + SQLite
+**项目管理与进度追踪后台** | 基于 Next.js + Prisma + PostgreSQL
 
 ---
 
@@ -32,7 +32,7 @@
 |----|------|
 | 前端框架 | Next.js 16.2.4 (App Router) + TypeScript |
 | UI | Tailwind CSS v4 + Radix UI (shadcn/ui 风格) |
-| 数据库 | SQLite + Prisma ORM |
+| 数据库 | PostgreSQL + Prisma ORM |
 | 认证 | JWT (jsonwebtoken) + bcryptjs |
 | 部署 | Docker (多阶段构建) / 本地 node 直跑 |
 | 测试 | Vitest + React Testing Library |
@@ -86,7 +86,6 @@ Code/
 ├── prisma/
 │   ├── schema.prisma      # 10 个数据模型
 │   ├── seed.ts            # 基础数据（角色/管理员/权限树）
-│   └── dev.db             # SQLite 数据库文件
 ├── src/
 │   ├── app/
 │   │   ├── api/            # 36+ 个 REST API 端点
@@ -116,7 +115,7 @@ Code/
 │   │   ├── operation-history.ts  # 操作历史中文格式化
 │   │   └── ...             # 其他工具
 │   └── state/
-│       └── rpms-context.tsx # 全局状态
+│       └── project-filter.tsx # 项目筛选工具
 ├── Dockerfile              # Docker 多阶段构建
 ├── docker-compose.yml      # Docker Compose 部署
 ├── deploy-windows.md       # Windows 部署指南
@@ -142,10 +141,10 @@ npx prisma studio   # Prisma 数据库管理 UI
 
 ## 数据库
 
-- **类型**：SQLite（单文件，无需安装数据库服务）
+- **类型**：PostgreSQL
 - **ORM**：Prisma
 - **模型数量**：10 个（UserAccount, Project, ProjectMember, MonthlyItem, WeeklyItem, TodoItem, OperationHistory, PermissionTree 等）
-- **持久化**：本地运行使用 `prisma/dev.db`，Docker 运行时数据保存在命名卷中
+- **持久化**：Docker 运行时数据保存在 `pgdata` 命名卷中
 
 ---
 

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 
 // 把任意 JSON-safe state 同步到 localStorage，组件挂载时回填（SSR-safe）。
-// - key 形如 "pmms.draft.item.monthly" / "pmms.draft.gantt.<projectId>"
+// - key 形如 "pms.draft.item.monthly" / "pms.draft.gantt.<projectId>"
 // - 返回 [value, setValue, clear, isHydrated] 四个 API
 // - 写入防抖 200ms，避免高频输入反复写盘
 // - 只有"激活"(enabled)状态下的更改才写盘；初始/null 状态不会污染 localStorage

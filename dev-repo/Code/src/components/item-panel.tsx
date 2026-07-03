@@ -163,7 +163,7 @@ export const ItemPanel = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingField, setEditingField] = useState<EditableField | null>(null);
   const [draft, setDraft, clearDraft] = useDraftedState<ItemRecord | null>(
-    `pmms.draft.item.${kind}`,
+    `pms.draft.item.${kind}`,
     null
   );
   const [saving, setSaving] = useState(false);
@@ -346,7 +346,7 @@ export const ItemPanel = ({
       void _id; void _ca; void _ua; void _p; void _mc;
       await api.put(`${apiPath}/${updated.id}`, payload);
       flushSync(() => {
-        setDraft(updated);
+        cancelEdit();
       });
       await fetchData();
     } catch (error) {

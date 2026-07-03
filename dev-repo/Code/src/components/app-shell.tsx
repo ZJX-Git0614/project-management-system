@@ -277,33 +277,21 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
                 permissionKey: getDetailGroupPermissionKey("project"),
                 icon: <ClipboardList className="size-4" />,
               } as NavMenuItem,
-              {
-                href: currentProjectId ? `/projects/${currentProjectId}?nav=gantt` : "/projects",
-                label: "项目进度甘特图",
-                active: isDetailGroupActive(fullPath, "gantt"),
-                permissionKey: getDetailGroupPermissionKey("gantt"),
-                icon: <TrendingUp className="size-4" />,
-              } as NavMenuItem,
-              {
-                href: currentProjectId ? `/projects/${currentProjectId}?nav=budget` : "/projects",
-                label: "项目预算管理",
-                active: isDetailGroupActive(fullPath, "budget"),
-                permissionKey: getDetailGroupPermissionKey("budget"),
-                icon: <Wallet className="size-4" />,
-              } as NavMenuItem,
+
+
             ]
           : []),
       ],
     },
     {
-      title: "项目进度追踪",
+      title: "项目进度管理",
       items: hasSelectedProject
         ? [
             {
-              href: "/overview",
-              label: "项目进度总揽",
-              active: pathname === "/overview",
-              permissionKey: "overview:view",
+              href: currentProjectId ? `/projects/${currentProjectId}?nav=gantt` : "/projects",
+              label: "项目进度甘特图",
+              active: isDetailGroupActive(fullPath, "gantt"),
+              permissionKey: getDetailGroupPermissionKey("gantt"),
               icon: <TrendingUp className="size-4" />,
             },
             {
@@ -319,6 +307,20 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
               active: pathname === "/weekly-items",
               permissionKey: "weekly-items:view",
               icon: <CalendarDays className="size-4" />,
+            },
+          ]
+        : [],
+    },
+    {
+      title: "项目成本管理",
+      items: hasSelectedProject
+        ? [
+            {
+              href: currentProjectId ? `/projects/${currentProjectId}?nav=budget` : "/projects",
+              label: "项目预算管理",
+              active: isDetailGroupActive(fullPath, "budget"),
+              permissionKey: getDetailGroupPermissionKey("budget"),
+              icon: <Wallet className="size-4" />,
             },
           ]
         : [],

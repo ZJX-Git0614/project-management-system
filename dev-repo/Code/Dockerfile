@@ -28,8 +28,7 @@ COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/node_modules ./node_modules
 
-# 创建数据目录（SQLite 持久化）
-RUN mkdir -p /app/data
+# PostgreSQL 通过 docker-compose 的 postgres 服务提供，无需本地数据目录
 
 EXPOSE 3000
 

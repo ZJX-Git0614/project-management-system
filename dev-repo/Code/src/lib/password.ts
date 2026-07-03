@@ -1,4 +1,4 @@
-const SALT = "rpms-salt";
+const SALT = "pms-app-salt";
 
 /**
  * 简化的密码哈希：base64(pwd + salt)，仅用于本地演示环境。

@@ -30,7 +30,7 @@ next.config.ts
 打开 **PowerShell** 或 **命令提示符**，进入代码目录：
 
 ```powershell
-cd D:\path\to\rpms-code
+cd D:\path\to\pms-code
 docker compose up -d --build
 ```
 
@@ -78,7 +78,7 @@ docker compose ps
 
 ## 数据持久化
 
-- 数据库文件存储在 Docker 命名卷 `rpms-data` 中
+- PostgreSQL 数据存储在 Docker 命名卷 `pgdata` 中
 - 即使容器删除、重新构建，数据也不会丢失
 - 要彻底清除数据：`docker compose down -v`
 
