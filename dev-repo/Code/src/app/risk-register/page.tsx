@@ -1,6 +1,7 @@
 "use client";
 
 import { KeyboardEvent, useState } from "react";
+import { flushSync } from "react-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -162,9 +163,11 @@ export default function RiskRegisterPage() {
     field: K,
     value: RiskRegisterItem[K]
   ) => {
-    setRiskItems((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, [field]: value } : item))
-    );
+    flushSync(() => {
+      setRiskItems((prev) =>
+        prev.map((item) => (item.id === id ? { ...item, [field]: value } : item))
+      );
+    });
   };
 
   const isEditing = (item: RiskRegisterItem, field: EditableRiskField) =>

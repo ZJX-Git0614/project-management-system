@@ -1,6 +1,7 @@
 "use client";
 
-import { KeyboardEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { Plus, Upload, Search } from "lucide-react";
 import { ItemHealth, ItemRiskStatus, ItemStatus, ItemPriority } from "@/domain/enums";
 import {
@@ -166,6 +167,8 @@ export const ItemPanel = ({
     null
   );
   const [saving, setSaving] = useState(false);
+  const draftRef = useRef<ItemRecord | null>(null);
+  draftRef.current = draft;
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [deletingSelected, setDeletingSelected] = useState(false);
@@ -330,6 +333,27 @@ export const ItemPanel = ({
 
   const updateDraft = <K extends keyof ItemRecord>(key: K, value: ItemRecord[K]) => {
     setDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
+  };
+
+  const commitSelectChange = async <K extends keyof ItemRecord>(key: K, value: ItemRecord[K]) => {
+    const current = draftRef.current;
+    if (!current) return;
+    const updated = { ...current, [key]: value };
+    if (!updated.title.trim() || !updated.dueDate || updated.progress < 0) return;
+    setSaving(true);
+    try {
+      const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, ...payload } = updated;
+      void _id; void _ca; void _ua; void _p; void _mc;
+      await api.put(`${apiPath}/${updated.id}`, payload);
+      flushSync(() => {
+        setDraft(updated);
+      });
+      await fetchData();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "保存失败");
+    } finally {
+      setSaving(false);
+    }
   };
 
   useEffect(() => {
@@ -637,7 +661,7 @@ export const ItemPanel = ({
                       <TableCell className="text-xs">
                         <Select
                           value={draft.taskName ?? ""}
-                          onChange={(e) => updateDraft("taskName", e.target.value)}
+                          onChange={(e) => commitSelectChange("taskName", e.target.value)}
                           onKeyDown={handleCreateKeyDown}
                           className={INLINE_SELECT_CLASS}
                         >
@@ -669,7 +693,7 @@ export const ItemPanel = ({
                     <TableCell>
                       <Select
                         value={draft.priority}
-                        onChange={(e) => updateDraft("priority", e.target.value as ItemPriority)}
+                        onChange={(e) => commitSelectChange("priority", e.target.value as ItemPriority)}
                         onKeyDown={handleCreateKeyDown}
                         className={`${INLINE_SELECT_CLASS} w-[76px]`}
                       >
@@ -735,7 +759,7 @@ export const ItemPanel = ({
                     <TableCell>
                       <Select
                         value={draft.status}
-                        onChange={(e) => updateDraft("status", e.target.value as ItemStatus)}
+                        onChange={(e) => commitSelectChange("status", e.target.value as ItemStatus)}
                         onKeyDown={handleCreateKeyDown}
                         className={`${INLINE_SELECT_CLASS} w-[88px]`}
                       >
@@ -747,7 +771,7 @@ export const ItemPanel = ({
                     <TableCell>
                       <Select
                         value={draft.health}
-                        onChange={(e) => updateDraft("health", e.target.value as ItemHealth)}
+                        onChange={(e) => commitSelectChange("health", e.target.value as ItemHealth)}
                         onKeyDown={handleCreateKeyDown}
                         className={`${INLINE_SELECT_CLASS} w-[88px]`}
                       >
@@ -898,7 +922,7 @@ export const ItemPanel = ({
                           {isEditingField("taskName") ? (
                             <Select
                               value={row.taskName ?? ""}
-                              onChange={(e) => updateDraft("taskName", e.target.value)}
+                              onChange={(e) => commitSelectChange("taskName", e.target.value)}
                               onKeyDown={handleEditKeyDown}
                               className={INLINE_SELECT_CLASS}
                               autoFocus
@@ -940,7 +964,7 @@ export const ItemPanel = ({
                         {isEditingField("priority") ? (
                           <Select
                             value={row.priority}
-                            onChange={(e) => updateDraft("priority", e.target.value as ItemPriority)}
+                            onChange={(e) => commitSelectChange("priority", e.target.value as ItemPriority)}
                             onKeyDown={handleEditKeyDown}
                             className={`${INLINE_SELECT_CLASS} w-[76px]`}
                             autoFocus
@@ -1047,7 +1071,7 @@ export const ItemPanel = ({
                         {isEditingField("status") ? (
                           <Select
                             value={row.status}
-                            onChange={(e) => updateDraft("status", e.target.value as ItemStatus)}
+                            onChange={(e) => commitSelectChange("status", e.target.value as ItemStatus)}
                             onKeyDown={handleEditKeyDown}
                             className={`${INLINE_SELECT_CLASS} w-[88px]`}
                             autoFocus
@@ -1066,7 +1090,7 @@ export const ItemPanel = ({
                         {isEditingField("health") ? (
                           <Select
                             value={row.health}
-                            onChange={(e) => updateDraft("health", e.target.value as ItemHealth)}
+                            onChange={(e) => commitSelectChange("health", e.target.value as ItemHealth)}
                             onKeyDown={handleEditKeyDown}
                             className={`${INLINE_SELECT_CLASS} w-[88px]`}
                             autoFocus
@@ -1209,7 +1233,7 @@ export const ItemPanel = ({
                 <FormField label="关联任务名称">
                   <Select
                     value={draft.taskName ?? ""}
-                    onChange={(e) => updateDraft("taskName", e.target.value)}
+                    onChange={(e) => commitSelectChange("taskName", e.target.value)}
                     className="h-8 text-xs"
                   >
                     <option value="">不关联</option>
@@ -1249,7 +1273,7 @@ export const ItemPanel = ({
               <FormField label="优先级">
                 <select
                   value={draft.priority}
-                  onChange={(e) => updateDraft("priority", e.target.value as ItemPriority)}
+                  onChange={(e) => commitSelectChange("priority", e.target.value as ItemPriority)}
                   className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
                 >
                   {Object.values(ItemPriority).map((p) => (
@@ -1260,7 +1284,7 @@ export const ItemPanel = ({
               <FormField label="状态">
                 <select
                   value={draft.status}
-                  onChange={(e) => updateDraft("status", e.target.value as ItemStatus)}
+                  onChange={(e) => commitSelectChange("status", e.target.value as ItemStatus)}
                   className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
                 >
                   {Object.values(ItemStatus).map((s) => (
@@ -1271,7 +1295,7 @@ export const ItemPanel = ({
               <FormField label="健康状态">
                 <select
                   value={draft.health}
-                  onChange={(e) => updateDraft("health", e.target.value as ItemHealth)}
+                  onChange={(e) => commitSelectChange("health", e.target.value as ItemHealth)}
                   className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
                 >
                   {Object.values(ItemHealth).map((s) => (
@@ -1282,7 +1306,7 @@ export const ItemPanel = ({
               <FormField label="风险状态">
                 <select
                   value={draft.riskStatus}
-                  onChange={(e) => updateDraft("riskStatus", e.target.value as ItemRiskStatus)}
+                  onChange={(e) => commitSelectChange("riskStatus", e.target.value as ItemRiskStatus)}
                   className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
                 >
                   {Object.values(ItemRiskStatus).map((s) => (
@@ -1369,7 +1393,7 @@ export const ItemPanel = ({
                 <FormField label="关联任务名称">
                   <Select
                     value={draft.taskName ?? ""}
-                    onChange={(e) => updateDraft("taskName", e.target.value)}
+                    onChange={(e) => commitSelectChange("taskName", e.target.value)}
                     className="h-8 text-xs"
                   >
                     <option value="">不关联</option>
@@ -1409,7 +1433,7 @@ export const ItemPanel = ({
               <FormField label="优先级">
                 <select
                   value={draft.priority}
-                  onChange={(e) => updateDraft("priority", e.target.value as ItemPriority)}
+                  onChange={(e) => commitSelectChange("priority", e.target.value as ItemPriority)}
                   className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
                 >
                   {Object.values(ItemPriority).map((p) => (
@@ -1420,7 +1444,7 @@ export const ItemPanel = ({
               <FormField label="状态">
                 <select
                   value={draft.status}
-                  onChange={(e) => updateDraft("status", e.target.value as ItemStatus)}
+                  onChange={(e) => commitSelectChange("status", e.target.value as ItemStatus)}
                   className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
                 >
                   {Object.values(ItemStatus).map((s) => (
@@ -1431,7 +1455,7 @@ export const ItemPanel = ({
               <FormField label="健康状态">
                 <select
                   value={draft.health}
-                  onChange={(e) => updateDraft("health", e.target.value as ItemHealth)}
+                  onChange={(e) => commitSelectChange("health", e.target.value as ItemHealth)}
                   className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
                 >
                   {Object.values(ItemHealth).map((s) => (
@@ -1442,7 +1466,7 @@ export const ItemPanel = ({
               <FormField label="风险状态">
                 <select
                   value={draft.riskStatus}
-                  onChange={(e) => updateDraft("riskStatus", e.target.value as ItemRiskStatus)}
+                  onChange={(e) => commitSelectChange("riskStatus", e.target.value as ItemRiskStatus)}
                   className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
                 >
                   {Object.values(ItemRiskStatus).map((s) => (

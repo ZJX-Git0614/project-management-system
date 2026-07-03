@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
-import { Plus } from "lucide-react";
+import { ChevronLeft, ChevronRight, Plus, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -43,22 +43,24 @@ export type GanttTaskDraft = {
   predecessorTask: string;
 };
 
-const ROW_HEIGHT = 38;
-const HEADER_HEIGHT = 58;
-const BAR_HEIGHT = 14;
+const ROW_HEIGHT = 30;
+const HEADER_HEIGHT = 32;
+const BAR_HEIGHT = 10;
 const MIN_TIMELINE_WIDTH = 860;
-const LEFT_WIDTH_EXPANDED = 940;
-const LEFT_WIDTH_COLLAPSED = 420;
-const LEFT_COLUMNS_EXPANDED = "152px 240px 116px 58px 102px 102px 122px";
-const LEFT_COLUMNS_COLLAPSED = "152px 260px";
-const MIN_ZOOM = 6;
-const MAX_ZOOM = 46;
-const DEFAULT_ZOOM = 18;
+const LEFT_WIDTH_EXPANDED = 800;
+const LEFT_WIDTH_COLLAPSED = 360;
+const LEFT_COLUMNS_EXPANDED = "140px 100px 200px 52px 86px 86px 106px";
+const LEFT_COLUMNS_COLLAPSED = "140px 200px";
+const ZOOM_LEVELS = [1, 3, 8, 20, 60];
+const ZOOM_LABELS = ["60天", "30天", "15天", "5天", "1天"];
+const DEFAULT_ZOOM_INDEX = 2;
 
 const getTickEvery = (dayWidth: number) => {
-  if (dayWidth >= 30) return 1;
-  if (dayWidth >= 14) return 7;
-  return 14;
+  if (dayWidth >= 60) return 1;
+  if (dayWidth >= 20) return 5;
+  if (dayWidth >= 8) return 15;
+  if (dayWidth >= 3) return 30;
+  return 30;
 };
 
 const getTaskDepth = (taskCode?: string) => (
@@ -74,7 +76,7 @@ const leftPanelWidth = (collapsed: boolean) => (
 );
 
 const inlineFieldClass = cn(
-  "h-7 w-full min-w-0 rounded px-2 text-xs shadow-none transition-colors",
+  "h-6 w-full min-w-0 rounded px-1.5 text-xs shadow-none transition-colors",
   "!border-transparent !bg-transparent !ring-0 !ring-offset-0",
   "hover:!border-border/50 group-hover:!bg-muted/10",
   "focus:!border-primary/50 focus:!bg-background focus:!ring-1 focus:!ring-primary/20",
@@ -82,7 +84,7 @@ const inlineFieldClass = cn(
 );
 
 const inlineSelectClass = cn(
-  "h-7 w-full min-w-0 rounded px-2 text-xs shadow-none transition-colors",
+  "h-6 w-full min-w-0 rounded px-1.5 text-xs shadow-none transition-colors",
   "!border-transparent !bg-transparent !ring-0 !ring-offset-0",
   "hover:!border-border/50 group-hover:!bg-muted/10",
   "focus:!border-primary/50 focus:!bg-background focus:!ring-1 focus:!ring-primary/20",
@@ -122,11 +124,13 @@ export const GanttTimeline = ({
   onDeleteSelected,
   onReorderTasks,
 }: GanttTimelineProps) => {
-  const [dayWidth, setDayWidth] = useState(DEFAULT_ZOOM);
+  const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
+  const dayWidth = ZOOM_LEVELS[zoomIndex];
   const [detailsCollapsed, setDetailsCollapsed] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
+  const [hoverCollapse, setHoverCollapse] = useState(false);
   const range = getGanttDateRange(tasks);
   const rows = useMemo(() => buildGanttRows(tasks), [tasks]);
   const dependencyLinks = useMemo(() => buildGanttDependencyLinks(tasks), [tasks]);
@@ -172,8 +176,9 @@ export const GanttTimeline = ({
       <EmptyGanttTimeline
         emptyText={emptyText}
         dayWidth={dayWidth}
+        zoomIndex={zoomIndex}
         detailsCollapsed={detailsCollapsed}
-        setDayWidth={setDayWidth}
+        setZoomIndex={setZoomIndex}
         setDetailsCollapsed={setDetailsCollapsed}
         canCreate={canCreate}
         creatingParentId={creatingParentId}
@@ -199,7 +204,7 @@ export const GanttTimeline = ({
 
   return (
     <div className="overflow-hidden rounded-lg border border-border bg-card">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/20 px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/20 px-3 py-1.5">
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span className="font-medium text-foreground">项目计划</span>
           <span>{range.startDate} 至 {range.endDate}</span>
@@ -217,27 +222,29 @@ export const GanttTimeline = ({
             关键路径 {criticalCount}
           </div>
           {reordering && <span className="text-muted-foreground">排序保存中...</span>}
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 text-xs"
-            onClick={() => setDetailsCollapsed((prev) => !prev)}
-          >
-            {detailsCollapsed ? "展开列" : "折叠列"}
-          </Button>
-          <div className="flex items-center gap-2 rounded-md border border-border bg-card px-2 py-1">
-            <span className="text-muted-foreground">缩放</span>
-            <input
-              aria-label="甘特图缩放"
-              type="range"
-              min={MIN_ZOOM}
-              max={MAX_ZOOM}
-              step={2}
-              value={dayWidth}
-              onChange={(event) => setDayWidth(Number(event.target.value))}
-              className="h-4 w-28 accent-primary"
-            />
-            <span className="w-9 text-right text-muted-foreground">{dayWidth}px</span>
+
+          <div className="flex items-center gap-1 rounded-md border border-border bg-card">
+            <button
+              type="button"
+              onClick={() => setZoomIndex((i) => Math.max(0, i - 1))}
+              disabled={zoomIndex === 0}
+              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition hover:text-primary disabled:opacity-30"
+              aria-label="缩小"
+              title="缩小"
+            >
+              <ZoomOut className="h-3 w-3" />
+            </button>
+            <span className="w-10 text-center text-xs text-muted-foreground">{ZOOM_LABELS[zoomIndex]}</span>
+            <button
+              type="button"
+              onClick={() => setZoomIndex((i) => Math.min(ZOOM_LEVELS.length - 1, i + 1))}
+              disabled={zoomIndex === ZOOM_LEVELS.length - 1}
+              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition hover:text-primary disabled:opacity-30"
+              aria-label="放大"
+              title="放大"
+            >
+              <ZoomIn className="h-3 w-3" />
+            </button>
           </div>
           {canCreate && (
             <Button
@@ -288,7 +295,26 @@ export const GanttTimeline = ({
             width={timelineWidth}
           />
 
-          <div className="border-r border-border">
+          <div className="group sticky left-0 z-10 border-r border-border bg-card transition-colors duration-200 group-hover:border-primary/40">
+            <button
+              type="button"
+              className={cn(
+                "absolute -right-1 top-0 z-30 flex h-full w-1 cursor-pointer items-center justify-center transition-all duration-200",
+                hoverCollapse ? "bg-primary/5" : "bg-transparent"
+              )}
+              onMouseEnter={() => setHoverCollapse(true)}
+              onMouseLeave={() => setHoverCollapse(false)}
+              onClick={() => setDetailsCollapsed((prev) => !prev)}
+              title={detailsCollapsed ? "展开列" : "折叠列"}
+              aria-label={detailsCollapsed ? "展开列" : "折叠列"}
+            >
+              <div className={cn(
+                "flex h-8 items-center justify-center rounded-sm transition-all duration-200",
+                hoverCollapse ? "opacity-100" : "opacity-0"
+              )}>
+                {detailsCollapsed ? <ChevronRight className="h-2.5 w-2.5 text-primary/70" /> : <ChevronLeft className="h-2.5 w-2.5 text-primary/70" />}
+              </div>
+            </button>
             {rows.map((row, index) => (
                 <EditableTaskRow
                   key={row.id}
@@ -363,7 +389,7 @@ export const GanttTimeline = ({
             {rows.map((row) => {
               const visualIndex = rowById.get(row.id)?.index ?? 0;
               const left = diffDays(visibleStartDate, row.startDate) * config.dayWidth;
-              const width = Math.max(config.dayWidth * Math.max(1, row.durationDays), 16);
+              const width = config.dayWidth * Math.max(1, row.durationDays);
               const showBarLabel = width >= 72;
               const barLabel = row.taskName || row.taskCode;
               return (
@@ -405,19 +431,21 @@ const EmptyGanttTimeline = ({
   canCreate,
   creatingParentId,
   dayWidth,
+  zoomIndex,
   detailsCollapsed,
   emptyText,
   onCreateTask,
-  setDayWidth,
+  setZoomIndex,
   setDetailsCollapsed,
 }: {
   canCreate: boolean;
   creatingParentId: string | null;
   dayWidth: number;
+  zoomIndex: number;
   detailsCollapsed: boolean;
   emptyText: string;
   onCreateTask?: (parentTask?: ProjectGanttTask) => void;
-  setDayWidth: (value: number) => void;
+  setZoomIndex: (value: number | ((prev: number) => number)) => void;
   setDetailsCollapsed: (value: boolean | ((prev: boolean) => boolean)) => void;
 }) => {
   const config = { dayWidth, tickEvery: getTickEvery(dayWidth) };
@@ -426,10 +454,11 @@ const EmptyGanttTimeline = ({
   const timelineWidth = Math.max(MIN_TIMELINE_WIDTH, visibleDays * config.dayWidth);
   const leftWidth = leftPanelWidth(detailsCollapsed);
   const bodyHeight = ROW_HEIGHT * 3;
+  const [hoverCollapse, setHoverCollapse] = useState(false);
 
   return (
     <div className="overflow-hidden rounded-lg border border-border bg-card">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/20 px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/20 px-3 py-1.5">
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span className="font-medium text-foreground">项目计划</span>
           <span>暂无排期数据</span>
@@ -445,27 +474,29 @@ const EmptyGanttTimeline = ({
             <span className="inline-block h-2.5 w-5 rounded-full bg-destructive" />
             关键路径 0
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 text-xs"
-            onClick={() => setDetailsCollapsed((prev) => !prev)}
-          >
-            {detailsCollapsed ? "展开列" : "折叠列"}
-          </Button>
-          <div className="flex items-center gap-2 rounded-md border border-border bg-card px-2 py-1">
-            <span className="text-muted-foreground">缩放</span>
-            <input
-              aria-label="甘特图缩放"
-              type="range"
-              min={MIN_ZOOM}
-              max={MAX_ZOOM}
-              step={2}
-              value={dayWidth}
-              onChange={(event) => setDayWidth(Number(event.target.value))}
-              className="h-4 w-28 accent-primary"
-            />
-            <span className="w-9 text-right text-muted-foreground">{dayWidth}px</span>
+
+          <div className="flex items-center gap-1 rounded-md border border-border bg-card">
+            <button
+              type="button"
+              onClick={() => setZoomIndex((i) => Math.max(0, i - 1))}
+              disabled={zoomIndex === 0}
+              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition hover:text-primary disabled:opacity-30"
+              aria-label="缩小"
+              title="缩小"
+            >
+              <ZoomOut className="h-3 w-3" />
+            </button>
+            <span className="w-10 text-center text-xs text-muted-foreground">{ZOOM_LABELS[zoomIndex]}</span>
+            <button
+              type="button"
+              onClick={() => setZoomIndex((i) => Math.min(ZOOM_LEVELS.length - 1, i + 1))}
+              disabled={zoomIndex === ZOOM_LEVELS.length - 1}
+              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition hover:text-primary disabled:opacity-30"
+              aria-label="放大"
+              title="放大"
+            >
+              <ZoomIn className="h-3 w-3" />
+            </button>
           </div>
           {canCreate && (
             <Button
@@ -494,7 +525,26 @@ const EmptyGanttTimeline = ({
             width={timelineWidth}
           />
 
-          <div className="flex items-center justify-center border-r border-border bg-background text-xs text-muted-foreground" style={{ height: bodyHeight }}>
+          <div className="group sticky left-0 z-10 flex items-center justify-center border-r border-border bg-background text-xs text-muted-foreground transition-colors duration-200 group-hover:border-primary/40" style={{ height: bodyHeight }}>
+            <button
+              type="button"
+              className={cn(
+                "absolute -right-1 top-0 z-30 flex h-full w-1 cursor-pointer items-center justify-center transition-all duration-200",
+                hoverCollapse ? "bg-primary/5" : "bg-transparent"
+              )}
+              onMouseEnter={() => setHoverCollapse(true)}
+              onMouseLeave={() => setHoverCollapse(false)}
+              onClick={() => setDetailsCollapsed((prev) => !prev)}
+              title={detailsCollapsed ? "展开列" : "折叠列"}
+              aria-label={detailsCollapsed ? "展开列" : "折叠列"}
+            >
+              <div className={cn(
+                "flex h-8 items-center justify-center rounded-sm transition-all duration-200",
+                hoverCollapse ? "opacity-100" : "opacity-0"
+              )}>
+                {detailsCollapsed ? <ChevronRight className="h-2.5 w-2.5 text-primary/70" /> : <ChevronLeft className="h-2.5 w-2.5 text-primary/70" />}
+              </div>
+            </button>
             {emptyText}
           </div>
           <div className="relative" style={{ width: timelineWidth, height: bodyHeight }}>
@@ -518,17 +568,17 @@ const EmptyGanttTimeline = ({
 
 const TaskGridHeader = ({ collapsed }: { collapsed: boolean }) => (
   <div
-    className="sticky top-0 z-10 grid items-center gap-2 border-b border-r border-border bg-muted px-3 text-xs font-medium text-foreground"
+    className="sticky top-0 left-0 z-20 grid items-center gap-1 border-b border-r border-border bg-muted px-2 text-[11px] font-medium text-foreground"
     style={{
       height: HEADER_HEIGHT,
       gridTemplateColumns: taskGridColumns(collapsed),
     }}
   >
     <span>任务ID</span>
+    {!collapsed && <span>任务类别</span>}
     <span>任务名称</span>
     {!collapsed && (
       <>
-        <span>类别</span>
         <span>工期</span>
         <span>开始</span>
         <span>完成</span>
@@ -610,7 +660,7 @@ const EditableTaskRow = ({
   return (
     <div
       className={cn(
-        "group grid cursor-grab items-center gap-2 border-b border-border px-3 text-xs active:cursor-grabbing",
+        "group grid cursor-grab items-center gap-1 border-b border-border px-2 text-xs active:cursor-grabbing",
         isChildTask ? "bg-primary/5" : index % 2 === 0 ? "bg-background" : "bg-muted/25",
         row.isCritical
           ? "shadow-[inset_3px_0_0_hsl(var(--destructive))]"
@@ -659,6 +709,17 @@ const EditableTaskRow = ({
           </button>
         )}
       </div>
+      {!collapsed && (
+        <Input
+          value={draft.taskCategory}
+          onBlur={commitDraft}
+          onChange={(event) => updateDraft("taskCategory", event.target.value)}
+          onKeyDown={handleKeyDown}
+          className={inlineFieldClass}
+          disabled={!canEdit || isSaving}
+          placeholder="任务类别"
+        />
+      )}
       <Input
         value={taskNameDisplay}
         onBlur={commitDraft}
@@ -672,15 +733,6 @@ const EditableTaskRow = ({
       />
       {!collapsed && (
         <>
-          <Input
-            value={draft.taskCategory}
-            onBlur={commitDraft}
-            onChange={(event) => updateDraft("taskCategory", event.target.value)}
-            onKeyDown={handleKeyDown}
-            className={inlineFieldClass}
-            disabled={!canEdit || isSaving}
-            placeholder="任务类别"
-          />
           <Input
             type="number"
             min={1}
@@ -756,36 +808,39 @@ const TimelineHeader = ({
   visibleStartDate: string;
   width: number;
 }) => {
-  const months = buildMonthBands(visibleStartDate, visibleDays, config.dayWidth);
   const ticks = Array.from({ length: visibleDays }, (_, index) => ({
     date: addCalendarDays(visibleStartDate, index),
     x: index * config.dayWidth,
   })).filter((_, index) => index % config.tickEvery === 0);
 
+  const formatDate = (dateStr: string): string => {
+    const d = parseGanttDate(dateStr);
+    const y = d.getUTCFullYear();
+    const m = d.getUTCMonth() + 1;
+    const day = d.getUTCDate();
+    if (config.dayWidth >= 60) return `${m}-${String(day).padStart(2, "0")}`;
+    if (config.dayWidth >= 20) return `${m}/${day}`;
+    if (config.dayWidth >= 8) return `${m}月`;
+    return `${y}年${m}月`;
+  };
+
   return (
     <div className="sticky top-0 z-10 border-b border-border bg-muted" style={{ width, height: HEADER_HEIGHT }}>
       <svg height={HEADER_HEIGHT} width={width} aria-hidden="true">
-        {months.map((month) => (
-          <g key={`${month.label}-${month.x}`}>
-            <rect x={month.x} y={0} width={month.width} height={32} className="fill-muted" />
-            <text x={month.x + 8} y={21} className="fill-foreground" fontSize={12} fontWeight={600}>
-              {month.label}
-            </text>
-          </g>
-        ))}
         {ticks.map((tick) => {
           const date = parseGanttDate(tick.date);
           const isWeekend = [0, 6].includes(date.getUTCDay());
+          const label = formatDate(tick.date);
           return (
             <g key={tick.date}>
-              <line x1={tick.x} x2={tick.x} y1={32} y2={HEADER_HEIGHT} className="stroke-border" />
+              <line x1={tick.x} x2={tick.x} y1={0} y2={HEADER_HEIGHT} className="stroke-border" />
               <text
-                x={tick.x + 5}
-                y={56}
+                x={tick.x + 4}
+                y={HEADER_HEIGHT / 2 + 4}
                 className={isWeekend ? "fill-muted-foreground" : "fill-foreground"}
                 fontSize={11}
               >
-                {tick.date.slice(5)}
+                {label}
               </text>
             </g>
           );
@@ -859,27 +914,4 @@ const DependencyConnector = ({
   );
 };
 
-const buildMonthBands = (startDate: string, visibleDays: number, dayWidth: number) => {
-  const bands: Array<{ label: string; x: number; width: number }> = [];
-  let currentLabel = "";
-  let startIndex = 0;
 
-  for (let index = 0; index < visibleDays; index += 1) {
-    const date = parseGanttDate(addCalendarDays(startDate, index));
-    const label = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
-    if (!currentLabel) currentLabel = label;
-    if (label !== currentLabel) {
-      bands.push({ label: currentLabel, x: startIndex * dayWidth, width: (index - startIndex) * dayWidth });
-      currentLabel = label;
-      startIndex = index;
-    }
-  }
-
-  bands.push({
-    label: currentLabel,
-    x: startIndex * dayWidth,
-    width: Math.max(1, (visibleDays - startIndex) * dayWidth),
-  });
-
-  return bands;
-};

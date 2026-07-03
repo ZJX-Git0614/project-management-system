@@ -16,7 +16,7 @@ const Select = React.forwardRef<
         "focus-visible:border-primary/60 focus-visible:ring-2 focus-visible:ring-ring/30 focus-visible:outline-none",
         "disabled:cursor-not-allowed disabled:opacity-50",
         "bg-[image:url(\"data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='none' stroke='%23808894'%3E%3Cpath d='m3 5 3 3 3-3'/%3E%3C/svg%3E\")] bg-[length:12px_12px] bg-[right_10px_center] bg-no-repeat pr-8",
-        className,
+        className
       )}
       {...props}
     >
