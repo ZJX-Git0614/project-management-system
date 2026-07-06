@@ -1,8 +1,6 @@
 "use client";
 
-import { KeyboardEvent, useState } from "react";
-import { flushSync } from "react-dom";
-import { Badge } from "@/components/ui/badge";
+import { KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -18,6 +16,8 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/confirm-provider";
 import { usePermission } from "@/lib/use-permission";
+import { useCurrentProject } from "@/contexts/current-project-context";
+import { api } from "@/lib/api-client";
 
 type RiskLevel = "高" | "中" | "低";
 type RiskStatus = "识别中" | "跟踪中" | "处理中" | "已关闭";
@@ -40,114 +40,41 @@ interface RiskRegisterItem {
   linkedItemName: string;
   category: string;
   trigger: string;
-  probability: RiskLevel;
-  impact: RiskLevel;
-  level: RiskLevel;
+  probability: string;
+  impact: string;
+  level: string;
   response: string;
   owner: string;
-  status: RiskStatus;
+  status: string;
   targetDate: string;
 }
 
-const itemNameOptions = [
-  "结构件图纸会签",
-  "PCB板焊接调试",
-  "仿真接口文档编写",
-  "质量检验报告整理",
-];
+interface GanttTaskOption {
+  id: string;
+  taskName: string;
+  taskCode: string;
+}
 
 const riskLevelOptions: RiskLevel[] = ["高", "中", "低"];
 const riskStatusOptions: RiskStatus[] = ["识别中", "跟踪中", "处理中", "已关闭"];
 
-const initialRiskItems: RiskRegisterItem[] = [
-  {
-    id: "Risk001",
-    riskName: "关键器件交付延期",
-    linkedItemName: "结构件图纸会签",
-    category: "供应链",
-    trigger: "供应商交期超过计划到货日期",
-    probability: "中",
-    impact: "高",
-    level: "高",
-    response: "锁定替代料号，提前确认安全库存和二供方案",
-    owner: "赵佳鑫",
-    status: "处理中",
-    targetDate: "2026-07-10",
-  },
-  {
-    id: "Risk002",
-    riskName: "联调环境资源冲突",
-    linkedItemName: "PCB板焊接调试",
-    category: "进度",
-    trigger: "测试设备占用导致联调窗口压缩",
-    probability: "中",
-    impact: "中",
-    level: "中",
-    response: "按模块拆分联调计划，预留夜间测试窗口",
-    owner: "曹乾",
-    status: "跟踪中",
-    targetDate: "2026-07-15",
-  },
-  {
-    id: "Risk003",
-    riskName: "客户需求边界变更",
-    linkedItemName: "仿真接口文档编写",
-    category: "范围",
-    trigger: "新增接口或验收口径变化",
-    probability: "低",
-    impact: "高",
-    level: "中",
-    response: "建立变更确认单，评估工期和成本影响后再纳入计划",
-    owner: "王占新",
-    status: "识别中",
-    targetDate: "2026-07-20",
-  },
-  {
-    id: "Risk004",
-    riskName: "现场验收资料不完整",
-    linkedItemName: "质量检验报告整理",
-    category: "交付",
-    trigger: "测试报告、图纸或签字记录缺失",
-    probability: "低",
-    impact: "中",
-    level: "低",
-    response: "按验收清单逐项归档，周会同步缺口项",
-    owner: "潘露萍",
-    status: "已关闭",
-    targetDate: "2026-07-05",
-  },
-];
+const taskOptionLabel = (task: GanttTaskOption) =>
+  task.taskCode ? `${task.taskCode} · ${task.taskName}` : task.taskName;
 
 const inlineInputClass = "h-7 min-w-0 rounded border-border bg-background px-2 text-xs";
-const inlineSelectClass = "h-7 min-w-[96px] rounded border-border bg-background px-2 text-xs";
+const inlineSelectClass = "h-7 min-w-[96px] px-2 text-xs";
 const inlineTextareaClass = "min-h-14 min-w-[180px] resize-y rounded border-border bg-background px-2 py-1 text-xs";
-
-const levelVariant: Record<RiskLevel, "destructive" | "warning" | "success"> = {
-  高: "destructive",
-  中: "warning",
-  低: "success",
-};
-
-const statusVariant: Record<RiskStatus, "secondary" | "default" | "warning" | "success"> = {
-  识别中: "secondary",
-  跟踪中: "default",
-  处理中: "warning",
-  已关闭: "success",
-};
-
-const nextRiskId = (items: RiskRegisterItem[]) => {
-  const next = items.reduce((max, item) => {
-    const value = Number.parseInt(item.id.replace(/^Risk/, ""), 10);
-    return Number.isFinite(value) ? Math.max(max, value) : max;
-  }, 0) + 1;
-  return `Risk${String(next).padStart(3, "0")}`;
-};
 
 export default function RiskRegisterPage() {
   const { can } = usePermission();
   const confirm = useConfirm();
-  const [riskItems, setRiskItems] = useState<RiskRegisterItem[]>(initialRiskItems);
+  const { currentProjectId } = useCurrentProject();
+  const [riskItems, setRiskItems] = useState<RiskRegisterItem[]>([]);
+  const [taskOptions, setTaskOptions] = useState<GanttTaskOption[]>([]);
+  const [loading, setLoading] = useState(true);
   const [editingCell, setEditingCell] = useState<{ id: string; field: EditableRiskField } | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const editValueRef = useRef("");
   const [draft, setDraft] = useState<RiskRegisterItem | null>(null);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -156,111 +83,177 @@ export default function RiskRegisterPage() {
   const canEdit = can("risk-register:edit");
   const canDelete = can("risk-register:delete");
 
-  const closeEdit = () => setEditingCell(null);
+  const fetchData = useCallback(async () => {
+    if (!currentProjectId) {
+      setRiskItems([]);
+      setLoading(false);
+      return;
+    }
+    try {
+      const data = await api.get<RiskRegisterItem[]>(`/api/projects/${currentProjectId}/risk-register`);
+      setRiskItems(Array.isArray(data) ? data : []);
+    } catch {
+      setRiskItems([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [currentProjectId]);
 
-  const updateRisk = <K extends EditableRiskField>(
-    id: string,
-    field: K,
-    value: RiskRegisterItem[K]
-  ) => {
-    flushSync(() => {
-      setRiskItems((prev) =>
-        prev.map((item) => (item.id === id ? { ...item, [field]: value } : item))
-      );
-      setEditingCell(null);
-    });
+  useEffect(() => { void fetchData(); }, [fetchData]);
+
+  useEffect(() => {
+    if (!currentProjectId) { setTaskOptions([]); return; }
+    api.get<GanttTaskOption[]>(`/api/projects/${currentProjectId}/gantt-tasks`)
+      .then((tasks) => setTaskOptions(tasks.filter((t) => t.taskName.trim())))
+      .catch(() => setTaskOptions([]));
+  }, [currentProjectId]);
+
+  // ---- 编辑态管理 ----
+  const closeEdit = () => { setEditingCell(null); setEditValue(""); editValueRef.current = ""; };
+
+  const isEditing = (id: string, field: EditableRiskField) =>
+    editingCell?.id === id && editingCell.field === field;
+
+  const openTextEdit = (item: RiskRegisterItem, field: EditableRiskField) => {
+    if (!canEdit) return;
+    const v = String(item[field] ?? "");
+    setEditingCell({ id: item.id, field });
+    setEditValue(v);
+    editValueRef.current = v;
   };
 
-  const isEditing = (item: RiskRegisterItem, field: EditableRiskField) =>
-    editingCell?.id === item.id && editingCell.field === field;
+  const setEdit = (v: string) => { setEditValue(v); editValueRef.current = v; };
 
+  // 文本字段提交
+  const commitTextChange = async (id: string, field: EditableRiskField) => {
+    if (!currentProjectId) return;
+    const value = editValueRef.current;
+    try {
+      await api.put(`/api/projects/${currentProjectId}/risk-register/${id}`, { [field]: value });
+      setRiskItems((prev) => prev.map((r) => (r.id === id ? { ...r, [field]: value } : r)));
+      closeEdit();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "保存失败");
+    }
+  };
+
+  // 下拉字段提交（选中即保存）
+  const commitSelectChange = async (id: string, field: EditableRiskField, value: string) => {
+    if (!currentProjectId) return;
+    try {
+      await api.put(`/api/projects/${currentProjectId}/risk-register/${id}`, { [field]: value });
+      setRiskItems((prev) => prev.map((r) => (r.id === id ? { ...r, [field]: value } : r)));
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "保存失败");
+    }
+  };
+
+  const handleEditKeyDown = (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    if (e.key === "Escape") { e.preventDefault(); closeEdit(); return; }
+    if (e.key !== "Enter") return;
+    if (e.currentTarget instanceof HTMLTextAreaElement && e.shiftKey) return;
+    e.preventDefault();
+    if (editingCell) commitTextChange(editingCell.id, editingCell.field);
+  };
+
+  // ---- 新建 ----
   const openCreate = () => {
+    const firstOption = taskOptions.length > 0 ? taskOptionLabel(taskOptions[0]) : "";
     setDraft({
-      id: nextRiskId(riskItems),
-      riskName: "",
-      linkedItemName: itemNameOptions[0] ?? "",
-      category: "",
-      trigger: "",
-      probability: "中",
-      impact: "中",
-      level: "中",
-      response: "",
-      owner: "",
-      status: "识别中",
-      targetDate: "",
+      id: "", riskName: "", linkedItemName: firstOption, category: "", trigger: "",
+      probability: "中", impact: "中", level: "中", response: "", owner: "",
+      status: "识别中", targetDate: "",
     });
   };
 
-  const updateDraft = <K extends EditableRiskField>(field: K, value: RiskRegisterItem[K]) => {
+  const updateDraft = (field: EditableRiskField, value: string) => {
     setDraft((prev) => (prev ? { ...prev, [field]: value } : prev));
   };
 
-  const submitCreate = () => {
-    if (!draft) return;
-    if (!draft.riskName.trim() || !draft.owner.trim()) {
-      alert("请填写风险名称和责任人");
-      return;
+  const submitCreate = async () => {
+    if (!draft || !currentProjectId) return;
+    if (!draft.riskName.trim() || !draft.owner.trim()) { alert("请填写风险名称和责任人"); return; }
+    try {
+      const created = await api.post<RiskRegisterItem>(`/api/projects/${currentProjectId}/risk-register`, draft);
+      setRiskItems((prev) => [...prev, created]);
+      setDraft(null);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "创建失败");
     }
-    setRiskItems((prev) => [...prev, draft]);
-    setDraft(null);
   };
 
-  const toggleSelectionMode = () => {
-    setSelectionMode((prev) => !prev);
-    setSelectedIds([]);
-  };
-
+  // ---- 批量删除 ----
+  const toggleSelectionMode = () => { setSelectionMode((prev) => !prev); setSelectedIds([]); };
   const toggleSelected = (id: string) => {
-    setSelectedIds((prev) => (
-      prev.includes(id) ? prev.filter((itemId) => itemId !== id) : [...prev, id]
-    ));
+    setSelectedIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
   };
-
   const deleteSelected = async () => {
-    if (selectedIds.length === 0) return;
+    if (selectedIds.length === 0 || !currentProjectId) return;
     if (!(await confirm(`确认删除选中的 ${selectedIds.length} 条风险？`))) return;
-    setRiskItems((prev) => prev.filter((item) => !selectedIds.includes(item.id)));
-    setSelectedIds([]);
-    setSelectionMode(false);
-  };
-
-  const handleEditKeyDown = (
-    event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>
-  ) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      closeEdit();
-      return;
+    try {
+      await Promise.all(selectedIds.map((id) => api.delete(`/api/projects/${currentProjectId}/risk-register/${id}`)));
+      setRiskItems((prev) => prev.filter((r) => !selectedIds.includes(r.id)));
+      setSelectedIds([]); setSelectionMode(false);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "删除失败");
     }
-    if (event.key !== "Enter") return;
-    if (event.currentTarget instanceof HTMLTextAreaElement && event.shiftKey) return;
-    event.preventDefault();
-    event.stopPropagation();
-    closeEdit();
   };
 
-  const editTriggerProps = (item: RiskRegisterItem, field: EditableRiskField) => (
-    canEdit ? {
-      role: "button" as const,
-      tabIndex: 0,
-      onClick: () => setEditingCell({ id: item.id, field }),
-      onKeyDown: (event: KeyboardEvent<HTMLElement>) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          setEditingCell({ id: item.id, field });
-        }
-      },
-    } : {}
-  );
-
+  // ---- 渲染 ----
   if (!can("risk-register:view")) {
-    return (
-      <Card className="border-warning/30 bg-warning/5">
-        <CardContent className="py-4 text-sm">当前角色无权查看风险登记册。</CardContent>
-      </Card>
-    );
+    return <Card className="border-warning/30 bg-warning/5"><CardContent className="py-4 text-sm">当前角色无权查看风险登记册。</CardContent></Card>;
   }
+  if (loading) {
+    return <Card><CardContent className="py-4 text-sm text-muted-foreground">加载中…</CardContent></Card>;
+  }
+
+  const renderTextCell = (item: RiskRegisterItem, field: EditableRiskField, display: string, inputClass: string, placeholder?: string) => {
+    if (isEditing(item.id, field)) {
+      return (
+        <Input
+          value={editValue}
+          onChange={(e) => setEdit(e.target.value)}
+          onKeyDown={handleEditKeyDown}
+          onBlur={() => commitTextChange(item.id, field)}
+          className={inputClass}
+          placeholder={placeholder}
+          autoFocus
+        />
+      );
+    }
+    return (
+      <div
+        className={canEdit ? "cursor-pointer rounded px-1 py-0.5 hover:bg-primary/5" : ""}
+        onClick={() => openTextEdit(item, field)}
+      >
+        {display}
+      </div>
+    );
+  };
+
+  const renderTextareaCell = (item: RiskRegisterItem, field: EditableRiskField, display: string, placeholder?: string) => {
+    if (isEditing(item.id, field)) {
+      return (
+        <Textarea
+          value={editValue}
+          onChange={(e) => setEdit(e.target.value)}
+          onKeyDown={handleEditKeyDown}
+          onBlur={() => commitTextChange(item.id, field)}
+          className={inlineTextareaClass}
+          placeholder={placeholder}
+          autoFocus
+        />
+      );
+    }
+    return (
+      <div
+        className={canEdit ? "cursor-pointer rounded px-1 py-0.5 text-muted-foreground hover:bg-primary/5" : "text-muted-foreground"}
+        onClick={() => openTextEdit(item, field)}
+      >
+        {display}
+      </div>
+    );
+  };
 
   return (
     <Card>
@@ -268,10 +261,8 @@ export default function RiskRegisterPage() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <CardTitle className="text-sm">风险登记册</CardTitle>
           <div className="flex items-center gap-2">
-            {canCreate && (
-              <Button size="sm" className="h-8 text-xs" onClick={openCreate} disabled={draft !== null}>
-                新增风险
-              </Button>
+            {canCreate && currentProjectId && (
+              <Button size="sm" className="h-8 text-xs" onClick={openCreate} disabled={draft !== null}>新增风险</Button>
             )}
             {canDelete && (
               <Button variant="outline" size="sm" className="h-8 text-xs" onClick={toggleSelectionMode}>
@@ -279,13 +270,7 @@ export default function RiskRegisterPage() {
               </Button>
             )}
             {canDelete && selectionMode && (
-              <Button
-                variant="destructive"
-                size="sm"
-                className="h-8 text-xs"
-                onClick={() => void deleteSelected()}
-                disabled={selectedIds.length === 0}
-              >
+              <Button variant="destructive" size="sm" className="h-8 text-xs" onClick={() => void deleteSelected()} disabled={selectedIds.length === 0}>
                 删除 {selectedIds.length}
               </Button>
             )}
@@ -297,9 +282,8 @@ export default function RiskRegisterPage() {
           <TableHeader>
             <TableRow>
               {selectionMode && <TableHead className="w-[48px] whitespace-nowrap">选择</TableHead>}
-              <TableHead className="whitespace-nowrap">风险ID</TableHead>
               <TableHead className="min-w-[180px] whitespace-nowrap">风险名称</TableHead>
-              <TableHead className="min-w-[180px] whitespace-nowrap">关联事项名称</TableHead>
+              <TableHead className="min-w-[200px] whitespace-nowrap">关联事项</TableHead>
               <TableHead className="whitespace-nowrap">类别</TableHead>
               <TableHead className="min-w-[180px] whitespace-nowrap">触发条件</TableHead>
               <TableHead className="whitespace-nowrap">概率</TableHead>
@@ -312,285 +296,67 @@ export default function RiskRegisterPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
+            {/* ---- 新建行 ---- */}
             {draft && (
               <TableRow className="align-top bg-primary/5">
                 {selectionMode && <TableCell />}
-                <TableCell className="whitespace-nowrap font-mono text-xs font-semibold text-muted-foreground">
-                  {draft.id}
-                </TableCell>
+                <TableCell><Input value={draft.riskName} onChange={(e) => updateDraft("riskName", e.target.value)} className={`${inlineInputClass} min-w-[160px]`} placeholder="风险名称" autoFocus /></TableCell>
                 <TableCell>
-                  <Input
-                    value={draft.riskName}
-                    onChange={(event) => updateDraft("riskName", event.target.value)}
-                    className={`${inlineInputClass} min-w-[160px]`}
-                    placeholder="风险名称"
-                    autoFocus
-                  />
-                </TableCell>
-                <TableCell>
-                  <Select
-                    value={draft.linkedItemName}
-                    onChange={(event) => updateDraft("linkedItemName", event.target.value)}
-                    className={`${inlineSelectClass} min-w-[170px]`}
-                  >
-                    {itemNameOptions.map((option) => (
-                      <option key={option} value={option}>{option}</option>
-                    ))}
+                  <Select value={draft.linkedItemName} onChange={(e) => updateDraft("linkedItemName", e.target.value)} className={`${inlineSelectClass} min-w-[200px]`}>
+                    <option value="">不关联</option>
+                    {taskOptions.map((t) => (<option key={t.id} value={taskOptionLabel(t)}>{taskOptionLabel(t)}</option>))}
                   </Select>
                 </TableCell>
-                <TableCell>
-                  <Input
-                    value={draft.category}
-                    onChange={(event) => updateDraft("category", event.target.value)}
-                    className={`${inlineInputClass} w-[96px]`}
-                    placeholder="类别"
-                  />
-                </TableCell>
-                <TableCell>
-                  <Textarea
-                    value={draft.trigger}
-                    onChange={(event) => updateDraft("trigger", event.target.value)}
-                    className={inlineTextareaClass}
-                    placeholder="触发条件"
-                  />
-                </TableCell>
-                <TableCell>
-                  <Select
-                    value={draft.probability}
-                    onChange={(event) => updateDraft("probability", event.target.value as RiskLevel)}
-                    className={inlineSelectClass}
-                  >
-                    {riskLevelOptions.map((option) => (
-                      <option key={option} value={option}>{option}</option>
-                    ))}
-                  </Select>
-                </TableCell>
-                <TableCell>
-                  <Select
-                    value={draft.impact}
-                    onChange={(event) => updateDraft("impact", event.target.value as RiskLevel)}
-                    className={inlineSelectClass}
-                  >
-                    {riskLevelOptions.map((option) => (
-                      <option key={option} value={option}>{option}</option>
-                    ))}
-                  </Select>
-                </TableCell>
-                <TableCell>
-                  <Select
-                    value={draft.level}
-                    onChange={(event) => updateDraft("level", event.target.value as RiskLevel)}
-                    className={inlineSelectClass}
-                  >
-                    {riskLevelOptions.map((option) => (
-                      <option key={option} value={option}>{option}</option>
-                    ))}
-                  </Select>
-                </TableCell>
-                <TableCell>
-                  <Textarea
-                    value={draft.response}
-                    onChange={(event) => updateDraft("response", event.target.value)}
-                    className={inlineTextareaClass}
-                    placeholder="应对措施"
-                  />
-                </TableCell>
-                <TableCell>
-                  <Input
-                    value={draft.owner}
-                    onChange={(event) => updateDraft("owner", event.target.value)}
-                    className={`${inlineInputClass} w-[96px]`}
-                    placeholder="责任人"
-                  />
-                </TableCell>
-                <TableCell>
-                  <Select
-                    value={draft.status}
-                    onChange={(event) => updateDraft("status", event.target.value as RiskStatus)}
-                    className={inlineSelectClass}
-                  >
-                    {riskStatusOptions.map((option) => (
-                      <option key={option} value={option}>{option}</option>
-                    ))}
-                  </Select>
-                </TableCell>
+                <TableCell><Input value={draft.category} onChange={(e) => updateDraft("category", e.target.value)} className={`${inlineInputClass} w-[96px]`} placeholder="类别" /></TableCell>
+                <TableCell><Textarea value={draft.trigger} onChange={(e) => updateDraft("trigger", e.target.value)} className={inlineTextareaClass} placeholder="触发条件" /></TableCell>
+                <TableCell><Select value={draft.probability} onChange={(e) => updateDraft("probability", e.target.value)} className={inlineSelectClass}>{riskLevelOptions.map((o) => (<option key={o} value={o}>{o}</option>))}</Select></TableCell>
+                <TableCell><Select value={draft.impact} onChange={(e) => updateDraft("impact", e.target.value)} className={inlineSelectClass}>{riskLevelOptions.map((o) => (<option key={o} value={o}>{o}</option>))}</Select></TableCell>
+                <TableCell><Select value={draft.level} onChange={(e) => updateDraft("level", e.target.value)} className={inlineSelectClass}>{riskLevelOptions.map((o) => (<option key={o} value={o}>{o}</option>))}</Select></TableCell>
+                <TableCell><Textarea value={draft.response} onChange={(e) => updateDraft("response", e.target.value)} className={inlineTextareaClass} placeholder="应对措施" /></TableCell>
+                <TableCell><Input value={draft.owner} onChange={(e) => updateDraft("owner", e.target.value)} className={`${inlineInputClass} w-[96px]`} placeholder="责任人" /></TableCell>
+                <TableCell><Select value={draft.status} onChange={(e) => updateDraft("status", e.target.value)} className={inlineSelectClass}>{riskStatusOptions.map((o) => (<option key={o} value={o}>{o}</option>))}</Select></TableCell>
                 <TableCell>
                   <div className="flex items-center gap-2">
-                    <Input
-                      type="date"
-                      value={draft.targetDate}
-                      onChange={(event) => updateDraft("targetDate", event.target.value)}
-                      className={`${inlineInputClass} w-[122px]`}
-                    />
-                    <Button size="sm" className="h-7 text-xs" onClick={submitCreate}>保存</Button>
+                    <Input type="date" value={draft.targetDate} onChange={(e) => updateDraft("targetDate", e.target.value)} className={`${inlineInputClass} w-[122px]`} />
+                    <Button size="sm" className="h-7 text-xs" onClick={() => void submitCreate()}>保存</Button>
                     <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setDraft(null)}>取消</Button>
                   </div>
                 </TableCell>
               </TableRow>
             )}
+            {/* ---- 数据行 ---- */}
             {riskItems.map((item) => (
-              <TableRow
-                key={item.id}
-                className={editingCell?.id === item.id ? "align-top bg-primary/5" : "align-top"}
-              >
+              <TableRow key={item.id} className={editingCell?.id === item.id ? "align-top bg-primary/5" : "align-top"}>
                 {selectionMode && (
                   <TableCell>
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.includes(item.id)}
-                      onChange={() => toggleSelected(item.id)}
-                      onClick={(event) => event.stopPropagation()}
-                      className="h-3.5 w-3.5 rounded border-border bg-background"
-                    />
+                    <input type="checkbox" checked={selectedIds.includes(item.id)} onChange={() => toggleSelected(item.id)} onClick={(e) => e.stopPropagation()} className="h-3.5 w-3.5 rounded border-border bg-background" />
                   </TableCell>
                 )}
-                <TableCell className="whitespace-nowrap font-mono text-xs font-semibold text-muted-foreground">
-                  {item.id}
+                <TableCell>{renderTextCell(item, "riskName", item.riskName, `${inlineInputClass} min-w-[160px]`, "风险名称")}</TableCell>
+                <TableCell>
+                  <Select variant="ghost" value={item.linkedItemName} onChange={(e) => commitSelectChange(item.id, "linkedItemName", e.target.value)} className={`${inlineSelectClass} min-w-[200px]`}>
+                    <option value="">不关联</option>
+                    {taskOptions.map((t) => (<option key={t.id} value={taskOptionLabel(t)}>{taskOptionLabel(t)}</option>))}
+                  </Select>
                 </TableCell>
-                <TableCell className="cursor-pointer font-medium hover:bg-primary/5" {...editTriggerProps(item, "riskName")}>
-                  {isEditing(item, "riskName") ? (
-                    <Input
-                      value={item.riskName}
-                      onChange={(event) => updateRisk(item.id, "riskName", event.target.value)}
-                      onKeyDown={handleEditKeyDown}
-                      className={`${inlineInputClass} min-w-[160px]`}
-                      autoFocus
-                    />
-                  ) : item.riskName}
-                </TableCell>
-                <TableCell className="cursor-pointer text-muted-foreground hover:bg-primary/5" {...editTriggerProps(item, "linkedItemName")}>
-                  {isEditing(item, "linkedItemName") ? (
-                    <Select
-                      value={item.linkedItemName}
-                      onChange={(event) => updateRisk(item.id, "linkedItemName", event.target.value)}
-                      onKeyDown={handleEditKeyDown}
-                      className={`${inlineSelectClass} min-w-[170px]`}
-                      autoFocus
-                    >
-                      {itemNameOptions.map((option) => (
-                        <option key={option} value={option}>{option}</option>
-                      ))}
-                    </Select>
-                  ) : item.linkedItemName}
-                </TableCell>
-                <TableCell className="cursor-pointer whitespace-nowrap hover:bg-primary/5" {...editTriggerProps(item, "category")}>
-                  {isEditing(item, "category") ? (
-                    <Input
-                      value={item.category}
-                      onChange={(event) => updateRisk(item.id, "category", event.target.value)}
-                      onKeyDown={handleEditKeyDown}
-                      className={`${inlineInputClass} w-[96px]`}
-                      autoFocus
-                    />
-                  ) : item.category}
-                </TableCell>
-                <TableCell className="cursor-pointer text-muted-foreground hover:bg-primary/5" {...editTriggerProps(item, "trigger")}>
-                  {isEditing(item, "trigger") ? (
-                    <Textarea
-                      value={item.trigger}
-                      onChange={(event) => updateRisk(item.id, "trigger", event.target.value)}
-                      onKeyDown={handleEditKeyDown}
-                      className={inlineTextareaClass}
-                      autoFocus
-                    />
-                  ) : item.trigger}
-                </TableCell>
-                <TableCell className="cursor-pointer hover:bg-primary/5" {...editTriggerProps(item, "probability")}>
-                  {isEditing(item, "probability") ? (
-                    <Select
-                      value={item.probability}
-                      onChange={(event) => updateRisk(item.id, "probability", event.target.value as RiskLevel)}
-                      onKeyDown={handleEditKeyDown}
-                      className={inlineSelectClass}
-                      autoFocus
-                    >
-                      {riskLevelOptions.map((option) => (
-                        <option key={option} value={option}>{option}</option>
-                      ))}
-                    </Select>
-                  ) : <Badge variant={levelVariant[item.probability]}>{item.probability}</Badge>}
-                </TableCell>
-                <TableCell className="cursor-pointer hover:bg-primary/5" {...editTriggerProps(item, "impact")}>
-                  {isEditing(item, "impact") ? (
-                    <Select
-                      value={item.impact}
-                      onChange={(event) => updateRisk(item.id, "impact", event.target.value as RiskLevel)}
-                      onKeyDown={handleEditKeyDown}
-                      className={inlineSelectClass}
-                      autoFocus
-                    >
-                      {riskLevelOptions.map((option) => (
-                        <option key={option} value={option}>{option}</option>
-                      ))}
-                    </Select>
-                  ) : <Badge variant={levelVariant[item.impact]}>{item.impact}</Badge>}
-                </TableCell>
-                <TableCell className="cursor-pointer hover:bg-primary/5" {...editTriggerProps(item, "level")}>
-                  {isEditing(item, "level") ? (
-                    <Select
-                      value={item.level}
-                      onChange={(event) => updateRisk(item.id, "level", event.target.value as RiskLevel)}
-                      onKeyDown={handleEditKeyDown}
-                      className={inlineSelectClass}
-                      autoFocus
-                    >
-                      {riskLevelOptions.map((option) => (
-                        <option key={option} value={option}>{option}</option>
-                      ))}
-                    </Select>
-                  ) : <Badge variant={levelVariant[item.level]}>{item.level}</Badge>}
-                </TableCell>
-                <TableCell className="cursor-pointer hover:bg-primary/5" {...editTriggerProps(item, "response")}>
-                  {isEditing(item, "response") ? (
-                    <Textarea
-                      value={item.response}
-                      onChange={(event) => updateRisk(item.id, "response", event.target.value)}
-                      onKeyDown={handleEditKeyDown}
-                      className={inlineTextareaClass}
-                      autoFocus
-                    />
-                  ) : item.response}
-                </TableCell>
-                <TableCell className="cursor-pointer whitespace-nowrap hover:bg-primary/5" {...editTriggerProps(item, "owner")}>
-                  {isEditing(item, "owner") ? (
-                    <Input
-                      value={item.owner}
-                      onChange={(event) => updateRisk(item.id, "owner", event.target.value)}
-                      onKeyDown={handleEditKeyDown}
-                      className={`${inlineInputClass} w-[96px]`}
-                      autoFocus
-                    />
-                  ) : item.owner}
-                </TableCell>
-                <TableCell className="cursor-pointer hover:bg-primary/5" {...editTriggerProps(item, "status")}>
-                  {isEditing(item, "status") ? (
-                    <Select
-                      value={item.status}
-                      onChange={(event) => updateRisk(item.id, "status", event.target.value as RiskStatus)}
-                      onKeyDown={handleEditKeyDown}
-                      className={inlineSelectClass}
-                      autoFocus
-                    >
-                      {riskStatusOptions.map((option) => (
-                        <option key={option} value={option}>{option}</option>
-                      ))}
-                    </Select>
-                  ) : <Badge variant={statusVariant[item.status]}>{item.status}</Badge>}
-                </TableCell>
-                <TableCell className="cursor-pointer whitespace-nowrap hover:bg-primary/5" {...editTriggerProps(item, "targetDate")}>
-                  {isEditing(item, "targetDate") ? (
-                    <Input
-                      type="date"
-                      value={item.targetDate}
-                      onChange={(event) => updateRisk(item.id, "targetDate", event.target.value)}
-                      onKeyDown={handleEditKeyDown}
-                      className={`${inlineInputClass} w-[122px]`}
-                      autoFocus
-                    />
-                  ) : item.targetDate}
-                </TableCell>
+                <TableCell>{renderTextCell(item, "category", item.category, `${inlineInputClass} w-[96px]`, "类别")}</TableCell>
+                <TableCell>{renderTextareaCell(item, "trigger", item.trigger, "触发条件")}</TableCell>
+                <TableCell><Select variant="ghost" value={item.probability} onChange={(e) => commitSelectChange(item.id, "probability", e.target.value)} className={`${inlineSelectClass} w-[68px]`}>{riskLevelOptions.map((o) => (<option key={o} value={o}>{o}</option>))}</Select></TableCell>
+                <TableCell><Select variant="ghost" value={item.impact} onChange={(e) => commitSelectChange(item.id, "impact", e.target.value)} className={`${inlineSelectClass} w-[68px]`}>{riskLevelOptions.map((o) => (<option key={o} value={o}>{o}</option>))}</Select></TableCell>
+                <TableCell><Select variant="ghost" value={item.level} onChange={(e) => commitSelectChange(item.id, "level", e.target.value)} className={`${inlineSelectClass} w-[68px]`}>{riskLevelOptions.map((o) => (<option key={o} value={o}>{o}</option>))}</Select></TableCell>
+                <TableCell>{renderTextareaCell(item, "response", item.response, "应对措施")}</TableCell>
+                <TableCell>{renderTextCell(item, "owner", item.owner, `${inlineInputClass} w-[96px]`, "责任人")}</TableCell>
+                <TableCell><Select variant="ghost" value={item.status} onChange={(e) => commitSelectChange(item.id, "status", e.target.value)} className={`${inlineSelectClass} w-[90px]`}>{riskStatusOptions.map((o) => (<option key={o} value={o}>{o}</option>))}</Select></TableCell>
+                <TableCell>{renderTextCell(item, "targetDate", item.targetDate, `${inlineInputClass} w-[122px]`)}</TableCell>
               </TableRow>
             ))}
+            {!loading && riskItems.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={selectionMode ? 13 : 12} className="text-center text-muted-foreground text-xs py-8">
+                  暂无风险条目{currentProjectId ? "" : "，请先在项目列表中选择一个项目"}
+                </TableCell>
+              </TableRow>
+            )}
           </TableBody>
         </Table>
       </CardContent>

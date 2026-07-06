@@ -66,10 +66,10 @@ export const PERMISSION_TREE = [
           },
           {
             key: "project-gantt",
-            label: "项目进度甘特图",
+            label: "项目进度管理",
             type: "section",
             children: [
-              { key: "project-gantt:view", label: "查看项目进度甘特图", type: "section" },
+              { key: "project-gantt:view", label: "查看项目进度管理", type: "section" },
               { key: "project-gantt:create", label: "新增甘特任务", type: "action" },
               { key: "project-gantt:edit", label: "编辑甘特任务", type: "action" },
               { key: "project-gantt:delete", label: "删除甘特任务", type: "action" },

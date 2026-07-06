@@ -137,6 +137,7 @@ const PROGRESS_BAR_COLOR = (p: number) => {
 const DATE_CELL = (s?: string) => (s && s.length >= 10 ? s.slice(5) : "-");
 const INLINE_INPUT_CLASS = "h-7 min-w-0 rounded border-border bg-background px-2 text-xs";
 const INLINE_SELECT_CLASS = "h-7 min-w-0 rounded border-border bg-background px-2 text-xs";
+const GHOST_SELECT_CLASS = "h-7 px-2 text-xs";
 const INLINE_TEXTAREA_CLASS = "min-h-14 min-w-[160px] resize-y rounded border-border bg-background px-2 py-1 text-xs";
 
 export const ItemPanel = ({
@@ -335,11 +336,17 @@ export const ItemPanel = ({
     setDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
   };
 
-  const commitSelectChange = async <K extends keyof ItemRecord>(key: K, value: ItemRecord[K]) => {
-    const current = draftRef.current;
-    if (!current) return;
-    const updated = { ...current, [key]: value };
-    if (!updated.title.trim() || !updated.dueDate || updated.progress < 0) return;
+  const commitSelectChange = async <K extends keyof ItemRecord>(key: K, value: ItemRecord[K], itemOverride?: ItemRecord) => {
+    const base = itemOverride ?? draftRef.current;
+    if (!base) {
+      console.warn("commitSelectChange: no base item");
+      return;
+    }
+    const updated = { ...base, [key]: value };
+    if (!updated.title.trim() || !updated.dueDate || updated.progress < 0) {
+      console.warn("commitSelectChange: validation failed", { title: updated.title, dueDate: updated.dueDate, progress: updated.progress });
+      return;
+    }
     setSaving(true);
     try {
       const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, ...payload } = updated;
@@ -350,6 +357,7 @@ export const ItemPanel = ({
       });
       await fetchData();
     } catch (error) {
+      console.error("commitSelectChange error:", error);
       alert(error instanceof Error ? error.message : "保存失败");
     } finally {
       setSaving(false);
@@ -357,16 +365,36 @@ export const ItemPanel = ({
   };
 
   useEffect(() => {
-    if (!isWeekly || !draft?.projectId) {
+    if (!isWeekly) {
+      setTaskOptions([]);
+      return;
+    }
+
+    // 从当前事项列表 + 正在编辑的草稿中收集唯一的 projectId
+    const ids = new Set(items.map((item) => item.projectId).filter(Boolean));
+    if (draft?.projectId) ids.add(draft.projectId);
+    const projectIds = [...ids];
+    if (projectIds.length === 0) {
       setTaskOptions([]);
       return;
     }
 
     let alive = true;
-    api.get<ProjectGanttTaskOption[]>(`/api/projects/${draft.projectId}/gantt-tasks`)
-      .then((tasks) => {
+    Promise.all(
+      projectIds.map((pid) =>
+        api.get<ProjectGanttTaskOption[]>(`/api/projects/${pid}/gantt-tasks`).catch(() => [] as ProjectGanttTaskOption[])
+      )
+    )
+      .then((results) => {
         if (!alive) return;
-        setTaskOptions(tasks.filter((task) => task.taskName.trim()));
+        const seen = new Set<string>();
+        const allTasks = results.flat().filter((task) => task.taskName.trim());
+        const unique = allTasks.filter((task) => {
+          if (seen.has(task.taskName)) return false;
+          seen.add(task.taskName);
+          return true;
+        });
+        setTaskOptions(unique);
       })
       .catch(() => {
         if (alive) setTaskOptions([]);
@@ -375,7 +403,7 @@ export const ItemPanel = ({
     return () => {
       alive = false;
     };
-  }, [draft?.projectId, isWeekly]);
+  }, [items, draft?.projectId, isWeekly]);
 
   const submitCreate = async () => {
     if (!draft) return;
@@ -918,25 +946,20 @@ export const ItemPanel = ({
                         )}
                       </TableCell>
                       {isWeekly && (
-                        <TableCell className={canEdit ? "cursor-pointer text-xs hover:bg-primary/5" : "text-xs"} {...editTriggerProps(item, "taskName")}>
-                          {isEditingField("taskName") ? (
-                            <Select
-                              value={row.taskName ?? ""}
-                              onChange={(e) => commitSelectChange("taskName", e.target.value)}
-                              onKeyDown={handleEditKeyDown}
-                              className={INLINE_SELECT_CLASS}
-                              autoFocus
-                            >
-                              <option value="">不关联</option>
-                              {taskOptions.map((task) => (
-                                <option key={task.id} value={task.taskName}>
-                                  {task.taskCode ? `${task.taskCode} · ${task.taskName}` : task.taskName}
-                                </option>
-                              ))}
-                            </Select>
-                          ) : (
-                            item.taskName || "-"
-                          )}
+                        <TableCell>
+                          <Select
+                            variant="ghost"
+                            value={item.taskName ?? ""}
+                            onChange={(e) => commitSelectChange("taskName", e.target.value, item)}
+                            className={`${GHOST_SELECT_CLASS} min-w-[180px]`}
+                          >
+                            <option value="">不关联</option>
+                            {taskOptions.map((task) => (
+                              <option key={task.id} value={task.taskName}>
+                                {task.taskCode ? `${task.taskCode} · ${task.taskName}` : task.taskName}
+                              </option>
+                            ))}
+                          </Select>
                         </TableCell>
                       )}
                       <TableCell className="text-xs">
@@ -960,24 +983,17 @@ export const ItemPanel = ({
                           item.owner
                         )}
                       </TableCell>
-                      <TableCell className={canEdit ? "cursor-pointer hover:bg-primary/5" : undefined} {...editTriggerProps(item, "priority")}>
-                        {isEditingField("priority") ? (
-                          <Select
-                            value={row.priority}
-                            onChange={(e) => commitSelectChange("priority", e.target.value as ItemPriority)}
-                            onKeyDown={handleEditKeyDown}
-                            className={`${INLINE_SELECT_CLASS} w-[76px]`}
-                            autoFocus
-                          >
-                            {Object.values(ItemPriority).map((priority) => (
-                              <option key={priority} value={priority}>{ITEM_PRIORITY_LABEL[priority]}</option>
-                            ))}
-                          </Select>
-                        ) : (
-                          <Badge variant={PRIORITY_BADGE_VARIANT[item.priority] ?? "default"}>
-                            {ITEM_PRIORITY_LABEL[item.priority as ItemPriority] ?? item.priority}
-                          </Badge>
-                        )}
+                      <TableCell>
+                        <Select
+                          variant="ghost"
+                          value={item.priority}
+                          onChange={(e) => commitSelectChange("priority", e.target.value as ItemPriority, item)}
+                          className={`${GHOST_SELECT_CLASS} w-[76px]`}
+                        >
+                          {Object.values(ItemPriority).map((priority) => (
+                            <option key={priority} value={priority}>{ITEM_PRIORITY_LABEL[priority]}</option>
+                          ))}
+                        </Select>
                       </TableCell>
                       <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-nowrap hover:bg-primary/5" : "text-xs whitespace-nowrap"} {...editTriggerProps(item, "plannedStartDate")}>
                         {isEditingField("plannedStartDate") ? (
@@ -1067,43 +1083,29 @@ export const ItemPanel = ({
                           </div>
                         )}
                       </TableCell>
-                      <TableCell className={canEdit ? "cursor-pointer hover:bg-primary/5" : undefined} {...editTriggerProps(item, "status")}>
-                        {isEditingField("status") ? (
-                          <Select
-                            value={row.status}
-                            onChange={(e) => commitSelectChange("status", e.target.value as ItemStatus)}
-                            onKeyDown={handleEditKeyDown}
-                            className={`${INLINE_SELECT_CLASS} w-[88px]`}
-                            autoFocus
-                          >
-                            {Object.values(ItemStatus).map((status) => (
-                              <option key={status} value={status}>{ITEM_STATUS_LABEL[status]}</option>
-                            ))}
-                          </Select>
-                        ) : (
-                          <Badge variant={STATUS_BADGE_VARIANT[item.status] ?? "default"}>
-                            {ITEM_STATUS_LABEL[item.status as ItemStatus] ?? item.status}
-                          </Badge>
-                        )}
+                      <TableCell>
+                        <Select
+                          variant="ghost"
+                          value={item.status}
+                          onChange={(e) => commitSelectChange("status", e.target.value as ItemStatus, item)}
+                          className={`${GHOST_SELECT_CLASS} w-[92px]`}
+                        >
+                          {Object.values(ItemStatus).map((status) => (
+                            <option key={status} value={status}>{ITEM_STATUS_LABEL[status]}</option>
+                          ))}
+                        </Select>
                       </TableCell>
-                      <TableCell className={canEdit ? "cursor-pointer hover:bg-primary/5" : undefined} {...editTriggerProps(item, "health")}>
-                        {isEditingField("health") ? (
-                          <Select
-                            value={row.health}
-                            onChange={(e) => commitSelectChange("health", e.target.value as ItemHealth)}
-                            onKeyDown={handleEditKeyDown}
-                            className={`${INLINE_SELECT_CLASS} w-[88px]`}
-                            autoFocus
-                          >
-                            {Object.values(ItemHealth).map((health) => (
-                              <option key={health} value={health}>{ITEM_HEALTH_LABEL[health]}</option>
-                            ))}
-                          </Select>
-                        ) : (
-                          <Badge variant={HEALTH_BADGE_VARIANT[item.health] ?? "default"}>
-                            {ITEM_HEALTH_LABEL[item.health as ItemHealth] ?? item.health}
-                          </Badge>
-                        )}
+                      <TableCell>
+                        <Select
+                          variant="ghost"
+                          value={item.health}
+                          onChange={(e) => commitSelectChange("health", e.target.value as ItemHealth, item)}
+                          className={`${GHOST_SELECT_CLASS} w-[92px]`}
+                        >
+                          {Object.values(ItemHealth).map((health) => (
+                            <option key={health} value={health}>{ITEM_HEALTH_LABEL[health]}</option>
+                          ))}
+                        </Select>
                       </TableCell>
                       <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-pre-wrap break-words max-w-[200px] hover:bg-primary/5" : "text-xs whitespace-pre-wrap break-words max-w-[200px]"} {...editTriggerProps(item, "issueAndAction")}>
                         {isEditingField("issueAndAction") ? (

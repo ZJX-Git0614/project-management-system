@@ -289,7 +289,7 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
         ? [
             {
               href: currentProjectId ? `/projects/${currentProjectId}?nav=gantt` : "/projects",
-              label: "项目进度甘特图",
+              label: "项目进度管理",
               active: isDetailGroupActive(fullPath, "gantt"),
               permissionKey: getDetailGroupPermissionKey("gantt"),
               icon: <TrendingUp className="size-4" />,

@@ -2,7 +2,7 @@ import type { Project } from "@/domain/models";
 
 export const DETAIL_NAV_GROUPS = [
   { key: "project", label: "项目信息管理" },
-  { key: "gantt", label: "项目进度甘特图" },
+  { key: "gantt", label: "项目进度管理" },
   { key: "budget", label: "项目预算管理" },
 ] as const;
 

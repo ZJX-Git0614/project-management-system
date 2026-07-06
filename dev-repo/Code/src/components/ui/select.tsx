@@ -8,10 +8,11 @@ import { cn } from "@/lib/utils";
 interface SelectProps extends Omit<React.SelectHTMLAttributes<HTMLSelectElement>, "onChange"> {
   value?: string;
   onChange?: (e: React.ChangeEvent<HTMLSelectElement>) => void;
+  variant?: "default" | "ghost";
 }
 
 const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
-  ({ className, children, value, onChange, disabled, name, ...rest }, ref) => {
+  ({ className, children, value, onChange, disabled, name, variant = "default", ...rest }, ref) => {
     const [open, setOpen] = React.useState(false);
     const buttonRef = React.useRef<HTMLButtonElement>(null);
     const justSelected = React.useRef(false);
@@ -75,6 +76,10 @@ const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
               "flex h-9 w-full min-w-0 cursor-pointer items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm transition-colors duration-200",
               "focus-visible:border-primary/60 focus-visible:ring-2 focus-visible:ring-ring/30 focus-visible:outline-none",
               "disabled:cursor-not-allowed disabled:opacity-50",
+              variant === "ghost" && [
+                "border-transparent bg-transparent shadow-none text-muted-foreground",
+                "hover:border-border hover:bg-accent/50 hover:text-foreground",
+              ],
               className
             )}
             disabled={disabled}

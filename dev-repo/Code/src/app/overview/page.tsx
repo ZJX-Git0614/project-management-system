@@ -43,7 +43,7 @@ export default function OverviewPage() {
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-sm">项目进度甘特图</CardTitle>
+        <CardTitle className="text-sm">项目进度总览</CardTitle>
         <p className="text-xs text-muted-foreground">
           汇总展示所有项目的甘特任务；项目维护和切换请回到项目列表进入对应项目。
         </p>

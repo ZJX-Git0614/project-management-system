@@ -131,7 +131,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
         <CardHeader className="pb-2">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <CardTitle className="text-sm">项目进度甘特图</CardTitle>
+              <CardTitle className="text-sm">项目进度管理</CardTitle>
               <CardDescription className="text-xs">
                 左侧维护任务信息，右侧按时间轴展示排期、紧前关系和关键路径
               </CardDescription>
