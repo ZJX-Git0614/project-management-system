@@ -16,7 +16,6 @@ export async function GET(
     where: { id },
     include: {
       projectMembers: true,
-      monthlyItems: { orderBy: { dueDate: "asc" } },
       weeklyItems: { orderBy: { dueDate: "asc" } },
       todos: { orderBy: { createdAt: "desc" } },
       operationHistories: { orderBy: { createdAt: "desc" }, take: 50 },
@@ -35,10 +34,6 @@ export async function GET(
       createdAt: m.createdAt.toISOString(),
     })),
     ganttTasks: ganttTasks.map(serializeGanttTask),
-    monthlyItems: project.monthlyItems.map((m) => ({
-      ...m,
-      createdAt: m.createdAt.toISOString(),
-    })),
     weeklyItems: project.weeklyItems.map((w) => ({
       ...w,
       createdAt: w.createdAt.toISOString(),

@@ -106,18 +106,6 @@ export const PERMISSION_TREE = [
         ],
       },
       {
-        key: "monthly-items",
-        label: "本月事项",
-        type: "page",
-        children: [
-          { key: "monthly-items:view", label: "查看本月事项", type: "section" },
-          { key: "monthly-items:create", label: "新增本月事项", type: "action" },
-          { key: "monthly-items:edit", label: "编辑本月事项", type: "action" },
-          { key: "monthly-items:delete", label: "删除本月事项", type: "action" },
-          { key: "monthly-items:export", label: "导出本月事项", type: "action" },
-        ],
-      },
-      {
         key: "weekly-items",
         label: "本周事项",
         type: "page",
@@ -251,7 +239,6 @@ export const PERMISSION_ROUTE_RULES: PermissionRouteRule[] = [
   { pathname: "/admin/permissions", permissionKey: "permission-config:view" },
   { pathname: "/admin/accounts", permissionKey: "account-management:view" },
   { pathname: "/overview", permissionKey: "overview:view" },
-  { pathname: "/monthly-items", permissionKey: "monthly-items:view" },
   { pathname: "/weekly-items", permissionKey: "weekly-items:view" },
   { pathname: "/risk-register", permissionKey: "risk-register:view" },
 ];
@@ -285,8 +272,6 @@ export const DEFAULT_PERMISSION_TREE: PermissionTreeState = {
     "project-progress",
     "overview",
     "overview:view",
-    "monthly-items",
-    "monthly-items:view",
     "weekly-items",
     "weekly-items:view",
     "project-risk",

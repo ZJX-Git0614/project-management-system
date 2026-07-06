@@ -11,8 +11,15 @@ interface SelectProps extends Omit<React.SelectHTMLAttributes<HTMLSelectElement>
   variant?: "default" | "ghost";
 }
 
-const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
-  ({ className, children, value, onChange, disabled, name, variant = "default", ...rest }, ref) => {
+function Select({
+  className,
+  children,
+  value,
+  onChange,
+  disabled,
+  name,
+  variant = "default",
+}: SelectProps) {
     const [open, setOpen] = React.useState(false);
     const buttonRef = React.useRef<HTMLButtonElement>(null);
     const justSelected = React.useRef(false);
@@ -44,7 +51,7 @@ const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
           isDefaultPrevented: () => false,
           isPropagationStopped: () => false,
           persist: () => {},
-          timeStamp: Date.now(),
+          timeStamp: 0,
         } as unknown as React.ChangeEvent<HTMLSelectElement>;
         onChange(syntheticEvent);
       }
@@ -114,8 +121,7 @@ const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
         </DropdownMenuPrimitive.Portal>
       </DropdownMenuPrimitive.Root>
     );
-  }
-);
+}
 Select.displayName = "Select";
 
 export { Select };

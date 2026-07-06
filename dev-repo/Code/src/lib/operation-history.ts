@@ -3,7 +3,7 @@
  */
 
 const ENTITY_TYPE_LABELS: Record<string, string> = {
-  MONTHLY_ITEM: "本月事项",
+  MONTHLY_ITEM: "本月事项（历史）",
   WEEKLY_ITEM: "本周事项",
   Project: "项目",
   ProjectMember: "项目组成员",

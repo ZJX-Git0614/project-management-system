@@ -143,7 +143,7 @@ npx prisma studio   # Prisma 数据库管理 UI
 
 - **类型**：PostgreSQL
 - **ORM**：Prisma
-- **模型数量**：10 个（UserAccount, Project, ProjectMember, MonthlyItem, WeeklyItem, TodoItem, OperationHistory, PermissionTree 等）
+- **模型数量**：14 个（UserAccount, Project, ProjectGanttTask, ProjectBudgetCategory, WeeklyItem, RiskRegisterItem, TodoItem, OperationHistory, PermissionTree 等）
 - **持久化**：Docker 运行时数据保存在 `pgdata` 命名卷中
 
 ---

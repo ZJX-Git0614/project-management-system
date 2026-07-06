@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { getUserFromRequest } from "@/lib/auth"
-import { ok, err, unauthorized, notFound } from "@/lib/api-utils"
+import { ok, unauthorized, notFound } from "@/lib/api-utils"
 
 const PUTTABLE_FIELDS = [
   "riskName", "linkedItemName", "category", "trigger",
@@ -13,7 +13,7 @@ export async function PUT(
   req: NextRequest,
   { params }: { params: Promise<{ id: string; riskId: string }> }
 ) {
-  const { id, riskId } = await params
+  const { riskId } = await params
   const user = getUserFromRequest(req)
   if (!user) return unauthorized()
 

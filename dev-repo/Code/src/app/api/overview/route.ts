@@ -5,15 +5,12 @@ import { ok, unauthorized } from "@/lib/api-utils"
 import { ProjectStatus } from "@/domain/enums"
 
 // GET /api/overview
-// 全局聚合：项目总数/状态分布、当前月/周事项统计
+// 全局聚合：项目总数/状态分布、当前周事项统计
 export async function GET(req: NextRequest) {
   const user = getUserFromRequest(req)
   if (!user) return unauthorized()
 
   const today = new Date()
-  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1).toISOString().slice(0, 10)
-  const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0).toISOString().slice(0, 10)
-
   const day = today.getDay() || 7
   const monday = new Date(today)
   monday.setDate(today.getDate() - (day - 1))
@@ -27,8 +24,6 @@ export async function GET(req: NextRequest) {
     inProgressProjects,
     completedProjects,
     voidedProjects,
-    monthlyAll,
-    monthlyDone,
     weeklyAll,
     weeklyDone,
     ganttTasks,
@@ -37,8 +32,6 @@ export async function GET(req: NextRequest) {
     prisma.project.count({ where: { status: ProjectStatus.IN_PROGRESS } }),
     prisma.project.count({ where: { status: ProjectStatus.COMPLETED } }),
     prisma.project.count({ where: { status: ProjectStatus.VOIDED } }),
-    prisma.monthlyItem.count({ where: { dueDate: { gte: monthStart, lte: monthEnd } } }),
-    prisma.monthlyItem.count({ where: { dueDate: { gte: monthStart, lte: monthEnd }, status: "DONE" } }),
     prisma.weeklyItem.count({ where: { dueDate: { gte: weekStart, lte: weekEnd } } }),
     prisma.weeklyItem.count({ where: { dueDate: { gte: weekStart, lte: weekEnd }, status: "DONE" } }),
     prisma.projectGanttTask.findMany({
@@ -57,12 +50,6 @@ export async function GET(req: NextRequest) {
       inProgress: inProgressProjects,
       completed: completedProjects,
       voided: voidedProjects,
-    },
-    monthlyItems: {
-      total: monthlyAll,
-      done: monthlyDone,
-      monthStart,
-      monthEnd,
     },
     weeklyItems: {
       total: weeklyAll,

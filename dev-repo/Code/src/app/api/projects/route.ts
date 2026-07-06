@@ -20,7 +20,6 @@ export async function GET(req: NextRequest) {
       _count: {
         select: {
           projectMembers: true,
-          monthlyItems: true,
           weeklyItems: true,
         },
       },
@@ -41,7 +40,6 @@ export async function GET(req: NextRequest) {
       status: p.status,
       createdAt: p.createdAt.toISOString(),
       memberCount: p._count.projectMembers,
-      monthlyItemCount: p._count.monthlyItems,
       weeklyItemCount: p._count.weeklyItems,
     }))
   )

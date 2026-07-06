@@ -48,7 +48,6 @@ export const TODO_STATUS_LABEL: Record<TodoStatus, string> = {
 };
 
 export const TODO_TYPE_LABEL: Record<TodoType, string> = {
-  [TodoType.MONTHLY_ITEM_OVERDUE]: "本月事项逾期",
   [TodoType.WEEKLY_ITEM_OVERDUE]: "本周事项逾期",
   [TodoType.CUSTOM]: "自定义",
 };

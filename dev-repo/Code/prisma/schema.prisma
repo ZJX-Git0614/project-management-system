@@ -39,7 +39,6 @@ model Project {
   budgetCategories   ProjectBudgetCategory[]
   budgetItems        ProjectBudgetItem[]
   budgetSetting      ProjectBudgetSetting?
-  monthlyItems       MonthlyItem[]
   weeklyItems        WeeklyItem[]
   todos              TodoItem[]
   operationHistories  OperationHistory[]
@@ -153,32 +152,6 @@ model ProjectMember {
   projectId  String
   roleName   String
   personName String
-
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-}
-
-model MonthlyItem {
-  id                String   @id @default(cuid())
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-  projectId         String
-  title             String
-  description       String   @default("")
-  dueDate           String
-  status            String   @default("PENDING") // PENDING / IN_PROGRESS / DONE
-  owner             String
-  priority          String   @default("NORMAL")   // LOW / NORMAL / HIGH
-  plannedStartDate  String   @default("")          // 计划开始时间
-  actualStartDate   String   @default("")          // 实际开始时间
-  plannedEndDate    String   @default("")          // 计划结束时间
-  actualEndDate     String   @default("")          // 实际结束时间
-  progress          Int      @default(0)           // 0-100
-  health            String   @default("UNKNOWN")   // HEALTHY / AT_RISK / OFF_TRACK / UNKNOWN
-  issueAndAction    String   @default("")          // 当前问题/措施
-  dependency        String   @default("")          // 依赖条件
-  risk              String   @default("")          // 风险描述
-  riskStatus        String   @default("NONE")      // OPEN / MITIGATED / CLOSED / NONE
-  remark            String   @default("")          // 备注
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 }

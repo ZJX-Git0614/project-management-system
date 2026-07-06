@@ -18,13 +18,8 @@ export async function GET(req: NextRequest) {
   }
 
   const totalMembers = await prisma.projectMember.count()
-  const totalMonthlyItems = await prisma.monthlyItem.count()
   const totalWeeklyItems = await prisma.weeklyItem.count()
 
-  const monthlyItemsByStatus = await prisma.monthlyItem.groupBy({
-    by: ["status"],
-    _count: true,
-  })
   const weeklyItemsByStatus = await prisma.weeklyItem.groupBy({
     by: ["status"],
     _count: true,
@@ -52,11 +47,7 @@ export async function GET(req: NextRequest) {
       [ProjectStatus.VOIDED]: projectsByStatus[ProjectStatus.VOIDED] ?? 0,
     },
     totalMembers,
-    totalMonthlyItems,
     totalWeeklyItems,
-    monthlyItemsByStatus: Object.fromEntries(
-      monthlyItemsByStatus.map((r) => [r.status, r._count])
-    ),
     weeklyItemsByStatus: Object.fromEntries(
       weeklyItemsByStatus.map((r) => [r.status, r._count])
     ),

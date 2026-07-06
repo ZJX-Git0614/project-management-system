@@ -32,7 +32,6 @@ export enum TodoStatus {
 }
 
 export enum TodoType {
-  MONTHLY_ITEM_OVERDUE = "MONTHLY_ITEM_OVERDUE",
   WEEKLY_ITEM_OVERDUE = "WEEKLY_ITEM_OVERDUE",
   CUSTOM = "CUSTOM",
 }

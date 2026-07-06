@@ -5,7 +5,6 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState, useCallback } from "react";
 import {
   CalendarDays,
-  CalendarRange,
   ClipboardList,
   LayoutDashboard,
   ListTodo,
@@ -293,13 +292,6 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
               active: isDetailGroupActive(fullPath, "gantt"),
               permissionKey: getDetailGroupPermissionKey("gantt"),
               icon: <TrendingUp className="size-4" />,
-            },
-            {
-              href: "/monthly-items",
-              label: "本月事项",
-              active: pathname === "/monthly-items",
-              permissionKey: "monthly-items:view",
-              icon: <CalendarRange className="size-4" />,
             },
             {
               href: "/weekly-items",

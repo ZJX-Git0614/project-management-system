@@ -2,7 +2,7 @@
 
 import { KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
-import { Plus, Upload, Search } from "lucide-react";
+import { Plus, Save, Search, Trash2, Upload } from "lucide-react";
 import { ItemHealth, ItemRiskStatus, ItemStatus, ItemPriority } from "@/domain/enums";
 import {
   ITEM_STATUS_LABEL,
@@ -17,7 +17,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Badge } from "@/components/ui/badge";
 import { Select } from "@/components/ui/select";
 import {
   Table,
@@ -106,26 +105,15 @@ interface ItemPanelProps {
   csvHeaders: string[];
 }
 
-const STATUS_BADGE_VARIANT: Record<string, "default" | "secondary" | "success" | "warning" | "destructive"> = {
-  [ItemStatus.PENDING]: "secondary",
-  [ItemStatus.IN_PROGRESS]: "warning",
-  [ItemStatus.DONE]: "success",
-  [ItemStatus.CANCELED]: "destructive",
-};
-
-const PRIORITY_BADGE_VARIANT: Record<string, "default" | "secondary" | "success" | "warning" | "destructive"> = {
-  [ItemPriority.LOW]: "secondary",
-  [ItemPriority.NORMAL]: "default",
-  [ItemPriority.HIGH]: "warning",
-  [ItemPriority.URGENT]: "destructive",
-};
-
-const HEALTH_BADGE_VARIANT: Record<string, "default" | "secondary" | "success" | "warning" | "destructive"> = {
-  [ItemHealth.HEALTHY]: "success",
-  [ItemHealth.AT_RISK]: "warning",
-  [ItemHealth.OFF_TRACK]: "destructive",
-  [ItemHealth.UNKNOWN]: "secondary",
-};
+interface SavedItemView {
+  id: string;
+  name: string;
+  keyword: string;
+  projectFilter: string;
+  statusFilter: string;
+  healthFilter: string;
+  updatedAt: string;
+}
 
 const PROGRESS_BAR_COLOR = (p: number) => {
   if (p >= 100) return "bg-emerald-500";
@@ -139,6 +127,7 @@ const INLINE_INPUT_CLASS = "h-7 min-w-0 rounded border-border bg-background px-2
 const INLINE_SELECT_CLASS = "h-7 min-w-0 rounded border-border bg-background px-2 text-xs";
 const GHOST_SELECT_CLASS = "h-7 px-2 text-xs";
 const INLINE_TEXTAREA_CLASS = "min-h-14 min-w-[160px] resize-y rounded border-border bg-background px-2 py-1 text-xs";
+const CURRENT_VIEW_ID = "__current__";
 
 export const ItemPanel = ({
   kind,
@@ -161,6 +150,9 @@ export const ItemPanel = ({
   const [projectFilter, setProjectFilter] = useState("ALL");
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [healthFilter, setHealthFilter] = useState("ALL");
+  const [savedViews, setSavedViews] = useState<SavedItemView[]>([]);
+  const [selectedViewId, setSelectedViewId] = useState(CURRENT_VIEW_ID);
+  const [viewName, setViewName] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingField, setEditingField] = useState<EditableField | null>(null);
   const [draft, setDraft, clearDraft] = useDraftedState<ItemRecord | null>(
@@ -169,7 +161,6 @@ export const ItemPanel = ({
   );
   const [saving, setSaving] = useState(false);
   const draftRef = useRef<ItemRecord | null>(null);
-  draftRef.current = draft;
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [deletingSelected, setDeletingSelected] = useState(false);
@@ -181,6 +172,88 @@ export const ItemPanel = ({
   const canExport = can(`${kind}-items:export`);
   const isWeekly = kind === "weekly";
   const tableColSpan = (isWeekly ? 22 : 20) + (selectionMode ? 1 : 0);
+  const savedViewStorageKey = `pms.saved-views.item.${kind}`;
+
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(savedViewStorageKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(parsed)) {
+        setSavedViews(
+          parsed.filter((view): view is SavedItemView =>
+            view &&
+            typeof view.id === "string" &&
+            typeof view.name === "string" &&
+            typeof view.keyword === "string" &&
+            typeof view.projectFilter === "string" &&
+            typeof view.statusFilter === "string" &&
+            typeof view.healthFilter === "string",
+          ),
+        );
+      }
+    } catch {
+      setSavedViews([]);
+    }
+  }, [savedViewStorageKey]);
+
+  const persistSavedViews = (views: SavedItemView[]) => {
+    setSavedViews(views);
+    window.localStorage.setItem(savedViewStorageKey, JSON.stringify(views));
+  };
+
+  const markCustomView = () => {
+    setSelectedViewId(CURRENT_VIEW_ID);
+  };
+
+  const applySavedView = (viewId: string) => {
+    setSelectedViewId(viewId);
+    if (viewId === CURRENT_VIEW_ID) return;
+
+    const view = savedViews.find((item) => item.id === viewId);
+    if (!view) return;
+    setKeyword(view.keyword);
+    setProjectFilter(view.projectFilter);
+    setStatusFilter(view.statusFilter);
+    setHealthFilter(view.healthFilter);
+    setViewName(view.name);
+  };
+
+  const saveCurrentView = () => {
+    const name = viewName.trim();
+    if (!name) {
+      alert("请填写视图名称");
+      return;
+    }
+
+    const id = selectedViewId !== CURRENT_VIEW_ID ? selectedViewId : `view-${encodeURIComponent(name)}`;
+    const nextView: SavedItemView = {
+      id,
+      name,
+      keyword,
+      projectFilter,
+      statusFilter,
+      healthFilter,
+      updatedAt: "",
+    };
+    const nextViews = [
+      nextView,
+      ...savedViews.filter((view) => view.id !== id && view.name !== name),
+    ].slice(0, 12);
+    persistSavedViews(nextViews);
+    setSelectedViewId(id);
+  };
+
+  const deleteCurrentView = () => {
+    if (selectedViewId === CURRENT_VIEW_ID) return;
+    const nextViews = savedViews.filter((view) => view.id !== selectedViewId);
+    persistSavedViews(nextViews);
+    setSelectedViewId(CURRENT_VIEW_ID);
+    setViewName("");
+  };
 
   const fetchData = useCallback(async () => {
     if (!canView) {
@@ -523,13 +596,31 @@ export const ItemPanel = ({
           </div>
         </CardHeader>
         <CardContent className="flex flex-wrap items-end gap-3 p-3">
+          {isWeekly && (
+            <div className="w-[160px]">
+              <label className="mb-1 block text-[11px] font-medium text-muted-foreground">视图</label>
+              <Select
+                value={selectedViewId}
+                onChange={(e) => applySavedView(e.target.value)}
+                className="h-8 text-xs"
+              >
+                <option value={CURRENT_VIEW_ID}>当前筛选</option>
+                {savedViews.map((view) => (
+                  <option key={view.id} value={view.id}>{view.name}</option>
+                ))}
+              </Select>
+            </div>
+          )}
           <div className="flex-1 min-w-[160px]">
             <label className="mb-1 block text-[11px] font-medium text-muted-foreground">
               <Search className="mr-1 inline size-3" /> {isWeekly ? "事项ID/事项名称/任务名称/负责人" : "事项名称/负责人"}
             </label>
             <Input
               value={keyword}
-              onChange={(e) => setKeyword(e.target.value)}
+              onChange={(e) => {
+                markCustomView();
+                setKeyword(e.target.value);
+              }}
               placeholder="请输入关键词"
               className="h-8 text-xs"
             />
@@ -538,7 +629,10 @@ export const ItemPanel = ({
             <label className="mb-1 block text-[11px] font-medium text-muted-foreground">项目</label>
             <Select
               value={projectFilter}
-              onChange={(e) => setProjectFilter(e.target.value)}
+              onChange={(e) => {
+                markCustomView();
+                setProjectFilter(e.target.value);
+              }}
               className="h-8 text-xs"
             >
               <option value="ALL">全部项目</option>
@@ -551,7 +645,10 @@ export const ItemPanel = ({
             <label className="mb-1 block text-[11px] font-medium text-muted-foreground">状态</label>
             <Select
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              onChange={(e) => {
+                markCustomView();
+                setStatusFilter(e.target.value as ItemStatus | "ALL");
+              }}
               className="h-8 text-xs"
             >
               <option value="ALL">全部</option>
@@ -564,7 +661,10 @@ export const ItemPanel = ({
             <label className="mb-1 block text-[11px] font-medium text-muted-foreground">健康</label>
             <Select
               value={healthFilter}
-              onChange={(e) => setHealthFilter(e.target.value)}
+              onChange={(e) => {
+                markCustomView();
+                setHealthFilter(e.target.value as ItemHealth | "ALL");
+              }}
               className="h-8 text-xs"
             >
               <option value="ALL">全部</option>
@@ -573,7 +673,40 @@ export const ItemPanel = ({
               ))}
             </Select>
           </div>
+          {isWeekly && (
+            <div className="w-[140px]">
+              <label className="mb-1 block text-[11px] font-medium text-muted-foreground">视图名称</label>
+              <Input
+                value={viewName}
+                onChange={(e) => setViewName(e.target.value)}
+                placeholder="如：我的待办"
+                className="h-8 text-xs"
+              />
+            </div>
+          )}
           <div className="flex gap-2">
+            {isWeekly && (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 text-xs"
+                  onClick={saveCurrentView}
+                >
+                  <Save className="size-3" /> 保存视图
+                </Button>
+                {selectedViewId !== CURRENT_VIEW_ID && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 text-xs"
+                    onClick={deleteCurrentView}
+                  >
+                    <Trash2 className="size-3" /> 删除视图
+                  </Button>
+                )}
+              </>
+            )}
             {canExport && (
               <Button
                 variant="outline"

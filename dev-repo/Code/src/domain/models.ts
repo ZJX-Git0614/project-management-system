@@ -103,27 +103,6 @@ export interface ProjectMember extends BaseEntity {
   personName: string;
 }
 
-export interface MonthlyItem extends BaseEntity {
-  projectId: string;
-  title: string;
-  description: string;
-  dueDate: string;
-  status: ItemStatus;
-  owner: string;
-  priority: ItemPriority;
-  plannedStartDate: string;
-  actualStartDate: string;
-  plannedEndDate: string;
-  actualEndDate: string;
-  progress: number;
-  health: ItemHealth;
-  issueAndAction: string;
-  dependency: string;
-  risk: string;
-  riskStatus: ItemRiskStatus;
-  remark: string;
-}
-
 export interface WeeklyItem extends BaseEntity {
   projectId: string;
   matterCode: string;
@@ -160,7 +139,7 @@ export interface TodoItem extends BaseEntity {
 export interface OperationHistory extends BaseEntity {
   projectId: string;
   entityType:
-    | "MONTHLY_ITEM"
+    | "MONTHLY_ITEM" // 历史兼容：本月事项模块已退役，不再产生新记录
     | "WEEKLY_ITEM"
     | "PROJECT"
     | "PROJECT_MEMBER"

@@ -268,17 +268,6 @@ async function main() {
     },
   });
 
-  // ============= 本月事项 =============
-  const monthlyItems = [
-    { title: "网络状态控制设备硬件联调", description: "完成硬件联调并输出测试报告", dueDate: "2026-06-30", status: "IN_PROGRESS", owner: "曹乾", priority: "HIGH", progress: 40, health: "AT_RISK", plannedStartDate: "2026-06-01", plannedEndDate: "2026-06-30", issueAndAction: "滤波器到货延迟", risk: "供应商交期不稳", riskStatus: "OPEN" },
-    { title: "仿真平台前端交付", description: "前端页面开发及联调", dueDate: "2026-06-28", status: "IN_PROGRESS", owner: "姚家福", priority: "NORMAL", progress: 65, health: "HEALTHY", plannedStartDate: "2026-06-01", plannedEndDate: "2026-06-28" },
-    { title: "D3000M模块样机验证", description: "2套样机功能验证", dueDate: "2026-06-20", status: "DONE", owner: "王占新", priority: "HIGH", progress: 100, health: "HEALTHY", plannedStartDate: "2026-06-01", plannedEndDate: "2026-06-20", actualEndDate: "2026-06-18" },
-    { title: "项目月度成本核算", description: "汇总本月人力及采购成本", dueDate: "2026-06-30", status: "PENDING", owner: "赵佳鑫", priority: "NORMAL", progress: 0, health: "UNKNOWN", plannedStartDate: "2026-06-25", plannedEndDate: "2026-06-30" },
-  ]
-  for (const item of monthlyItems) {
-    await prisma.monthlyItem.create({ data: { projectId: project.id, ...item } })
-  }
-
   // ============= 本周事项 =============
   const weeklyItems = [
     { title: "PCB板焊接调试", description: "完成底板PCB焊接及初步调试", dueDate: "2026-07-04", status: "IN_PROGRESS", owner: "王占新", priority: "HIGH", progress: 50, health: "HEALTHY", plannedStartDate: "2026-06-30", plannedEndDate: "2026-07-04" },
@@ -297,7 +286,6 @@ async function main() {
     data: [
       { projectId: project.id, title: "跟踪滤波器到货进度", detail: "供应商承诺7月5日前到货，需每日跟进", targetRole: "PROJECT_MANAGER", targetPersonName: "赵佳鑫", type: "CUSTOM", status: "OPEN" },
       { projectId: project.id, title: "样机测试报告评审", detail: "王占新已完成样机验证，需组织评审", targetRole: "PROJECT_MANAGER", targetPersonName: "赵佳鑫", type: "CUSTOM", status: "OPEN" },
-      { projectId: project.id, title: "本月事项逾期预警", detail: "网络状态控制设备硬件联调进度滞后", targetRole: "PROJECT_MANAGER", type: "MONTHLY_ITEM_OVERDUE", status: "OPEN" },
     ],
   })
 
