@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
-import { ChevronLeft, ChevronRight, Plus, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronLeft, ChevronRight, CornerDownRight, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -47,9 +47,9 @@ const ROW_HEIGHT = 30;
 const HEADER_HEIGHT = 32;
 const BAR_HEIGHT = 10;
 const MIN_TIMELINE_WIDTH = 860;
-const LEFT_WIDTH_EXPANDED = 800;
+const LEFT_WIDTH_EXPANDED = 840;
 const LEFT_WIDTH_COLLAPSED = 360;
-const LEFT_COLUMNS_EXPANDED = "140px 100px 200px 52px 86px 86px 106px";
+const LEFT_COLUMNS_EXPANDED = "116px 98px 210px 70px 96px 96px 114px";
 const LEFT_COLUMNS_COLLAPSED = "140px 200px";
 const ZOOM_LEVELS = [1, 3, 8, 20, 60];
 const ZOOM_LABELS = ["60天", "30天", "15天", "5天", "1天"];
@@ -89,6 +89,11 @@ const inlineSelectClass = cn(
   "hover:!border-border/50 group-hover:!bg-muted/10",
   "focus:!border-primary/50 focus:!bg-background focus:!ring-1 focus:!ring-primary/20",
   "disabled:cursor-default disabled:opacity-100"
+);
+
+const durationFieldClass = cn(
+  inlineFieldClass,
+  "px-1 text-center font-mono tabular-nums"
 );
 
 const toTaskDraft = (task: ProjectGanttTask): GanttTaskDraft => ({
@@ -134,7 +139,39 @@ export const GanttTimeline = ({
   const range = getGanttDateRange(tasks);
   const rows = useMemo(() => buildGanttRows(tasks), [tasks]);
   const dependencyLinks = useMemo(() => buildGanttDependencyLinks(tasks), [tasks]);
+  const rowByTaskId = useMemo(() => new Map(rows.map((row) => [row.id, row])), [rows]);
+  const childIdsByParentId = useMemo(() => {
+    const map = new Map<string, string[]>();
+    rows.forEach((row) => {
+      if (!row.parentId) return;
+      const ids = map.get(row.parentId) ?? [];
+      ids.push(row.id);
+      map.set(row.parentId, ids);
+    });
+    return map;
+  }, [rows]);
   const selectedCount = selectedTaskIds.length;
+
+  const getDescendantIds = (taskId: string) => {
+    const result: string[] = [];
+    const stack = [...(childIdsByParentId.get(taskId) ?? [])];
+    while (stack.length > 0) {
+      const childId = stack.shift()!;
+      result.push(childId);
+      stack.push(...(childIdsByParentId.get(childId) ?? []));
+    }
+    return result;
+  };
+
+  const isSelectedByAncestor = (taskId: string, selectedIds = selectedTaskIds) => {
+    const selectedSet = new Set(selectedIds);
+    let parentId = rowByTaskId.get(taskId)?.parentId ?? null;
+    while (parentId) {
+      if (selectedSet.has(parentId)) return true;
+      parentId = rowByTaskId.get(parentId)?.parentId ?? null;
+    }
+    return false;
+  };
 
   const toggleSelectionMode = () => {
     setSelectionMode((prev) => !prev);
@@ -142,9 +179,18 @@ export const GanttTimeline = ({
   };
 
   const toggleTaskSelection = (taskId: string) => {
-    setSelectedTaskIds((prev) => (
-      prev.includes(taskId) ? prev.filter((id) => id !== taskId) : [...prev, taskId]
-    ));
+    if (!rowByTaskId.has(taskId)) return;
+    setSelectedTaskIds((prev) => {
+      if (isSelectedByAncestor(taskId, prev)) return prev;
+      const next = new Set(prev);
+      const linkedIds = [taskId, ...getDescendantIds(taskId)];
+      if (next.has(taskId)) {
+        linkedIds.forEach((id) => next.delete(id));
+      } else {
+        linkedIds.forEach((id) => next.add(id));
+      }
+      return rows.map((row) => row.id).filter((id) => next.has(id));
+    });
   };
 
   const deleteSelectedTasks = () => {
@@ -295,7 +341,7 @@ export const GanttTimeline = ({
             width={timelineWidth}
           />
 
-          <div className="group sticky left-0 z-10 border-r border-border bg-card transition-colors duration-200 group-hover:border-primary/40">
+          <div className="sticky left-0 z-10 border-r border-border bg-card transition-colors duration-200 hover:border-primary/40">
             <button
               type="button"
               className={cn(
@@ -336,6 +382,7 @@ export const GanttTimeline = ({
                   predecessorOptions={tasks.filter((task) => task.id !== row.id && task.taskName.trim())}
                   row={row}
                   selected={selectedTaskIds.includes(row.id)}
+                  selectionLocked={isSelectedByAncestor(row.id)}
                   selectionMode={selectionMode}
                   collapsed={detailsCollapsed}
                 />
@@ -525,7 +572,7 @@ const EmptyGanttTimeline = ({
             width={timelineWidth}
           />
 
-          <div className="group sticky left-0 z-10 flex items-center justify-center border-r border-border bg-background text-xs text-muted-foreground transition-colors duration-200 group-hover:border-primary/40" style={{ height: bodyHeight }}>
+          <div className="sticky left-0 z-10 flex items-center justify-center border-r border-border bg-background text-xs text-muted-foreground transition-colors duration-200 hover:border-primary/40" style={{ height: bodyHeight }}>
             <button
               type="button"
               className={cn(
@@ -604,6 +651,7 @@ const EditableTaskRow = ({
   predecessorOptions,
   row,
   selected,
+  selectionLocked,
   selectionMode,
   collapsed,
 }: {
@@ -623,6 +671,7 @@ const EditableTaskRow = ({
   predecessorOptions: ProjectGanttTask[];
   row: ReturnType<typeof buildGanttRows>[number];
   selected: boolean;
+  selectionLocked: boolean;
   selectionMode: boolean;
 }) => {
   const [draft, setDraft] = useState<GanttTaskDraft>(() => toTaskDraft(row));
@@ -676,19 +725,21 @@ const EditableTaskRow = ({
       onDragStart={onDragStart}
       style={{ height: ROW_HEIGHT, gridTemplateColumns: taskGridColumns(collapsed) }}
     >
-      <div className="flex min-w-0 items-center gap-1.5" style={{ paddingLeft: `${taskDepth * 10}px` }}>
+      <div className="relative flex min-w-0 items-center gap-1.5 pr-1" style={{ paddingLeft: `${taskDepth * 10}px` }}>
         {selectionMode && (
           <input
             type="checkbox"
             checked={selected}
+            disabled={selectionLocked}
             onChange={onToggleSelected}
-            className="h-3.5 w-3.5 rounded border-border bg-background"
+            className="h-3.5 w-3.5 rounded border-border bg-background disabled:cursor-not-allowed disabled:opacity-60"
             onClick={(event) => event.stopPropagation()}
+            title={selectionLocked ? "父任务已选中，子任务随父任务联动选择" : undefined}
           />
         )}
         {isChildTask && <span className="h-px w-3 shrink-0 bg-primary/60" />}
         <span
-          className="shrink-0 whitespace-nowrap font-mono text-[11px] font-semibold text-muted-foreground"
+          className="min-w-0 flex-1 truncate whitespace-nowrap pr-12 font-mono text-[11px] font-semibold text-muted-foreground"
           title={row.taskCode || row.id}
         >
           {row.taskCode || `Task${index + 1}`}
@@ -696,7 +747,7 @@ const EditableTaskRow = ({
         {canCreate && (
           <button
             type="button"
-            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border border-border bg-background text-muted-foreground opacity-0 transition hover:border-primary/50 hover:text-primary group-hover:opacity-100"
+            className="absolute right-0 top-1/2 inline-flex h-5 -translate-y-1/2 items-center gap-0.5 rounded border border-border/70 bg-card/95 px-1.5 text-[10px] text-muted-foreground opacity-0 shadow-sm transition hover:border-primary/50 hover:text-primary focus-visible:opacity-100 group-hover:opacity-100"
             onClick={(event) => {
               event.stopPropagation();
               onStartChild?.();
@@ -704,8 +755,17 @@ const EditableTaskRow = ({
             disabled={creatingChild}
             title={creatingChild ? "创建中..." : "新增子任务"}
             aria-label={creatingChild ? "创建中..." : "新增子任务"}
+            style={{
+              height: 20,
+              minHeight: 20,
+              padding: "0 6px",
+              fontSize: 10,
+              lineHeight: 1,
+              transform: "translateY(-50%)",
+            }}
           >
-            <Plus className="h-3 w-3" />
+            <CornerDownRight className="h-3 w-3" />
+            <span>子任务</span>
           </button>
         )}
       </div>
@@ -734,14 +794,19 @@ const EditableTaskRow = ({
       {!collapsed && (
         <>
           <Input
-            type="number"
-            min={1}
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
             value={draft.durationDays}
             onBlur={commitDraft}
-            onChange={(event) => updateDraft("durationDays", Number(event.target.value) || 1)}
+            onChange={(event) => {
+              const digits = event.target.value.replace(/\D/g, "");
+              updateDraft("durationDays", digits ? Number(digits) : 1);
+            }}
             onKeyDown={handleKeyDown}
-            className={inlineFieldClass}
+            className={durationFieldClass}
             disabled={!canEdit || isSaving}
+            aria-label="工期天数"
           />
           <Input
             type="date"
@@ -913,5 +978,3 @@ const DependencyConnector = ({
     </g>
   );
 };
-
-

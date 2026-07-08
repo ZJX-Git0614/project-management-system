@@ -5,6 +5,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { ProjectStatus } from "@/domain/enums";
 import { PROJECT_STATUS_LABEL } from "@/lib/constants";
 import { resolveDetailGroup } from "@/lib/navigation";
+import { useCurrentProject } from "@/contexts/current-project-context";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -62,6 +63,7 @@ const ProjectDetailContent = () => {
   const [projectLoading, setProjectLoading] = useState(true);
   const [projectError, setProjectError] = useState<string | null>(null);
   const [projectMissing, setProjectMissing] = useState(false);
+  const { currentProjectId, setCurrentProject } = useCurrentProject();
 
   const navParam = searchParams.get("nav");
   const legacyTabParam = searchParams.get("tab");
@@ -91,6 +93,11 @@ const ProjectDetailContent = () => {
   useEffect(() => {
     fetchProject();
   }, [fetchProject]);
+
+  useEffect(() => {
+    if (!project || currentProjectId === project.id) return;
+    setCurrentProject(project.id);
+  }, [currentProjectId, project, setCurrentProject]);
 
   if (projectLoading) {
     return <div className="text-sm text-slate-500">加载中...</div>;
