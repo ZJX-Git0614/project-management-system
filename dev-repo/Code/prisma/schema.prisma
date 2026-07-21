@@ -276,9 +276,100 @@ model AssistantChatMessage {
   role        String
   content     String   @db.Text
   source      String   @default("")
+  trace       String   @default("") @db.Text
+  blocks      String   @default("[]") @db.Text
 
   @@index([userId, projectId, createdAt])
   @@index([createdAt])
+}
+
+model AssistantProvider {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  providerKind    String
+  providerType    String   @default("OPENAI_COMPATIBLE")
+  name            String
+  baseUrl         String
+  model           String
+  apiKeyEncrypted String   @default("")
+  enabled         Boolean  @default(true)
+  createdBy       String   @default("")
+  updatedBy       String   @default("")
+
+  @@unique([providerKind, name])
+  @@index([providerKind, enabled])
+}
+
+model AssistantSettings {
+  id                        String   @id @default("default")
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+  enabled                   Boolean  @default(true)
+  assistantName             String   @default("项目智能助手")
+  welcomeMessage            String   @default("") @db.Text
+  systemPrompt              String   @db.Text
+  personaPreset             String   @default("PROFESSIONAL")
+  personaCustomPrompt       String   @default("") @db.Text
+  avatarPalette             String   @default("ICE")
+  avatarStyle               String   @default("ROUNDED")
+  temperature               Float    @default(0.2)
+  maxTokens                 Int      @default(1400)
+  historyLimit              Int      @default(12)
+  historyRetentionDays      Int      @default(90)
+  retrievalEnabled          Boolean  @default(false)
+  retrievalTopK             Int      @default(6)
+  chunkMaxSize              Int      @default(2048)
+  vectorDistanceMetric      String   @default("cosine")
+  vectorSearchMultivector   Boolean  @default(true)
+  vectorSearchQueryAdapter  Boolean  @default(true)
+  rerankerEnabled           Boolean  @default(true)
+  agentEnabled              Boolean  @default(true)
+  agentEnabledToolIds       String   @default("[]") @db.Text
+  agentMaxExportRows        Int      @default(5000)
+  agentActionExpiryMinutes  Int      @default(15)
+  ragliteBaseUrl            String   @default("")
+  ragliteTokenEncrypted     String   @default("")
+  activeLlmProviderId       String?
+  activeEmbeddingProviderId String?
+  updatedBy                 String   @default("")
+}
+
+model AssistantSettingsHistory {
+  id         String   @id @default(cuid())
+  createdAt  DateTime @default(now())
+  actionType String
+  operator   String   @default("")
+  summary    String   @default("")
+  snapshot   String   @default("{}") @db.Text
+
+  @@index([createdAt])
+}
+
+model AssistantActionRun {
+  id             String    @id @default(cuid())
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  userId         String
+  username       String    @default("")
+  displayName    String    @default("")
+  projectId      String    @default("")
+  messageId      String    @default("")
+  toolId         String
+  toolVersion    Int       @default(1)
+  riskLevel      String
+  status         String    @default("PROPOSED")
+  argsJson       String    @default("{}") @db.Text
+  previewJson    String    @default("{}") @db.Text
+  resultJson     String    @default("{}") @db.Text
+  idempotencyKey String    @unique
+  confirmedAt    DateTime?
+  executedAt     DateTime?
+  expiresAt      DateTime
+  errorCode      String    @default("")
+  errorMessage   String    @default("") @db.Text
+
+  @@index([userId, status, createdAt])
 }
 
 model PermissionTree {

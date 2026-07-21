@@ -1,6 +1,6 @@
 # Ceastar项目管理系统
 
-面向项目执行、进度、成本、事项和风险管理的内部 Web 系统。项目基于 Next.js App Router、Prisma 和 PostgreSQL 构建，支持角色权限、项目进度甘特图、预算成本管理、本周事项、风险登记册和操作留痕。
+面向项目执行、进度、成本、事项和风险管理的内部 Web 系统。项目基于 Next.js App Router、Prisma 和 PostgreSQL 构建，支持角色权限、项目进度甘特图、预算成本管理、本周事项、风险登记册、项目智能助手和操作留痕。
 
 ## 当前功能
 
@@ -15,6 +15,8 @@
 | 本周事项 | 事项增删改、选择删除、责任人下拉、关联任务、事项 ID 自动编号、拖拽排序和导出 |
 | 项目成本管理 | 项目预算分类、预算明细、合同金额、利润率目标、公摊/审价/风险费率管理 |
 | 项目风险管理 | 风险登记册增删改、关联任务、选择删除、拖拽排序 |
+| 项目智能助手 | 实时数据库问答、OpenAI 兼容/Ollama 模型供应商、RAGLite 知识检索、回答来源追踪、会话历史，以及需用户确认的待办创建、任务进度更新和项目数据导出 |
+| 智能助手设置 | 超级管理员可配置助手启停、名称、欢迎语、人设、外观、模型、向量检索、Agent 工具范围、会话保留策略和连接测试；密钥加密保存 |
 | 模块数据删除 | 超级管理员可按项目清空项目成员、甘特任务、事项、预算、风险、待办等模块数据，并写入操作日志 |
 | 操作历史 | 项目、成员、预算、事项、风险、模块清理等关键操作留痕 |
 
@@ -45,9 +47,15 @@ npm ci
 DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/DB?schema=public"
 JWT_SECRET="replace-with-a-private-secret"
 PROJECT_DOCUMENT_STORAGE_DIR="/absolute/path/to/project-document-storage"
+ASSISTANT_MODEL_BASE_URL="https://your-model-provider.example/v1"
+ASSISTANT_MODEL="your-model-name"
+ASSISTANT_MODEL_API_KEY="your-api-key"
+ASSISTANT_CONFIG_ENCRYPTION_KEY="replace-with-a-private-encryption-key"
+RAGLITE_SERVICE_URL="http://your-raglite-service:8001"
+RAGLITE_SERVICE_TOKEN="your-raglite-token"
 ```
 
-`.env` 不会提交到 GitHub。Docker Compose 中的默认密码和 JWT secret 仅用于本地演示，生产环境必须替换。
+助手模型和 RAGLite 变量可选，也可以由超级管理员在“系统设置 → 智能助手设置”中维护；未配置模型时使用 PostgreSQL 实时数据检索模式。供应商密钥和 RAGLite Token 会使用 `ASSISTANT_CONFIG_ENCRYPTION_KEY` 加密后存入数据库，生产环境必须配置独立高强度密钥。`.env` 不会提交到 GitHub。Docker Compose 中的默认密码、JWT secret 和加密密钥仅用于本地演示，生产环境必须替换。
 
 ### 3. 初始化数据库
 
@@ -112,7 +120,7 @@ Code/
 │   │   ├── weekly-items/      # 本周事项
 │   │   ├── risk-register/     # 风险登记册
 │   │   └── role-config/       # 角色与人员配置
-│   ├── components/            # 页面组件和 UI 组件
+│   ├── components/            # 页面组件、智能助手和 UI 组件
 │   ├── contexts/              # 登录态、权限、当前项目上下文
 │   ├── domain/                # 枚举和领域模型
 │   └── lib/                   # API、鉴权、权限、甘特图、工具函数

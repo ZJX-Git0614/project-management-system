@@ -1,6 +1,7 @@
 "use client";
 
-import { ReactNode } from "react";
+import { X } from "lucide-react";
+import { ReactNode, useEffect, useState } from "react";
 
 type ModalDialogSize = "sm" | "md" | "lg" | "xl";
 
@@ -21,32 +22,59 @@ interface ModalDialogProps {
 }
 
 export function ModalDialog({ open, title, children, footer, onClose, size = "md" }: ModalDialogProps) {
-  if (!open) return null;
+  const [shouldRender, setShouldRender] = useState(open);
+
+  useEffect(() => {
+    if (open) {
+      setShouldRender(true);
+      return;
+    }
+    if (!shouldRender) return;
+    const timer = window.setTimeout(() => setShouldRender(false), 160);
+    return () => window.clearTimeout(timer);
+  }, [open, shouldRender]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open, onClose]);
+
+  if (!shouldRender) return null;
+
+  const state = open ? "open" : "closing";
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-6 backdrop-blur-[1px]"
+      data-slot="modal-overlay"
+      data-state={state}
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4 backdrop-blur-[2px] sm:p-6"
       role="dialog"
       aria-modal="true"
       aria-label={title}
-      onClick={onClose}
     >
       <div
-        className={`flex w-full ${SIZE_CLASS[size]} flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl`}
-        onClick={(event) => event.stopPropagation()}
+        data-slot="modal-content"
+        data-state={state}
+        className={`flex w-full ${SIZE_CLASS[size]} flex-col overflow-hidden rounded-lg border border-border/90 bg-card text-card-foreground shadow-[var(--app-shadow-dialog)]`}
       >
-        <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-          <div className="text-lg font-semibold text-slate-900">{title}</div>
+        <div className="flex min-h-12 items-center justify-between gap-4 border-b border-border bg-card/95 px-4 py-3">
+          <div className="min-w-0 text-base font-semibold text-foreground">{title}</div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md border border-slate-200 px-3 py-1.5 text-sm text-slate-700"
+            className="grid size-8 min-h-8 shrink-0 place-items-center rounded-md border border-transparent bg-transparent p-0 text-muted-foreground transition-[color,background-color,border-color,transform] duration-150 hover:border-primary/25 hover:bg-primary/10 hover:text-foreground active:scale-95"
+            aria-label="关闭"
+            title="关闭"
           >
-            关闭
+            <X className="size-4" aria-hidden="true" />
           </button>
         </div>
         <div className="max-h-[78vh] overflow-auto px-4 py-4">{children}</div>
-        {footer ? <div className="flex justify-end gap-2 border-t border-slate-200 px-4 py-3">{footer}</div> : null}
+        {footer ? <div className="flex flex-wrap justify-end gap-2 border-t border-border bg-background/20 px-4 py-3">{footer}</div> : null}
       </div>
     </div>
   );

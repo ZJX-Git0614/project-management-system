@@ -5,6 +5,7 @@ import { AuthProvider } from "@/contexts/auth-context";
 import { PermissionProvider } from "@/contexts/permission-context";
 import { AppShell } from "@/components/app-shell";
 import { ConfirmProvider } from "@/components/confirm-provider";
+import { SystemFeedbackProvider } from "@/components/system-feedback-provider";
 
 import { CurrentProjectProvider } from "@/contexts/current-project-context";
 
@@ -21,9 +22,11 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
           <PermissionProvider>
             <ConfirmProvider>
               <CurrentProjectProvider>
-                <Suspense>
-                  <AppShell>{children}</AppShell>
-                </Suspense>
+                <SystemFeedbackProvider>
+                  <Suspense>
+                    <AppShell>{children}</AppShell>
+                  </Suspense>
+                </SystemFeedbackProvider>
               </CurrentProjectProvider>
             </ConfirmProvider>
           </PermissionProvider>

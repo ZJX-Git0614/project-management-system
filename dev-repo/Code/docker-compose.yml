@@ -28,6 +28,12 @@ services:
       - DATABASE_URL=postgresql://pms:pms-pwd-2026@postgres:5432/pms?schema=public
       - JWT_SECRET=pms-production-jwt-secret-2026
       - PROJECT_DOCUMENT_STORAGE_DIR=/app/.local-runtime/project-documents
+      - ASSISTANT_MODEL_BASE_URL=${ASSISTANT_MODEL_BASE_URL:-}
+      - ASSISTANT_MODEL=${ASSISTANT_MODEL:-}
+      - ASSISTANT_MODEL_API_KEY=${ASSISTANT_MODEL_API_KEY:-}
+      - ASSISTANT_CONFIG_ENCRYPTION_KEY=${ASSISTANT_CONFIG_ENCRYPTION_KEY:-pms-local-assistant-encryption-key-change-in-production}
+      - RAGLITE_SERVICE_URL=${RAGLITE_SERVICE_URL:-}
+      - RAGLITE_SERVICE_TOKEN=${RAGLITE_SERVICE_TOKEN:-}
       - NODE_ENV=production
     volumes:
       - document_storage:/app/.local-runtime/project-documents

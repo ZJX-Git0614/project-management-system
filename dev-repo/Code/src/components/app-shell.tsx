@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
+  Bot,
   CalendarDays,
   ClipboardList,
   FileText,
@@ -49,6 +50,7 @@ import { CurrentProjectSwitcher } from "@/components/current-project-switcher";
 import { TODO_CHANGED_EVENT, TODO_CHANGED_STORAGE_KEY } from "@/lib/todo-events";
 import { ADMIN_ROLE_NAME } from "@/lib/permissions";
 import { ProjectAssistant } from "@/components/project-assistant";
+import { useSystemFeedback } from "@/components/system-feedback-provider";
 
 const AUTH_FREE_PATHS = ["/login", "/force-change-password"];
 const SIDEBAR_VISIBILITY_STORAGE_KEY = "pms.desktopSidebarVisible";
@@ -107,7 +109,7 @@ const SidebarContent = ({
       {filteredGroups.map((group, gi) => (
         <div key={group.title}>
           {gi > 0 && <Separator className="mb-2" />}
-          <div className="mb-1.5 px-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/60">
+          <div className="mb-1.5 px-2 text-[10px] font-semibold tracking-normal text-muted-foreground/60">
             {group.title}
           </div>
           <div className="space-y-0.5">
@@ -115,15 +117,24 @@ const SidebarContent = ({
               <Link
                 key={item.label}
                 href={item.href}
+                data-slot="sidebar-nav-link"
+                aria-current={item.active ? "page" : undefined}
                 onClick={() => onMobileClose?.()}
                 className={cn(
-                  "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs transition-all duration-150",
+                  "group relative flex items-center gap-2.5 overflow-hidden rounded-md border border-transparent px-2.5 py-1.5 text-xs transition-[color,background-color,border-color,box-shadow,transform] duration-150 active:scale-[0.985]",
                   item.active
-                    ? "bg-primary/10 text-foreground font-medium"
-                    : "text-muted-foreground hover:bg-accent/40 hover:text-foreground",
+                    ? "border-primary/30 bg-primary/15 font-medium text-foreground shadow-[inset_3px_0_0_rgba(59,130,246,0.9),0_6px_18px_rgba(37,99,235,0.10)]"
+                    : "text-muted-foreground hover:border-primary/15 hover:bg-primary/[0.07] hover:text-foreground hover:shadow-[0_4px_14px_rgba(0,0,0,0.14)]",
                 )}
               >
-                {item.icon && <span className="size-4 shrink-0 text-primary/70">{item.icon}</span>}
+                {item.icon && (
+                  <span className={cn(
+                    "size-4 shrink-0 transition-colors duration-150 group-hover:text-primary",
+                    item.active ? "text-primary" : "text-muted-foreground/70",
+                  )}>
+                    {item.icon}
+                  </span>
+                )}
                 <span className="truncate">{item.label}</span>
                 {item.meta && (
                   <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4">
@@ -146,7 +157,7 @@ const SidebarContent = ({
     <div className="border-t border-border pt-2">
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <button className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-accent/40">
+          <button className="flex w-full items-center gap-2 rounded-md border border-transparent px-2 py-1.5 text-xs transition-[background-color,border-color,transform] hover:border-primary/15 hover:bg-primary/[0.07] active:scale-[0.985]">
             <User className="size-3.5 text-primary/70" />
             <div className="flex-1 text-left min-w-0">
               <div className="font-medium text-foreground truncate text-[11px]">
@@ -176,6 +187,7 @@ const SidebarContent = ({
 );
 
 export const AppShell = ({ children }: { children: React.ReactNode }) => {
+  const { notify } = useSystemFeedback();
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -188,6 +200,7 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
   const [desktopSidebarVisible, setDesktopSidebarVisible] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [todoCount, setTodoCount] = useState<number>(0);
+  const previousTodoCount = useRef<number | null>(null);
 
   const isAuthFree = AUTH_FREE_PATHS.includes(pathname);
 
@@ -228,11 +241,15 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
     if (isAuthFree || !authUser) return;
     try {
       const data = await api.get<{ count: number }>("/api/todos/count");
+      if (previousTodoCount.current !== null && data.count > previousTodoCount.current) {
+        notify(`您有 ${data.count - previousTodoCount.current} 条新的待办事项`, "info");
+      }
+      previousTodoCount.current = data.count;
       setTodoCount(data.count);
     } catch {
       // ignore badge refresh failure
     }
-  }, [isAuthFree, authUser]);
+  }, [isAuthFree, authUser, notify]);
 
   useEffect(() => {
     if (isAuthFree || !authUser) return;
@@ -388,6 +405,13 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
         ...(isSuperAdmin
           ? [
               {
+                href: "/admin/assistant-settings",
+                label: "智能助手设置",
+                active: pathname === "/admin/assistant-settings",
+                permissionKey: "account-management:view",
+                icon: <Bot className="size-4" />,
+              } as NavMenuItem,
+              {
                 href: "/admin/data-cleanup",
                 label: "模块数据删除",
                 active: pathname === "/admin/data-cleanup",
@@ -436,7 +460,7 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
     <TooltipProvider>
       <div className="flex min-h-screen flex-col bg-background">
         {/* Topbar */}
-        <header className="sticky top-0 z-40 w-full border-b border-border bg-card/80 backdrop-blur-md supports-[backdrop-filter]:bg-card/60">
+        <header className="sticky top-0 z-40 w-full border-b border-border/90 bg-card/85 shadow-[0_1px_0_rgba(255,255,255,0.025),0_8px_24px_rgba(0,0,0,0.12)] backdrop-blur-md supports-[backdrop-filter]:bg-card/70">
           <div className="flex h-11 items-center gap-3 px-3">
             <Button
               variant="ghost"
@@ -495,7 +519,7 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
                   </Button>
                 </Link>
               </TooltipTrigger>
-              <TooltipContent>第一阶段保留</TooltipContent>
+              <TooltipContent>查看待办事项</TooltipContent>
             </Tooltip>
           </div>
         </header>
@@ -503,7 +527,7 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
         <div className="flex flex-1">
           <aside
             className={cn(
-              "sticky top-11 hidden h-[calc(100vh-44px)] shrink-0 flex-col overflow-hidden border-r border-border bg-card/60 transition-[width,padding,border-color] duration-200 ease-out md:flex",
+              "sticky top-11 hidden h-[calc(100vh-44px)] shrink-0 flex-col overflow-hidden border-r border-border/90 bg-card/70 shadow-[6px_0_22px_rgba(0,0,0,0.08)] backdrop-blur-sm transition-[width,padding,border-color,box-shadow] duration-200 ease-out md:flex",
               desktopSidebarVisible ? "w-56 p-2.5" : "w-0 border-r-transparent p-0",
             )}
           >
@@ -524,7 +548,7 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
             </div>
           )}
 
-          <main className="min-w-0 flex-1 overflow-auto p-4 lg:p-6">{children}</main>
+          <main className="app-page-enter min-w-0 flex-1 overflow-auto p-4 lg:p-6">{children}</main>
         </div>
         <ProjectAssistant
           currentProjectId={currentProjectId}
