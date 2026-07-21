@@ -172,7 +172,7 @@ model WeeklyItem {
   ganttTaskId      String?
   taskName         String   @default("")
   description      String   @default("")
-  dueDate          String
+  dueDate          String   @default("")
   status           String   @default("PENDING") // PENDING / IN_PROGRESS / DONE
   owner            String
   priority         String   @default("NORMAL") // LOW / NORMAL / HIGH
@@ -263,6 +263,22 @@ model ProjectDocumentFile {
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([projectId, directoryKey, createdAt])
+}
+
+model AssistantChatMessage {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  userId      String
+  username    String   @default("")
+  displayName String   @default("")
+  projectId   String   @default("")
+  role        String
+  content     String   @db.Text
+  source      String   @default("")
+
+  @@index([userId, projectId, createdAt])
+  @@index([createdAt])
 }
 
 model PermissionTree {

@@ -11,6 +11,8 @@ import {
   ListTodo,
   LogOut,
   Menu,
+  PanelLeftClose,
+  PanelLeftOpen,
   Search,
   ShieldAlert,
   TrendingUp,
@@ -46,8 +48,10 @@ import { api } from "@/lib/api-client";
 import { CurrentProjectSwitcher } from "@/components/current-project-switcher";
 import { TODO_CHANGED_EVENT, TODO_CHANGED_STORAGE_KEY } from "@/lib/todo-events";
 import { ADMIN_ROLE_NAME } from "@/lib/permissions";
+import { ProjectAssistant } from "@/components/project-assistant";
 
 const AUTH_FREE_PATHS = ["/login", "/force-change-password"];
+const SIDEBAR_VISIBILITY_STORAGE_KEY = "pms.desktopSidebarVisible";
 
 type NavMenuItem = {
   href: string;
@@ -179,12 +183,27 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
   const fullPath = queryString ? `${pathname}?${queryString}` : pathname;
   const { user: authUser, loading: authLoading, logout: authLogout } = useAuth();
   const { can } = usePermission();
-  const { currentProjectId, clearCurrentProject } = useCurrentProject();
+  const { currentProjectId, currentProject, clearCurrentProject } = useCurrentProject();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [desktopSidebarVisible, setDesktopSidebarVisible] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [todoCount, setTodoCount] = useState<number>(0);
 
   const isAuthFree = AUTH_FREE_PATHS.includes(pathname);
+
+  useEffect(() => {
+    setDesktopSidebarVisible(
+      window.localStorage.getItem(SIDEBAR_VISIBILITY_STORAGE_KEY) !== "hidden",
+    );
+  }, []);
+
+  const toggleDesktopSidebar = () => {
+    setDesktopSidebarVisible((current) => {
+      const next = !current;
+      window.localStorage.setItem(SIDEBAR_VISIBILITY_STORAGE_KEY, next ? "visible" : "hidden");
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (isAuthFree || authLoading) return;
@@ -440,6 +459,21 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
               </div>
             </div>
 
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="hidden size-8 md:inline-flex"
+                  onClick={toggleDesktopSidebar}
+                  aria-label={desktopSidebarVisible ? "收起侧边栏" : "展开侧边栏"}
+                >
+                  {desktopSidebarVisible ? <PanelLeftClose /> : <PanelLeftOpen />}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{desktopSidebarVisible ? "收起侧边栏" : "展开侧边栏"}</TooltipContent>
+            </Tooltip>
+
             <div className="flex-1" />
 
             <CurrentProjectSwitcher />
@@ -467,24 +501,36 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
         </header>
 
         <div className="flex flex-1">
-          <aside className="hidden md:flex sticky top-11 h-[calc(100vh-44px)] w-56 shrink-0 flex-col border-r border-border bg-card/60 p-2.5">
-            <SidebarContent {...sidebarProps} />
+          <aside
+            className={cn(
+              "sticky top-11 hidden h-[calc(100vh-44px)] shrink-0 flex-col overflow-hidden border-r border-border bg-card/60 transition-[width,padding,border-color] duration-200 ease-out md:flex",
+              desktopSidebarVisible ? "w-56 p-2.5" : "w-0 border-r-transparent p-0",
+            )}
+          >
+            <div className="h-full w-[204px] shrink-0">
+              <SidebarContent {...sidebarProps} />
+            </div>
           </aside>
 
           {mobileOpen && (
-            <div className="fixed inset-0 z-50 md:hidden">
+            <div className="app-mobile-sidebar-overlay fixed inset-0 z-50 md:hidden">
               <div
                 className="absolute inset-0 bg-black/60 backdrop-blur-sm"
                 onClick={() => setMobileOpen(false)}
               />
-              <aside className="absolute left-0 top-0 h-full w-60 border-r border-border bg-card p-3 animate-in slide-in-from-left-4 duration-200">
+              <aside className="app-mobile-sidebar-panel absolute left-0 top-0 h-full w-60 border-r border-border bg-card p-3 shadow-[var(--app-shadow-dialog)]">
                 <SidebarContent {...sidebarProps} />
               </aside>
             </div>
           )}
 
-          <main className="flex-1 overflow-auto p-4 lg:p-6">{children}</main>
+          <main className="min-w-0 flex-1 overflow-auto p-4 lg:p-6">{children}</main>
         </div>
+        <ProjectAssistant
+          currentProjectId={currentProjectId}
+          currentProjectName={currentProject?.name}
+          todoCount={todoCount}
+        />
       </div>
     </TooltipProvider>
   );

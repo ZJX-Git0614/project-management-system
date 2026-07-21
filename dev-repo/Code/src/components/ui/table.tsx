@@ -6,7 +6,7 @@ function Table({ className, ...props }: React.ComponentProps<"table">) {
     <div data-slot="table-wrapper" className="relative w-full overflow-auto rounded-lg border border-border">
       <table
         data-slot="table"
-        className={cn("w-full caption-bottom text-sm border-collapse", className)}
+      className={cn("w-full caption-bottom border-collapse text-sm", className)}
         {...props}
       />
     </div>
@@ -38,7 +38,7 @@ function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
     <tr
       data-slot="table-row"
       className={cn(
-        "border-b border-border transition-colors duration-150 hover:bg-muted/40 data-[state=selected]:bg-accent/50",
+        "border-b border-border transition-[background-color,box-shadow] duration-150 ease-out hover:bg-muted/45 data-[state=selected]:bg-accent/55",
         className,
       )}
       {...props}

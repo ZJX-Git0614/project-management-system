@@ -69,8 +69,8 @@ function Select({
             type="button"
             data-slot="select"
             className={cn(
-              "flex h-9 w-full min-w-0 cursor-pointer items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm transition-colors duration-200",
-              "focus-visible:border-primary/60 focus-visible:ring-2 focus-visible:ring-ring/30 focus-visible:outline-none",
+              "flex h-9 w-full min-w-0 cursor-pointer items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm transition-[color,background-color,border-color,box-shadow] duration-150 ease-out hover:border-primary/35",
+              "focus-visible:border-primary/60 focus-visible:bg-background/80 focus-visible:ring-2 focus-visible:ring-ring/30 focus-visible:outline-none",
               "disabled:cursor-not-allowed disabled:opacity-50",
               variant === "ghost" && [
                 "border-transparent bg-transparent shadow-none text-muted-foreground",
@@ -88,7 +88,8 @@ function Select({
         </DropdownMenuPrimitive.Trigger>
         <DropdownMenuPrimitive.Portal>
           <DropdownMenuPrimitive.Content
-            className="z-50 max-h-60 min-w-[8rem] overflow-auto rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md"
+            data-slot="select-content"
+            className="z-[110] max-h-60 min-w-[8rem] overflow-auto rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-[var(--app-shadow-popover)]"
             align="start"
             sideOffset={4}
           >

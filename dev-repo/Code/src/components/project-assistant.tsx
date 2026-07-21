@@ -1,0 +1,527 @@
+"use client"
+
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react"
+import {
+  Bot,
+  Database,
+  Maximize2,
+  Minimize2,
+  Send,
+  Sparkles,
+  Square,
+  UserRound,
+  X,
+} from "lucide-react"
+
+import { AssistantMessageContent } from "@/components/assistant-message-content"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Textarea } from "@/components/ui/textarea"
+import { api } from "@/lib/api-client"
+import { cn } from "@/lib/utils"
+
+type AssistantSource = "DATABASE" | "MODEL"
+
+type ChatMessage = {
+  id?: string
+  role: "user" | "assistant"
+  content: string
+  source?: AssistantSource
+  createdAt?: string
+}
+
+type Point = { x: number; y: number }
+
+type ProjectAssistantProps = {
+  currentProjectId: string | null
+  currentProjectName?: string | null
+  todoCount: number
+}
+
+const LAUNCHER_SIZE = 58
+const VIEWPORT_MARGIN = 12
+const POSITION_STORAGE_KEY = "pms.project-assistant-position"
+
+const sourceLabel: Record<AssistantSource, string> = {
+  DATABASE: "实时数据库",
+  MODEL: "智能模型 + 实时数据库",
+}
+
+const clampPosition = (position: Point): Point => ({
+  x: Math.min(
+    Math.max(position.x, VIEWPORT_MARGIN),
+    Math.max(VIEWPORT_MARGIN, window.innerWidth - VIEWPORT_MARGIN - LAUNCHER_SIZE),
+  ),
+  y: Math.min(
+    Math.max(position.y, 56),
+    Math.max(56, window.innerHeight - VIEWPORT_MARGIN - LAUNCHER_SIZE),
+  ),
+})
+
+const defaultPosition = (): Point => clampPosition({
+  x: window.innerWidth - 24 - LAUNCHER_SIZE,
+  y: window.innerHeight - 24 - LAUNCHER_SIZE,
+})
+
+const formatMessageTime = (value?: string) => {
+  if (!value) return ""
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ""
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  })
+}
+
+const welcomeMessage = (projectName?: string | null): ChatMessage => ({
+  id: "assistant-welcome",
+  role: "assistant",
+  content: projectName
+    ? `已连接当前项目 **${projectName}**。可以直接查询项目概况、任务进度、本周事项、成本、风险、文档、成员和待办。`
+    : "我是项目智能助手。选择项目后可以查询完整项目数据；当前也可以查看项目组合概况。",
+  source: "DATABASE",
+})
+
+export function ProjectAssistant({
+  currentProjectId,
+  currentProjectName,
+  todoCount,
+}: ProjectAssistantProps) {
+  const [open, setOpen] = useState(false)
+  const [fullScreen, setFullScreen] = useState(false)
+  const [input, setInput] = useState("")
+  const [sending, setSending] = useState(false)
+  const [loadingHistory, setLoadingHistory] = useState(false)
+  const [modelConfigured, setModelConfigured] = useState(false)
+  const [messages, setMessages] = useState<ChatMessage[]>([welcomeMessage(currentProjectName)])
+  const [position, setPosition] = useState<Point | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const messagesRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLElement>(null)
+  const launcherRef = useRef<HTMLButtonElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  const dragRef = useRef<{
+    pointerId: number
+    startX: number
+    startY: number
+    origin: Point
+    moved: boolean
+  } | null>(null)
+  const suppressClickRef = useRef(false)
+
+  const quickPrompts = useMemo(() => currentProjectId
+    ? ["项目概况", "本周风险事项", "预算与利润率", "甘特关键任务", "我的待办"]
+    : ["项目组合概况", "进行中的项目", "我的待办"], [currentProjectId])
+
+  useEffect(() => {
+    let initial = defaultPosition()
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(POSITION_STORAGE_KEY) || "null") as Partial<Point> | null
+      if (typeof saved?.x === "number" && typeof saved?.y === "number") {
+        initial = clampPosition({ x: saved.x, y: saved.y })
+      }
+    } catch {
+      // Invalid browser-local position falls back to the default.
+    }
+    setPosition(initial)
+
+    const handleResize = () => setPosition((current) => current ? clampPosition(current) : defaultPosition())
+    window.addEventListener("resize", handleResize)
+    return () => window.removeEventListener("resize", handleResize)
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    const loadHistory = async () => {
+      setLoadingHistory(true)
+      try {
+        const query = currentProjectId ? `?projectId=${encodeURIComponent(currentProjectId)}` : ""
+        const result = await api.get<{ messages: ChatMessage[]; modelConfigured: boolean }>(`/api/assistant/chat${query}`)
+        if (cancelled) return
+        setMessages(result.messages.length > 0 ? result.messages : [welcomeMessage(currentProjectName)])
+        setModelConfigured(result.modelConfigured)
+      } catch {
+        if (!cancelled) setMessages([welcomeMessage(currentProjectName)])
+      } finally {
+        if (!cancelled) setLoadingHistory(false)
+      }
+    }
+    void loadHistory()
+    return () => {
+      cancelled = true
+    }
+  }, [currentProjectId, currentProjectName])
+
+  useEffect(() => {
+    if (!open) return
+    const frame = window.requestAnimationFrame(() => {
+      const container = messagesRef.current
+      if (container) container.scrollTo({ top: container.scrollHeight, behavior: "smooth" })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [messages, open, sending, loadingHistory])
+
+  useEffect(() => {
+    if (!open) return
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false)
+    }
+    const handleOutside = (event: PointerEvent) => {
+      const target = event.target as Node | null
+      if (!target || panelRef.current?.contains(target) || launcherRef.current?.contains(target)) return
+      setOpen(false)
+    }
+    window.addEventListener("keydown", handleEscape)
+    document.addEventListener("pointerdown", handleOutside)
+    return () => {
+      window.removeEventListener("keydown", handleEscape)
+      document.removeEventListener("pointerdown", handleOutside)
+    }
+  }, [open])
+
+  const persistPosition = useCallback((next: Point) => {
+    try {
+      window.localStorage.setItem(POSITION_STORAGE_KEY, JSON.stringify(next))
+    } catch {
+      // Position persistence is optional.
+    }
+  }, [])
+
+  const moveLauncher = useCallback((next: Point, persist = false) => {
+    const clamped = clampPosition(next)
+    setPosition(clamped)
+    if (persist) persistPosition(clamped)
+  }, [persistPosition])
+
+  const updateDrag = useCallback((pointerId: number, clientX: number, clientY: number) => {
+    const drag = dragRef.current
+    if (!drag || drag.pointerId !== pointerId) return
+    const deltaX = clientX - drag.startX
+    const deltaY = clientY - drag.startY
+    if (!drag.moved && Math.hypot(deltaX, deltaY) < 4) return
+    drag.moved = true
+    moveLauncher({ x: drag.origin.x + deltaX, y: drag.origin.y + deltaY })
+  }, [moveLauncher])
+
+  const completeDrag = useCallback((pointerId: number, clientX: number, clientY: number) => {
+    const drag = dragRef.current
+    if (!drag || drag.pointerId !== pointerId) return
+    if (drag.moved) {
+      const next = clampPosition({
+        x: drag.origin.x + clientX - drag.startX,
+        y: drag.origin.y + clientY - drag.startY,
+      })
+      suppressClickRef.current = true
+      setPosition(next)
+      persistPosition(next)
+    }
+    dragRef.current = null
+    setDragging(false)
+  }, [persistPosition])
+
+  useEffect(() => {
+    if (!dragging) return
+    const handlePointerMove = (event: PointerEvent) => updateDrag(event.pointerId, event.clientX, event.clientY)
+    const handlePointerEnd = (event: PointerEvent) => completeDrag(event.pointerId, event.clientX, event.clientY)
+    window.addEventListener("pointermove", handlePointerMove)
+    window.addEventListener("pointerup", handlePointerEnd)
+    window.addEventListener("pointercancel", handlePointerEnd)
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove)
+      window.removeEventListener("pointerup", handlePointerEnd)
+      window.removeEventListener("pointercancel", handlePointerEnd)
+    }
+  }, [completeDrag, dragging, updateDrag])
+
+  const handleLauncherPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0 || !position) return
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      origin: position,
+      moved: false,
+    }
+    setDragging(true)
+    event.currentTarget.setPointerCapture?.(event.pointerId)
+  }
+
+  const handleLauncherClick = () => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false
+      return
+    }
+    setOpen((current) => !current)
+  }
+
+  const sendMessage = async (rawMessage?: string) => {
+    const message = (rawMessage ?? input).trim()
+    if (!message || sending) return
+    const tempUserId = `pending-${Date.now()}`
+    setMessages((current) => [...current, {
+      id: tempUserId,
+      role: "user",
+      content: message,
+      createdAt: new Date().toISOString(),
+    }])
+    setInput("")
+    setSending(true)
+    const controller = new AbortController()
+    abortRef.current = controller
+
+    try {
+      const token = api.getToken()
+      const response = await fetch("/api/assistant/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          message,
+          projectId: currentProjectId,
+          history: messages
+            .filter((item) => item.id !== "assistant-welcome")
+            .slice(-8)
+            .map((item) => ({ role: item.role, content: item.content })),
+        }),
+      })
+      const payload = await response.json().catch(() => ({})) as {
+        error?: string
+        data?: { userMessage?: ChatMessage; assistantMessage?: ChatMessage; answer?: string; source?: AssistantSource }
+      }
+      if (!response.ok || !payload.data) throw new Error(payload.error || "助手暂时无法响应")
+      const result = payload.data
+      setMessages((current) => [
+        ...current.map((item) => item.id === tempUserId ? result.userMessage || item : item),
+        result.assistantMessage || {
+          role: "assistant",
+          content: result.answer || "未获得有效回答。",
+          source: result.source,
+          createdAt: new Date().toISOString(),
+        },
+      ])
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return
+      setMessages((current) => [...current, {
+        id: `error-${Date.now()}`,
+        role: "assistant",
+        content: error instanceof Error ? error.message : "助手暂时无法响应，请稍后再试。",
+        createdAt: new Date().toISOString(),
+      }])
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null
+      setSending(false)
+    }
+  }
+
+  const stopMessage = () => {
+    abortRef.current?.abort()
+    abortRef.current = null
+    setSending(false)
+  }
+
+  const handleComposerKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Enter" || event.shiftKey) return
+    event.preventDefault()
+    void sendMessage()
+  }
+
+  if (!position) return null
+
+  const bubbleOnLeft = position.x > 310
+
+  return (
+    <>
+      {!open && !dragging && (
+        <div
+          className="pointer-events-none fixed z-[78] hidden max-w-[250px] rounded-md border border-primary/25 bg-card/95 px-3 py-2 text-left text-xs text-muted-foreground shadow-[var(--app-shadow-popover)] backdrop-blur-md lg:block"
+          style={{
+            left: bubbleOnLeft ? position.x - 262 : position.x + LAUNCHER_SIZE + 10,
+            top: position.y + 7,
+          }}
+          aria-hidden="true"
+        >
+          {currentProjectName ? `已连接 ${currentProjectName}，可以直接问我。` : "选择项目后，我可以查询完整项目数据。"}
+        </div>
+      )}
+
+      {!open && (
+        <button
+          ref={launcherRef}
+          type="button"
+          aria-label="打开或移动项目智能助手"
+          title="项目智能助手"
+          data-thinking={sending ? "true" : "false"}
+          className={cn(
+            "app-assistant-launcher fixed z-[80] flex size-[58px] cursor-grab touch-none items-center justify-center rounded-full border border-primary/45 bg-[linear-gradient(145deg,rgba(37,99,235,.95),rgba(14,116,144,.92))] text-white shadow-[0_10px_28px_rgba(37,99,235,.3),inset_0_1px_0_rgba(255,255,255,.28)] outline-none transition-[box-shadow,filter] hover:brightness-110 focus-visible:ring-2 focus-visible:ring-primary/60 active:cursor-grabbing",
+            dragging && "cursor-grabbing shadow-[0_14px_34px_rgba(37,99,235,.42)]",
+          )}
+          style={{ left: position.x, top: position.y }}
+          onPointerDown={handleLauncherPointerDown}
+          onPointerMove={(event) => updateDrag(event.pointerId, event.clientX, event.clientY)}
+          onPointerUp={(event) => {
+            completeDrag(event.pointerId, event.clientX, event.clientY)
+            event.currentTarget.releasePointerCapture?.(event.pointerId)
+          }}
+          onPointerCancel={(event) => completeDrag(event.pointerId, event.clientX, event.clientY)}
+          onClick={handleLauncherClick}
+        >
+          <Bot className="size-7" strokeWidth={1.8} />
+          <span className="absolute right-1 top-1 size-2 rounded-full border border-white/80 bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,.8)]" />
+          {todoCount > 0 && (
+            <span className="absolute -right-1 -top-1 flex min-w-4 items-center justify-center rounded-full bg-rose-500 px-1 text-[9px] font-bold leading-4 text-white">
+              {todoCount > 99 ? "99+" : todoCount}
+            </span>
+          )}
+        </button>
+      )}
+
+      {open && (
+        <aside
+          ref={panelRef}
+          aria-label="项目智能助手"
+          className={cn(
+            "app-assistant-panel fixed z-[79] flex overflow-hidden rounded-lg border border-border bg-card/98 text-card-foreground shadow-[var(--app-shadow-dialog)] backdrop-blur-xl",
+            fullScreen
+              ? "inset-3 top-14"
+              : "bottom-3 right-3 top-14 w-[min(420px,calc(100vw-24px))]",
+          )}
+        >
+          <div className="grid min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)_auto]">
+            <header className="flex h-14 items-center gap-3 border-b border-border px-3">
+              <div className="flex size-9 shrink-0 items-center justify-center rounded-md border border-primary/30 bg-primary/12 text-primary">
+                <Bot className={cn("size-5", sending && "animate-pulse")} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <h2 className="truncate text-sm font-semibold">项目智能助手</h2>
+                  <Badge variant="outline" className="h-5 px-1.5 text-[10px]">
+                    {modelConfigured ? "模型增强" : "数据库模式"}
+                  </Badge>
+                </div>
+                <p className="truncate text-[11px] text-muted-foreground">
+                  {currentProjectName ? `当前项目：${currentProjectName}` : "项目组合范围"}
+                </p>
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-8"
+                onClick={() => setFullScreen((current) => !current)}
+                title={fullScreen ? "退出全屏" : "展开助手"}
+              >
+                {fullScreen ? <Minimize2 /> : <Maximize2 />}
+              </Button>
+              <Button variant="ghost" size="icon" className="size-8" onClick={() => setOpen(false)} title="关闭助手">
+                <X />
+              </Button>
+            </header>
+
+            <div ref={messagesRef} className="min-h-0 overflow-y-auto px-3 py-4">
+              <div className={cn("mx-auto space-y-4", fullScreen ? "max-w-5xl" : "max-w-none")}>
+                {loadingHistory && (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Sparkles className="size-3.5 animate-pulse text-primary" /> 正在加载会话记录...
+                  </div>
+                )}
+                {messages.map((message, index) => (
+                  <div
+                    key={message.id || `${message.role}-${index}`}
+                    className={cn("flex gap-2.5", message.role === "user" && "flex-row-reverse")}
+                  >
+                    <div className={cn(
+                      "flex size-7 shrink-0 items-center justify-center rounded-md border",
+                      message.role === "assistant"
+                        ? "border-primary/25 bg-primary/10 text-primary"
+                        : "border-border bg-muted text-muted-foreground",
+                    )}>
+                      {message.role === "assistant" ? <Bot className="size-4" /> : <UserRound className="size-4" />}
+                    </div>
+                    <div className={cn("min-w-0 max-w-[88%]", fullScreen && "max-w-[75%]")}>
+                      <div className={cn(
+                        "rounded-md border px-3 py-2.5 text-xs leading-5",
+                        message.role === "assistant"
+                          ? "border-border bg-background/55 text-foreground"
+                          : "border-primary/35 bg-primary/15 text-foreground",
+                      )}>
+                        <AssistantMessageContent content={message.content} />
+                      </div>
+                      <div className={cn("mt-1 flex items-center gap-2 text-[10px] text-muted-foreground/70", message.role === "user" && "justify-end")}>
+                        {message.source && (
+                          <span className="inline-flex items-center gap-1">
+                            <Database className="size-2.5" /> {sourceLabel[message.source]}
+                          </span>
+                        )}
+                        {formatMessageTime(message.createdAt) && <span>{formatMessageTime(message.createdAt)}</span>}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {sending && (
+                  <div className="flex gap-2.5">
+                    <div className="flex size-7 items-center justify-center rounded-md border border-primary/25 bg-primary/10 text-primary">
+                      <Bot className="size-4 animate-pulse" />
+                    </div>
+                    <div className="rounded-md border border-border bg-background/55 px-3 py-2.5 text-xs text-muted-foreground">
+                      正在读取项目数据库并组织回答...
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <footer className="border-t border-border bg-background/25 p-3">
+              <div className={cn("mx-auto", fullScreen ? "max-w-5xl" : "max-w-none")}>
+                <div className="mb-2 flex gap-1.5 overflow-x-auto pb-1">
+                  {quickPrompts.map((prompt) => (
+                    <button
+                      key={prompt}
+                      type="button"
+                      className="shrink-0 rounded-md border border-border bg-background/45 px-2 py-1 text-[11px] text-muted-foreground transition-[color,background-color,border-color] hover:border-primary/35 hover:bg-primary/8 hover:text-foreground"
+                      onClick={() => void sendMessage(prompt)}
+                      disabled={sending}
+                    >
+                      {prompt}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex items-end gap-2">
+                  <Textarea
+                    value={input}
+                    onChange={(event) => setInput(event.target.value)}
+                    onKeyDown={handleComposerKeyDown}
+                    placeholder="输入项目问题，Enter 发送，Shift+Enter 换行"
+                    className="min-h-[70px] resize-none text-xs"
+                    maxLength={1000}
+                    disabled={sending}
+                  />
+                  {sending ? (
+                    <Button variant="outline" size="icon" className="size-9 shrink-0" onClick={stopMessage} title="停止回答">
+                      <Square className="size-3.5 fill-current" />
+                    </Button>
+                  ) : (
+                    <Button size="icon" className="size-9 shrink-0" onClick={() => void sendMessage()} disabled={!input.trim()} title="发送">
+                      <Send />
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </footer>
+          </div>
+        </aside>
+      )}
+    </>
+  )
+}
