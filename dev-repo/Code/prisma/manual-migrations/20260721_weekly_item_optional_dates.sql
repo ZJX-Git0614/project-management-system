@@ -1,0 +1,2 @@
+ALTER TABLE "WeeklyItem"
+  ALTER COLUMN "dueDate" SET DEFAULT '';

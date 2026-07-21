@@ -460,8 +460,8 @@ export const ItemPanel = ({
     }
     const updated = { ...base, [key]: value };
     if (Object.is(base[key], value)) return;
-    if (!updated.title.trim() || !updated.dueDate || updated.progress < 0) {
-      console.warn("commitSelectChange: validation failed", { title: updated.title, dueDate: updated.dueDate, progress: updated.progress });
+    if (!updated.title.trim() || updated.progress < 0) {
+      console.warn("commitSelectChange: validation failed", { title: updated.title, progress: updated.progress });
       return;
     }
     setSaving(true);
@@ -587,8 +587,8 @@ export const ItemPanel = ({
       alert("请先从项目列表中选择当前项目");
       return;
     }
-    if (!draft.title.trim() || !draft.dueDate || draft.progress < 0) {
-      alert("请填写事项名称、截止日期，且进度 ≥ 0");
+    if (!draft.title.trim() || draft.progress < 0) {
+      alert("请填写事项名称，且进度不能小于 0");
       return;
     }
     setSaving(true);
@@ -607,8 +607,8 @@ export const ItemPanel = ({
 
   const submitEdit = async () => {
     if (!draft) return;
-    if (!draft.title.trim() || !draft.dueDate || draft.progress < 0) {
-      alert("请填写事项名称、截止日期，且进度 ≥ 0");
+    if (!draft.title.trim() || draft.progress < 0) {
+      alert("请填写事项名称，且进度不能小于 0");
       return;
     }
     setSaving(true);
@@ -1021,7 +1021,7 @@ export const ItemPanel = ({
                         value={formatDateInput(draft.plannedEndDate)}
                         onChange={(e) => {
                           updateDraft("plannedEndDate", e.target.value);
-                          updateDraft("dueDate", e.target.value || draft.dueDate);
+                          updateDraft("dueDate", e.target.value);
                         }}
                         onKeyDown={handleCreateKeyDown}
                         className={`${INLINE_INPUT_CLASS} w-[122px]`}
@@ -1321,7 +1321,7 @@ export const ItemPanel = ({
                             value={formatDateInput(row.plannedEndDate)}
                             onChange={(e) => {
                               updateDraft("plannedEndDate", e.target.value);
-                              updateDraft("dueDate", e.target.value || row.dueDate);
+                              updateDraft("dueDate", e.target.value);
                             }}
                             onKeyDown={handleEditKeyDown}
                             className={`${INLINE_INPUT_CLASS} w-[122px]`}
@@ -1575,8 +1575,8 @@ export const ItemPanel = ({
                 <Input type="date" value={formatDateInput(draft.actualEndDate)} onChange={(e) => updateDraft("actualEndDate", e.target.value)} className="h-8 text-xs" />
               </FormField>
             </div>
-            <FormField label="截止日期" required>
-              <Input type="date" value={formatDateInput(draft.dueDate)} onChange={(e) => updateDraft("dueDate", e.target.value)} className="h-8 text-xs" required />
+            <FormField label="截止日期">
+              <Input type="date" value={formatDateInput(draft.dueDate)} onChange={(e) => updateDraft("dueDate", e.target.value)} className="h-8 text-xs" />
             </FormField>
             <div className="grid grid-cols-4 gap-3">
               <FormField label="优先级">
@@ -1735,8 +1735,8 @@ export const ItemPanel = ({
                 <Input type="date" value={formatDateInput(draft.actualEndDate)} onChange={(e) => updateDraft("actualEndDate", e.target.value)} className="h-8 text-xs" />
               </FormField>
             </div>
-            <FormField label="截止日期" required>
-              <Input type="date" value={formatDateInput(draft.dueDate)} onChange={(e) => updateDraft("dueDate", e.target.value)} className="h-8 text-xs" required />
+            <FormField label="截止日期">
+              <Input type="date" value={formatDateInput(draft.dueDate)} onChange={(e) => updateDraft("dueDate", e.target.value)} className="h-8 text-xs" />
             </FormField>
             <div className="grid grid-cols-4 gap-3">
               <FormField label="优先级">

@@ -63,9 +63,13 @@ export async function GET(req: NextRequest) {
   const where: Record<string, unknown> = {}
   if (projectId) where.projectId = projectId
   if (startDate || endDate) {
-    where.dueDate = {}
-    if (startDate) (where.dueDate as Record<string, string>).gte = startDate
-    if (endDate) (where.dueDate as Record<string, string>).lte = endDate
+    const dueDateRange: Record<string, string> = {}
+    if (startDate) dueDateRange.gte = startDate
+    if (endDate) dueDateRange.lte = endDate
+    where.OR = [
+      { dueDate: "" },
+      { dueDate: dueDateRange },
+    ]
   }
 
   const items = await prisma.weeklyItem.findMany({
@@ -93,7 +97,6 @@ export async function POST(req: NextRequest) {
   const body = await req.json()
   if (!body.projectId) return err("项目 ID 不能为空")
   if (!body.title) return err("事项名称不能为空")
-  if (!body.dueDate) return err("截止日期不能为空")
   if (!body.owner) return err("负责人不能为空")
 
   const project = await prisma.project.findUnique({ where: { id: body.projectId } })
@@ -130,7 +133,7 @@ export async function POST(req: NextRequest) {
       ganttTaskId: linkedTask?.id ?? null,
       taskName: linkedTask?.taskName ?? (requestedTaskId ? "" : body.taskName || ""),
       description: body.description || "",
-      dueDate: body.dueDate,
+      dueDate: typeof body.dueDate === "string" ? body.dueDate : "",
       status: body.status || ItemStatus.PENDING,
       owner: body.owner,
       priority: body.priority || "NORMAL",
