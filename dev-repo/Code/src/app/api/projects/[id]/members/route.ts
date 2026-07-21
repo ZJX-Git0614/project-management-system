@@ -21,6 +21,22 @@ export async function POST(
   const body = await req.json()
   if (!body.roleName || !body.personName) return err("角色和人员不能为空")
 
+  const account = await prisma.userAccount.findFirst({
+    where: {
+      displayName: body.personName,
+      enabled: true,
+    },
+    select: {
+      assignedRoleNames: true,
+    },
+  })
+  if (!account) return err("请选择后台账号管理中的启用账号")
+
+  const assignedRoleNames = JSON.parse(account.assignedRoleNames || "[]") as string[]
+  if (!assignedRoleNames.includes(body.roleName)) {
+    return err("所选人员未分配该项目角色，请先在后台账号管理中调整角色")
+  }
+
   const member = await prisma.projectMember.create({
     data: {
       projectId: id,

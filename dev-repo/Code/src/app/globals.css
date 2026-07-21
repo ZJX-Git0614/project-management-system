@@ -84,6 +84,18 @@ body {
   color: #f8fbff;
 }
 
+@keyframes gantt-row-drop-flash {
+  0% {
+    opacity: 0;
+  }
+  18% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;

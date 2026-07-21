@@ -22,7 +22,6 @@ function Select({
 }: SelectProps) {
     const [open, setOpen] = React.useState(false);
     const buttonRef = React.useRef<HTMLButtonElement>(null);
-    const justSelected = React.useRef(false);
 
     const options: Array<{ value: string; label: string }> = [];
     React.Children.forEach(children, (child) => {
@@ -58,18 +57,8 @@ function Select({
     };
 
     const handleSelect = (optionValue: string) => {
-      justSelected.current = true;
       triggerChange(optionValue);
       setOpen(false);
-      setTimeout(() => {
-        justSelected.current = false;
-      }, 100);
-    };
-
-    const handleFocus = () => {
-      if (!justSelected.current && !open) {
-        setOpen(true);
-      }
     };
 
     return (
@@ -90,7 +79,6 @@ function Select({
               className
             )}
             disabled={disabled}
-            onFocus={handleFocus}
           >
             <span className={cn("flex-1 truncate text-left", !selectedOption && "text-muted-foreground")}>
               {selectedOption?.label ?? ""}

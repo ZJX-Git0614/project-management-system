@@ -1,6 +1,7 @@
 export type WeeklyMatterCodeSource = {
   id: string;
   matterCode: string;
+  sortOrder?: number;
   createdAt: Date | string;
 };
 
@@ -19,6 +20,11 @@ const parseMatterCode = (matterCode?: string | null) => {
 const byCreatedAtThenId = (a: WeeklyMatterCodeSource, b: WeeklyMatterCodeSource) => {
   const createdAtCompare = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
   return createdAtCompare || a.id.localeCompare(b.id);
+};
+
+const bySortOrderThenCreatedAt = (a: WeeklyMatterCodeSource, b: WeeklyMatterCodeSource) => {
+  const sortCompare = (a.sortOrder ?? 0) - (b.sortOrder ?? 0);
+  return sortCompare || byCreatedAtThenId(a, b);
 };
 
 export const nextWeeklyMatterCode = (items: WeeklyMatterCodeSource[]) => {
@@ -54,4 +60,13 @@ export const assignMissingWeeklyMatterCodes = <T extends WeeklyMatterCodeSource>
   return items.map((item) => (
     codeById.has(item.id) ? { ...item, matterCode: codeById.get(item.id)! } : item
   ));
+};
+
+export const renumberWeeklyMatterCodes = <T extends WeeklyMatterCodeSource>(items: T[]) => {
+  const codeById = new Map<string, string>();
+  [...items].sort(bySortOrderThenCreatedAt).forEach((item, index) => {
+    codeById.set(item.id, formatMatterCode(index + 1));
+  });
+
+  return items.map((item) => ({ ...item, matterCode: codeById.get(item.id)! }));
 };

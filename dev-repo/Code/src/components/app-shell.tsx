@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState, useCallback } from "react";
 import {
   CalendarDays,
   ClipboardList,
+  FileText,
   LayoutDashboard,
   ListTodo,
   LogOut,
@@ -13,6 +14,7 @@ import {
   Search,
   ShieldAlert,
   TrendingUp,
+  Trash2,
   User,
   Wallet,
   X,
@@ -43,6 +45,7 @@ import {
 import { api } from "@/lib/api-client";
 import { CurrentProjectSwitcher } from "@/components/current-project-switcher";
 import { TODO_CHANGED_EVENT, TODO_CHANGED_STORAGE_KEY } from "@/lib/todo-events";
+import { ADMIN_ROLE_NAME } from "@/lib/permissions";
 
 const AUTH_FREE_PATHS = ["/login", "/force-change-password"];
 
@@ -246,6 +249,7 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
         assignedRoleNames: authUser.assignedRoleNames,
       }
     : undefined;
+  const isSuperAdmin = authUser?.assignedRoleNames.includes(ADMIN_ROLE_NAME) ?? false;
 
   const detailHrefs = useMemo(
     () => ({
@@ -304,6 +308,20 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
         : [],
     },
     {
+      title: "项目范围管理",
+      items: hasSelectedProject
+        ? [
+            {
+              href: currentProjectId ? `/projects/${currentProjectId}?nav=documents` : "/projects",
+              label: "文档清单管理",
+              active: isDetailGroupActive(fullPath, "documents"),
+              permissionKey: getDetailGroupPermissionKey("documents"),
+              icon: <FileText className="size-4" />,
+            },
+          ]
+        : [],
+    },
+    {
       title: "项目成本管理",
       items: hasSelectedProject
         ? [
@@ -348,6 +366,17 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
           permissionKey: "account-management:view",
           icon: <ListTodo className="size-4" />,
         },
+        ...(isSuperAdmin
+          ? [
+              {
+                href: "/admin/data-cleanup",
+                label: "模块数据删除",
+                active: pathname === "/admin/data-cleanup",
+                permissionKey: "account-management:view",
+                icon: <Trash2 className="size-4" />,
+              } as NavMenuItem,
+            ]
+          : []),
       ],
     },
   ];

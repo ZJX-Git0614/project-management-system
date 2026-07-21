@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { ProjectStatus } from "@/domain/enums";
 import { PROJECT_STATUS_LABEL } from "@/lib/constants";
@@ -23,6 +23,7 @@ import { usePermission } from "@/lib/use-permission";
 import { api } from "@/lib/api-client";
 import { ProjectGanttPanel } from "@/components/project-gantt-panel";
 import { ProjectBudgetPanel } from "@/components/project-budget-panel";
+import { ProjectDocumentListPanel } from "@/components/project-document-list-panel";
 
 interface Project {
   id: string;
@@ -45,6 +46,13 @@ interface ProjectMember {
   roleName: string;
   personName: string;
   createdAt: string;
+}
+
+interface AccountItem {
+  id: string;
+  displayName: string;
+  enabled: boolean;
+  assignedRoleNames: string[];
 }
 
 export default function ProjectDetailPage() {
@@ -133,6 +141,9 @@ const ProjectDetailContent = () => {
 
       {activeGroup === "project" && <ProjectInfoTab projectId={projectId} onRefresh={fetchProject} />}
       {activeGroup === "gantt" && <ProjectGanttPanel projectId={projectId} projectStatus={project.status} />}
+      {activeGroup === "documents" && (
+        <ProjectDocumentListPanel projectId={projectId} projectStatus={project.status} />
+      )}
       {activeGroup === "budget" && <ProjectBudgetPanel projectId={projectId} projectStatus={project.status} projectAmountWan={project.amountWan} />}
     </div>
   );
@@ -441,23 +452,42 @@ const AddMemberDialog = ({
 }) => {
   const [roleName, setRoleName] = useState("");
   const [personName, setPersonName] = useState("");
-  const [roles, setRoles] = useState<{ id: string; roleName: string; persons: string[] }[]>([]);
+  const [roles, setRoles] = useState<{ id: string; roleName: string }[]>([]);
+  const [accounts, setAccounts] = useState<AccountItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    api
-      .get<{ id: string; roleName: string; persons: string[] }[]>("/api/role-config")
-      .then((data) => {
-        setRoles(data);
-        if (data.length > 0) setRoleName(data[0].roleName);
+    Promise.all([
+      api.get<{ id: string; roleName: string }[]>("/api/role-config"),
+      api.get<AccountItem[]>("/api/accounts"),
+    ])
+      .then(([roleData, accountData]) => {
+        setRoles(roleData.map((role) => ({ id: role.id, roleName: role.roleName })));
+        setAccounts(accountData);
+        if (roleData.length > 0) setRoleName(roleData[0].roleName);
       })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
 
-  const selectedRole = roles.find((r) => r.roleName === roleName);
-  const candidates = selectedRole?.persons ?? [];
+  const candidates = useMemo(() => {
+    const seen = new Set<string>();
+    return accounts
+      .filter((account) => account.enabled && account.assignedRoleNames.includes(roleName))
+      .filter((account) => {
+        if (seen.has(account.displayName)) return false;
+        seen.add(account.displayName);
+        return true;
+      });
+  }, [accounts, roleName]);
+
+  useEffect(() => {
+    if (!personName) return;
+    if (!candidates.some((account) => account.displayName === personName)) {
+      setPersonName("");
+    }
+  }, [candidates, personName]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -503,7 +533,9 @@ const AddMemberDialog = ({
               </FormField>
               <FormField label="人员" required>
                 {candidates.length === 0 ? (
-                  <div className="text-xs text-muted-foreground">该角色暂无人员，请在「项目角色与人员管理」中先添加</div>
+                  <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                    该角色暂无可用账号，请在「后台账号管理」中新增账号或为账号分配该项目角色。
+                  </div>
                 ) : (
                   <select
                     value={personName}
@@ -512,8 +544,10 @@ const AddMemberDialog = ({
                     required
                   >
                     <option value="">请选择人员</option>
-                    {candidates.map((p) => (
-                      <option key={p} value={p}>{p}</option>
+                    {candidates.map((account) => (
+                      <option key={account.id} value={account.displayName}>
+                        {account.displayName}
+                      </option>
                     ))}
                   </select>
                 )}

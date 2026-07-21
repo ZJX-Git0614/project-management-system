@@ -1,8 +1,10 @@
+import { rm } from "node:fs/promises"
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { getUserFromRequest } from "@/lib/auth"
 import { ok, unauthorized, notFound, ensureMutableProject, isStatusTransitionAllowed } from "@/lib/api-utils"
 import { getOrderedGanttTasks, serializeGanttTask } from "@/lib/gantt-task-service"
+import { getProjectDocumentDirectory } from "@/lib/project-document-storage"
 
 export async function GET(
   req: NextRequest,
@@ -114,5 +116,6 @@ export async function DELETE(
   if (!existing) return notFound("项目")
 
   await prisma.project.delete({ where: { id } })
+  await rm(getProjectDocumentDirectory(id), { recursive: true, force: true }).catch(() => undefined)
   return ok({ message: "项目已删除" })
 }

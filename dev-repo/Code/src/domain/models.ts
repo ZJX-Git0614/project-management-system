@@ -26,6 +26,9 @@ export interface ProjectGanttTask extends BaseEntity {
   taskName: string;
   startDate: string;
   durationDays: number;
+  actualStartDate: string;
+  actualEndDate: string;
+  progress: number;
   predecessorTask: string;
   sortOrder: number;
   project?: Pick<Project, "id" | "name" | "code" | "status">;
@@ -103,10 +106,21 @@ export interface ProjectMember extends BaseEntity {
   personName: string;
 }
 
+export interface ProjectDocumentFile extends BaseEntity {
+  projectId: string;
+  directoryKey: string;
+  originalName: string;
+  mimeType: string;
+  sizeBytes: number;
+  uploadedBy: string;
+}
+
 export interface WeeklyItem extends BaseEntity {
   projectId: string;
   matterCode: string;
+  sortOrder: number;
   title: string;
+  ganttTaskId?: string | null;
   taskName: string;
   description: string;
   dueDate: string;

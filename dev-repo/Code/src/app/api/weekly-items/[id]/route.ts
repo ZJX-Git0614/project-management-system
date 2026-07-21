@@ -4,7 +4,7 @@ import { getUserFromRequest } from "@/lib/auth"
 import { ok, err, unauthorized, notFound } from "@/lib/api-utils"
 
 const SERIALIZE_KEYS = [
-  "id", "projectId", "matterCode", "title", "taskName", "description", "dueDate", "status", "owner", "priority",
+  "id", "projectId", "matterCode", "sortOrder", "title", "ganttTaskId", "taskName", "description", "dueDate", "status", "owner", "priority",
   "plannedStartDate", "actualStartDate", "plannedEndDate", "actualEndDate",
   "progress", "health", "issueAndAction", "dependency", "risk", "riskStatus", "remark",
 ] as const
@@ -14,13 +14,16 @@ function serializeItem(item: Record<string, unknown>) {
   for (const k of SERIALIZE_KEYS) {
     out[k] = item[k]
   }
+  const linkedTask = item.ganttTask as { taskName?: string } | null | undefined
+  out.ganttTaskId = item.ganttTaskId ?? null
+  out.taskName = linkedTask?.taskName ?? item.taskName ?? ""
   out.createdAt = (item.createdAt as Date).toISOString()
   out.updatedAt = (item.updatedAt as Date).toISOString()
   return out
 }
 
 const PUTTABLE_FIELDS: readonly string[] = [
-  "title", "taskName", "description", "dueDate", "status", "owner", "priority",
+  "title", "description", "dueDate", "status", "owner", "priority",
   "plannedStartDate", "actualStartDate", "plannedEndDate", "actualEndDate",
   "progress", "health", "issueAndAction", "dependency", "risk", "riskStatus", "remark",
 ]
@@ -48,11 +51,27 @@ export async function PUT(
     if (body[k] !== undefined) updateData[k] = body[k]
   }
 
+  if (body.ganttTaskId !== undefined) {
+    const requestedTaskId = typeof body.ganttTaskId === "string" ? body.ganttTaskId.trim() : ""
+    const linkedTask = requestedTaskId
+      ? await prisma.projectGanttTask.findFirst({
+          where: { id: requestedTaskId, projectId: existing.projectId },
+          select: { id: true, taskName: true },
+        })
+      : null
+    if (requestedTaskId && !linkedTask) return err("关联任务不存在或不属于当前项目")
+    updateData.ganttTaskId = linkedTask?.id ?? null
+    updateData.taskName = linkedTask?.taskName ?? ""
+  } else if (body.taskName !== undefined) {
+    updateData.taskName = body.taskName
+  }
+
   const item = await prisma.weeklyItem.update({
     where: { id },
     data: updateData,
     include: {
       project: { select: { id: true, name: true, code: true, status: true } },
+      ganttTask: { select: { id: true, taskName: true } },
     },
   })
 

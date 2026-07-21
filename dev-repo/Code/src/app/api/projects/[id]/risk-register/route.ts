@@ -17,10 +17,17 @@ export async function GET(
 
   const items = await prisma.riskRegisterItem.findMany({
     where: { projectId: id },
-    orderBy: [{ createdAt: "asc" }],
+    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+    include: {
+      ganttTask: { select: { id: true, taskName: true } },
+    },
   })
 
-  return ok(items)
+  return ok(items.map((item) => ({
+    ...item,
+    ganttTaskId: item.ganttTaskId ?? null,
+    linkedItemName: item.ganttTask?.taskName ?? item.linkedItemName,
+  })))
 }
 
 // POST /api/projects/[id]/risk-register
@@ -37,12 +44,28 @@ export async function POST(
 
   const body = await req.json()
   if (!body.riskName?.trim()) return err("风险名称不能为空")
+  const lastItem = await prisma.riskRegisterItem.findFirst({
+    where: { projectId: id },
+    orderBy: [{ sortOrder: "desc" }, { createdAt: "desc" }],
+    select: { sortOrder: true },
+  })
+
+  const requestedTaskId = typeof body.ganttTaskId === "string" ? body.ganttTaskId.trim() : ""
+  const linkedTask = requestedTaskId
+    ? await prisma.projectGanttTask.findFirst({
+        where: { id: requestedTaskId, projectId: id },
+        select: { id: true, taskName: true },
+      })
+    : null
+  if (requestedTaskId && !linkedTask) return err("关联任务不存在或不属于当前项目")
 
   const item = await prisma.riskRegisterItem.create({
     data: {
       projectId: id,
+      sortOrder: (lastItem?.sortOrder ?? 0) + 1,
       riskName: body.riskName,
-      linkedItemName: body.linkedItemName || "",
+      ganttTaskId: linkedTask?.id ?? null,
+      linkedItemName: linkedTask?.taskName ?? (requestedTaskId ? "" : body.linkedItemName || ""),
       category: body.category || "",
       trigger: body.trigger || "",
       probability: body.probability || "中",
@@ -55,5 +78,9 @@ export async function POST(
     },
   })
 
-  return ok(item, 201)
+  return ok({
+    ...item,
+    ganttTaskId: item.ganttTaskId ?? null,
+    linkedItemName: linkedTask?.taskName ?? item.linkedItemName,
+  }, 201)
 }

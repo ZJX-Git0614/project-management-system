@@ -3,10 +3,10 @@ import { prisma } from "@/lib/prisma"
 import { getUserFromRequest } from "@/lib/auth"
 import { ok, err, unauthorized } from "@/lib/api-utils"
 import { ItemStatus } from "@/domain/enums"
-import { assignMissingWeeklyMatterCodes, nextWeeklyMatterCode } from "@/lib/weekly-matter-codes"
+import { nextWeeklyMatterCode, renumberWeeklyMatterCodes } from "@/lib/weekly-matter-codes"
 
 const SERIALIZE_KEYS = [
-  "id", "projectId", "matterCode", "title", "taskName", "description", "dueDate", "status", "owner", "priority",
+  "id", "projectId", "matterCode", "sortOrder", "title", "ganttTaskId", "taskName", "description", "dueDate", "status", "owner", "priority",
   "plannedStartDate", "actualStartDate", "plannedEndDate", "actualEndDate",
   "progress", "health", "issueAndAction", "dependency", "risk", "riskStatus", "remark",
 ] as const
@@ -16,6 +16,9 @@ function serializeItem(item: Record<string, unknown>) {
   for (const k of SERIALIZE_KEYS) {
     out[k] = item[k]
   }
+  const linkedTask = item.ganttTask as { taskName?: string } | null | undefined
+  out.ganttTaskId = item.ganttTaskId ?? null
+  out.taskName = linkedTask?.taskName ?? item.taskName ?? ""
   out.createdAt = (item.createdAt as Date).toISOString()
   out.updatedAt = (item.updatedAt as Date).toISOString()
   return out
@@ -34,12 +37,8 @@ function buildExtraData(body: Record<string, unknown>): Record<string, unknown> 
   return data
 }
 
-async function ensureWeeklyMatterCodes() {
-  const items = await prisma.weeklyItem.findMany({
-    select: { id: true, matterCode: true, createdAt: true },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-  })
-  const codedItems = assignMissingWeeklyMatterCodes(items)
+async function normalizeWeeklyMatterCodes<T extends { id: string; matterCode: string; sortOrder?: number; createdAt: Date | string }>(items: T[]) {
+  const codedItems = renumberWeeklyMatterCodes(items)
   await Promise.all(
     codedItems
       .filter((item, index) => item.matterCode !== items[index].matterCode)
@@ -69,19 +68,22 @@ export async function GET(req: NextRequest) {
     if (endDate) (where.dueDate as Record<string, string>).lte = endDate
   }
 
-  await ensureWeeklyMatterCodes()
-
   const items = await prisma.weeklyItem.findMany({
     where,
-    orderBy: [{ dueDate: "asc" }, { priority: "desc" }, { createdAt: "asc" }],
+    orderBy: [{ sortOrder: "asc" }, { dueDate: "asc" }, { createdAt: "asc" }],
     include: {
       project: {
         select: { id: true, name: true, code: true, status: true },
       },
+      ganttTask: {
+        select: { id: true, taskName: true },
+      },
     },
   })
 
-  return ok(items.map((item) => serializeItem(item as unknown as Record<string, unknown>)))
+  const normalizedItems = await normalizeWeeklyMatterCodes(items)
+
+  return ok(normalizedItems.map((item) => serializeItem(item as unknown as Record<string, unknown>)))
 }
 
 export async function POST(req: NextRequest) {
@@ -100,15 +102,33 @@ export async function POST(req: NextRequest) {
     return err("项目已作废或已完成，不允许添加事项")
   }
 
-  const existingItems = await ensureWeeklyMatterCodes()
+  const existingItems = await prisma.weeklyItem.findMany({
+    select: { id: true, matterCode: true, sortOrder: true, createdAt: true },
+  })
   const matterCode = nextWeeklyMatterCode(existingItems)
+  const lastItem = await prisma.weeklyItem.findFirst({
+    where: { projectId: body.projectId },
+    orderBy: [{ sortOrder: "desc" }, { createdAt: "desc" }],
+    select: { sortOrder: true },
+  })
+
+  const requestedTaskId = typeof body.ganttTaskId === "string" ? body.ganttTaskId.trim() : ""
+  const linkedTask = requestedTaskId
+    ? await prisma.projectGanttTask.findFirst({
+        where: { id: requestedTaskId, projectId: body.projectId },
+        select: { id: true, taskName: true },
+      })
+    : null
+  if (requestedTaskId && !linkedTask) return err("关联任务不存在或不属于当前项目")
 
   const item = await prisma.weeklyItem.create({
     data: {
       projectId: body.projectId,
       matterCode,
+      sortOrder: (lastItem?.sortOrder ?? 0) + 1,
       title: body.title,
-      taskName: body.taskName || "",
+      ganttTaskId: linkedTask?.id ?? null,
+      taskName: linkedTask?.taskName ?? (requestedTaskId ? "" : body.taskName || ""),
       description: body.description || "",
       dueDate: body.dueDate,
       status: body.status || ItemStatus.PENDING,
@@ -118,6 +138,7 @@ export async function POST(req: NextRequest) {
     },
     include: {
       project: { select: { id: true, name: true, code: true, status: true } },
+      ganttTask: { select: { id: true, taskName: true } },
     },
   })
 

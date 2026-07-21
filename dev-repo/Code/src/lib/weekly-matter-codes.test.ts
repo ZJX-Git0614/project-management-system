@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   assignMissingWeeklyMatterCodes,
   nextWeeklyMatterCode,
+  renumberWeeklyMatterCodes,
   type WeeklyMatterCodeSource,
 } from "@/lib/weekly-matter-codes";
 
@@ -29,5 +30,15 @@ describe("weekly matter codes", () => {
       item({ id: "one", matterCode: "Matter001" }),
       item({ id: "two", matterCode: "Matter009" }),
     ])).toBe("Matter010");
+  });
+
+  it("renumbers matter codes by current sort order", () => {
+    const items = renumberWeeklyMatterCodes([
+      item({ id: "first", matterCode: "Matter001", sortOrder: 2 }),
+      item({ id: "second", matterCode: "Matter002", sortOrder: 1 }),
+    ]);
+
+    expect(items.find((entry) => entry.id === "second")?.matterCode).toBe("Matter001");
+    expect(items.find((entry) => entry.id === "first")?.matterCode).toBe("Matter002");
   });
 });

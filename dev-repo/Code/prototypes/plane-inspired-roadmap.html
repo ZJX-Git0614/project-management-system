@@ -904,7 +904,7 @@
             </div>
             <div class="toolbar">
               <span class="field">视图 <select><option>我的待办</option><option>本周到期</option><option>高风险事项</option><option>未分配事项</option></select></span>
-              <span class="field">项目 <select><option>全部项目</option><option>网络状态控制设备</option></select></span>
+              <span class="field">项目 <select><option>全部项目</option><option>示例项目</option></select></span>
               <span class="field">状态 <select><option>全部</option><option>待开始</option><option>进行中</option><option>已完成</option></select></span>
               <span class="field">健康度 <select><option>全部</option><option>健康</option><option>有风险</option><option>偏离</option></select></span>
               <span class="field">搜索 <input placeholder="事项/负责人/任务ID" /></span>
@@ -938,7 +938,7 @@
                       <td class="id">W001</td>
                       <td class="id">Task003</td>
                       <td><span class="editable">完成硬件联调问题闭环</span></td>
-                      <td><span class="editable">张三</span></td>
+                      <td><span class="editable">成员B</span></td>
                       <td><span class="badge red">紧急</span></td>
                       <td><span class="badge yellow">进行中</span></td>
                       <td>07-10</td>
@@ -962,7 +962,7 @@
                       <td class="id">W003</td>
                       <td class="id">Task011</td>
                       <td><span class="editable">确认采购件到货计划</span></td>
-                      <td><span class="editable">王五</span></td>
+                      <td><span class="editable">成员C</span></td>
                       <td><span class="badge yellow">高</span></td>
                       <td><span class="badge yellow">进行中</span></td>
                       <td>07-09</td>
@@ -1044,7 +1044,7 @@
                       <td><span class="editable">关键采购件到货延期</span></td>
                       <td>确认采购件到货计划</td>
                       <td><span class="badge red">高</span></td>
-                      <td><span class="editable">王五</span></td>
+                      <td><span class="editable">成员C</span></td>
                       <td>07-16</td>
                       <td><span class="badge yellow">应对中</span></td>
                     </tr>
@@ -1081,9 +1081,9 @@
                   <div class="kv"><label>触发条件</label><span>供应商确认本周无法完成发货。</span></div>
                   <div class="kv"><label>概率</label><span><span class="badge red">高</span></span></div>
                   <div class="kv"><label>影响</label><span><span class="badge red">高</span></span></div>
-                  <div class="kv"><label>责任人</label><span>王五</span></div>
+                  <div class="kv"><label>责任人</label><span>成员C</span></div>
                   <div class="box"><strong>应对措施</strong><br />拆分采购批次，优先保障联调样件；项目经理同步客户预期，采购负责人每日更新到货节点。</div>
-                  <div class="box"><strong>活动记录</strong><br />07-06 王五更新目标日期。<br />07-05 赵佳鑫将风险等级调整为高。<br />07-04 系统由事项收集池转入风险登记册。</div>
+                  <div class="box"><strong>活动记录</strong><br />07-06 成员C更新目标日期。<br />07-05 成员A将风险等级调整为高。<br />07-04 系统由事项收集池转入风险登记册。</div>
                 </div>
               </aside>
             </div>
@@ -1179,18 +1179,18 @@
               </aside>
               <article class="doc-editor">
                 <h3>2026-07-06 项目周会纪要</h3>
-                <p class="dim">关联项目：网络状态控制设备 · 记录人：赵佳鑫 · 最后更新：14:35</p>
+                <p class="dim">关联项目：示例项目 · 记录人：成员A · 最后更新：14:35</p>
                 <h4>会议结论</h4>
                 <ul>
                   <li>删除独立“本月事项”，后续月度管理通过周事项视图和项目文档复盘承接。</li>
-                  <li>采购件延期风险进入风险登记册，责任人为王五。</li>
+                  <li>采购件延期风险进入风险登记册，责任人为成员C。</li>
                   <li>本周优先完成联调问题闭环和验收材料清单。</li>
                 </ul>
                 <h4>行动项</h4>
                 <ul>
-                  <li>张三：完成硬件联调问题闭环，截止 07-10。</li>
+                  <li>成员B：完成硬件联调问题闭环，截止 07-10。</li>
                   <li>李四：输出客户验收材料清单，截止 07-12。</li>
-                  <li>王五：确认采购件到货计划，截止 07-09。</li>
+                  <li>成员C：确认采购件到货计划，截止 07-09。</li>
                 </ul>
               </article>
               <aside class="doc-actions">
@@ -1199,9 +1199,9 @@
                   <p>从文档中抽取行动项，进入事项收集池或直接转本周事项。</p>
                 </div>
                 <div class="view-list">
-                  <div class="view-item"><strong>完成硬件联调问题闭环</strong><span>建议：转本周事项 · 张三 · 07-10</span></div>
+                  <div class="view-item"><strong>完成硬件联调问题闭环</strong><span>建议：转本周事项 · 成员B · 07-10</span></div>
                   <div class="view-item"><strong>输出客户验收材料清单</strong><span>建议：转本周事项 · 李四 · 07-12</span></div>
-                  <div class="view-item"><strong>采购件到货计划</strong><span>建议：转风险 + 本周事项 · 王五</span></div>
+                  <div class="view-item"><strong>采购件到货计划</strong><span>建议：转风险 + 本周事项 · 成员C</span></div>
                 </div>
                 <div style="display:grid;gap:8px;margin-top:12px;">
                   <button class="btn primary">全部转入事项收集池</button>
@@ -1224,7 +1224,7 @@
             <div class="module-summary">
               <div class="module-card">
                 <h4>设计阶段</h4>
-                <p>负责人：张三 · 07-01 至 07-08 · 已完成</p>
+                <p>负责人：成员B · 07-01 至 07-08 · 已完成</p>
                 <div class="mini-bars">
                   <div class="mini-bar"><span>任务</span><div class="line"><span style="width:100%"></span></div><span>8/8</span></div>
                   <div class="mini-bar"><span>风险</span><div class="line"><span style="width:12%;background:var(--success)"></span></div><span>1</span></div>
@@ -1266,7 +1266,7 @@
                   <tr class="selected">
                     <td class="id">M001</td>
                     <td><span class="editable">设计阶段</span></td>
-                    <td>张三</td>
+                    <td>成员B</td>
                     <td>07-01 ~ 07-08</td>
                     <td><span class="badge green">已完成</span></td>
                     <td>8</td>

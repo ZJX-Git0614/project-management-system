@@ -1,6 +1,6 @@
 "use client";
 
-import { KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
+import { KeyboardEvent, type DragEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -21,9 +21,10 @@ import { api } from "@/lib/api-client";
 
 type RiskLevel = "高" | "中" | "低";
 type RiskStatus = "识别中" | "跟踪中" | "处理中" | "已关闭";
+type DropPosition = "before" | "after";
 type EditableRiskField =
   | "riskName"
-  | "linkedItemName"
+  | "ganttTaskId"
   | "category"
   | "trigger"
   | "probability"
@@ -36,7 +37,9 @@ type EditableRiskField =
 
 interface RiskRegisterItem {
   id: string;
+  sortOrder?: number;
   riskName: string;
+  ganttTaskId?: string | null;
   linkedItemName: string;
   category: string;
   trigger: string;
@@ -78,6 +81,9 @@ export default function RiskRegisterPage() {
   const [draft, setDraft] = useState<RiskRegisterItem | null>(null);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [draggedRiskId, setDraggedRiskId] = useState<string | null>(null);
+  const [riskDropTarget, setRiskDropTarget] = useState<{ id: string; position: DropPosition } | null>(null);
+  const [reordering, setReordering] = useState(false);
 
   const canCreate = can("risk-register:create");
   const canEdit = can("risk-register:edit");
@@ -141,8 +147,8 @@ export default function RiskRegisterPage() {
   const commitSelectChange = async (id: string, field: EditableRiskField, value: string) => {
     if (!currentProjectId) return;
     try {
-      await api.put(`/api/projects/${currentProjectId}/risk-register/${id}`, { [field]: value });
-      setRiskItems((prev) => prev.map((r) => (r.id === id ? { ...r, [field]: value } : r)));
+      const updated = await api.put<RiskRegisterItem>(`/api/projects/${currentProjectId}/risk-register/${id}`, { [field]: value });
+      setRiskItems((prev) => prev.map((r) => (r.id === id ? updated : r)));
     } catch (error) {
       alert(error instanceof Error ? error.message : "保存失败");
     }
@@ -158,9 +164,9 @@ export default function RiskRegisterPage() {
 
   // ---- 新建 ----
   const openCreate = () => {
-    const firstOption = taskOptions.length > 0 ? taskOptionLabel(taskOptions[0]) : "";
+    const firstOption = taskOptions.length > 0 ? taskOptions[0].id : "";
     setDraft({
-      id: "", riskName: "", linkedItemName: firstOption, category: "", trigger: "",
+      id: "", sortOrder: 0, riskName: "", ganttTaskId: firstOption, linkedItemName: "", category: "", trigger: "",
       probability: "中", impact: "中", level: "中", response: "", owner: "",
       status: "识别中", targetDate: "",
     });
@@ -196,6 +202,42 @@ export default function RiskRegisterPage() {
       setSelectedIds([]); setSelectionMode(false);
     } catch (error) {
       alert(error instanceof Error ? error.message : "删除失败");
+    }
+  };
+
+  const getDropPosition = (event: DragEvent<HTMLElement>): DropPosition => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+  };
+
+  const reorderRisks = async (targetRiskId: string, position: DropPosition) => {
+    if (!currentProjectId || !draggedRiskId || draggedRiskId === targetRiskId || reordering) return;
+    const riskIds = riskItems.map((item) => item.id);
+    const fromIndex = riskIds.indexOf(draggedRiskId);
+    const toIndex = riskIds.indexOf(targetRiskId);
+    if (fromIndex < 0 || toIndex < 0) return;
+
+    const nextRiskIds = [...riskIds];
+    const [movedRiskId] = nextRiskIds.splice(fromIndex, 1);
+    const targetIndexAfterRemoval = nextRiskIds.indexOf(targetRiskId);
+    nextRiskIds.splice(position === "after" ? targetIndexAfterRemoval + 1 : targetIndexAfterRemoval, 0, movedRiskId);
+
+    setReordering(true);
+    setRiskItems((prev) => {
+      const itemById = new Map(prev.map((item) => [item.id, item]));
+      return nextRiskIds.map((id, index) => ({ ...itemById.get(id)!, sortOrder: index + 1 }));
+    });
+
+    try {
+      await api.post(`/api/projects/${currentProjectId}/risk-register/reorder`, { riskIds: nextRiskIds });
+      await fetchData();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "排序保存失败");
+      await fetchData();
+    } finally {
+      setReordering(false);
+      setDraggedRiskId(null);
+      setRiskDropTarget(null);
     }
   };
 
@@ -274,6 +316,7 @@ export default function RiskRegisterPage() {
                 删除 {selectedIds.length}
               </Button>
             )}
+            {reordering && <span className="text-xs text-muted-foreground">排序保存中...</span>}
           </div>
         </div>
       </CardHeader>
@@ -282,6 +325,7 @@ export default function RiskRegisterPage() {
           <TableHeader>
             <TableRow>
               {selectionMode && <TableHead className="w-[48px] whitespace-nowrap">选择</TableHead>}
+              <TableHead className="w-[64px] whitespace-nowrap">序号</TableHead>
               <TableHead className="min-w-[180px] whitespace-nowrap">风险名称</TableHead>
               <TableHead className="min-w-[200px] whitespace-nowrap">关联事项</TableHead>
               <TableHead className="whitespace-nowrap">类别</TableHead>
@@ -300,11 +344,12 @@ export default function RiskRegisterPage() {
             {draft && (
               <TableRow className="align-top bg-primary/5">
                 {selectionMode && <TableCell />}
+                <TableCell className="text-xs text-muted-foreground">-</TableCell>
                 <TableCell><Input value={draft.riskName} onChange={(e) => updateDraft("riskName", e.target.value)} className={`${inlineInputClass} min-w-[160px]`} placeholder="风险名称" autoFocus /></TableCell>
                 <TableCell>
-                  <Select value={draft.linkedItemName} onChange={(e) => updateDraft("linkedItemName", e.target.value)} className={`${inlineSelectClass} min-w-[200px]`}>
+                  <Select value={draft.ganttTaskId ?? ""} onChange={(e) => updateDraft("ganttTaskId", e.target.value)} className={`${inlineSelectClass} min-w-[200px]`}>
                     <option value="">不关联</option>
-                    {taskOptions.map((t) => (<option key={t.id} value={taskOptionLabel(t)}>{taskOptionLabel(t)}</option>))}
+                    {taskOptions.map((t) => (<option key={t.id} value={t.id}>{taskOptionLabel(t)}</option>))}
                   </Select>
                 </TableCell>
                 <TableCell><Input value={draft.category} onChange={(e) => updateDraft("category", e.target.value)} className={`${inlineInputClass} w-[96px]`} placeholder="类别" /></TableCell>
@@ -325,18 +370,57 @@ export default function RiskRegisterPage() {
               </TableRow>
             )}
             {/* ---- 数据行 ---- */}
-            {riskItems.map((item) => (
-              <TableRow key={item.id} className={editingCell?.id === item.id ? "align-top bg-primary/5" : "align-top"}>
+            {riskItems.map((item, index) => (
+              <TableRow
+                key={item.id}
+                draggable={canEdit && !selectionMode && editingCell?.id !== item.id}
+                onDragStart={(event) => {
+                  if (!canEdit || selectionMode || editingCell?.id === item.id) return;
+                  setDraggedRiskId(item.id);
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("text/plain", item.id);
+                }}
+                onDragOver={(event) => {
+                  if (!draggedRiskId || draggedRiskId === item.id) return;
+                  event.preventDefault();
+                  setRiskDropTarget({ id: item.id, position: getDropPosition(event) });
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  void reorderRisks(item.id, riskDropTarget?.id === item.id ? riskDropTarget.position : "before");
+                }}
+                onDragEnd={() => {
+                  setDraggedRiskId(null);
+                  setRiskDropTarget(null);
+                }}
+                className={
+                  editingCell?.id === item.id
+                    ? "align-top bg-primary/5"
+                    : [
+                        "cursor-grab align-top transition-[background,box-shadow,transform] duration-150 active:cursor-grabbing",
+                        index % 2 === 0 ? "bg-background" : "bg-muted/20",
+                        "hover:bg-primary/5",
+                        draggedRiskId === item.id ? "scale-[0.995] opacity-45 shadow-lg" : "",
+                        riskDropTarget?.id === item.id && draggedRiskId !== item.id && riskDropTarget.position === "before"
+                          ? "translate-y-1 bg-primary/10 shadow-[inset_0_6px_0_hsl(var(--primary)/0.16),inset_0_2px_0_hsl(var(--primary))]"
+                          : "",
+                        riskDropTarget?.id === item.id && draggedRiskId !== item.id && riskDropTarget.position === "after"
+                          ? "-translate-y-1 bg-primary/10 shadow-[inset_0_-6px_0_hsl(var(--primary)/0.16),inset_0_-2px_0_hsl(var(--primary))]"
+                          : "",
+                      ].filter(Boolean).join(" ")
+                }
+              >
                 {selectionMode && (
                   <TableCell>
                     <input type="checkbox" checked={selectedIds.includes(item.id)} onChange={() => toggleSelected(item.id)} onClick={(e) => e.stopPropagation()} className="h-3.5 w-3.5 rounded border-border bg-background" />
                   </TableCell>
                 )}
+                <TableCell className="text-xs tabular-nums text-muted-foreground">{index + 1}</TableCell>
                 <TableCell>{renderTextCell(item, "riskName", item.riskName, `${inlineInputClass} min-w-[160px]`, "风险名称")}</TableCell>
                 <TableCell>
-                  <Select variant="ghost" value={item.linkedItemName} onChange={(e) => commitSelectChange(item.id, "linkedItemName", e.target.value)} className={`${inlineSelectClass} min-w-[200px]`}>
+                  <Select variant="ghost" value={item.ganttTaskId ?? ""} onChange={(e) => commitSelectChange(item.id, "ganttTaskId", e.target.value)} className={`${inlineSelectClass} min-w-[200px]`}>
                     <option value="">不关联</option>
-                    {taskOptions.map((t) => (<option key={t.id} value={taskOptionLabel(t)}>{taskOptionLabel(t)}</option>))}
+                    {taskOptions.map((t) => (<option key={t.id} value={t.id}>{taskOptionLabel(t)}</option>))}
                   </Select>
                 </TableCell>
                 <TableCell>{renderTextCell(item, "category", item.category, `${inlineInputClass} w-[96px]`, "类别")}</TableCell>
@@ -352,7 +436,7 @@ export default function RiskRegisterPage() {
             ))}
             {!loading && riskItems.length === 0 && (
               <TableRow>
-                <TableCell colSpan={selectionMode ? 13 : 12} className="text-center text-muted-foreground text-xs py-8">
+                <TableCell colSpan={selectionMode ? 14 : 13} className="text-center text-muted-foreground text-xs py-8">
                   暂无风险条目{currentProjectId ? "" : "，请先在项目列表中选择一个项目"}
                 </TableCell>
               </TableRow>

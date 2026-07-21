@@ -8,6 +8,7 @@ import { useConfirm } from "@/components/confirm-provider";
 import { usePermission } from "@/lib/use-permission";
 import { api } from "@/lib/api-client";
 import { buildGanttRows, getGanttDateRange } from "@/lib/gantt";
+import { renumberGanttTaskCodes } from "@/lib/gantt-task-codes";
 import { ProjectStatus } from "@/domain/enums";
 import type { ProjectGanttTask } from "@/domain/models";
 
@@ -60,6 +61,9 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
         taskName: "",
         startDate,
         durationDays: 1,
+        actualStartDate: "",
+        actualEndDate: "",
+        progress: 0,
         predecessorTask: "",
       });
       await fetchTasks();
@@ -72,13 +76,20 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
 
   const handleUpdateTask = async (task: ProjectGanttTask, draft: GanttTaskDraft) => {
     if (!draft.startDate || draft.durationDays < 1) {
-      alert("请填写开始时间，且任务周期 ≥ 1 天");
+      alert("请填写计划开始时间，且任务周期 ≥ 1 天");
+      return;
+    }
+    if (draft.progress < 0 || draft.progress > 100) {
+      alert("当前进度必须在 0-100 之间");
       return;
     }
     setSavingTaskId(task.id);
     try {
       const updated = await api.put<ProjectGanttTask>(`/api/projects/${projectId}/gantt-tasks/${task.id}`, draft);
       setTasks((prev) => prev.map((item) => (item.id === task.id ? updated : item)));
+      if (task.taskCategory !== draft.taskCategory) {
+        await fetchTasks();
+      }
     } catch (error) {
       alert(error instanceof Error ? error.message : "保存失败");
       await fetchTasks();
@@ -105,11 +116,14 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const handleReorderTasks = async (taskIds: string[]) => {
     setTasks((prev) => {
       const taskById = new Map(prev.map((task) => [task.id, task]));
-      return taskIds.map((taskId, index) => ({ ...taskById.get(taskId)!, sortOrder: index + 1 }));
+      return renumberGanttTaskCodes(
+        taskIds.map((taskId, index) => ({ ...taskById.get(taskId)!, sortOrder: index + 1 }))
+      );
     });
     setReordering(true);
     try {
       await api.put(`/api/projects/${projectId}/gantt-tasks/reorder`, { taskIds });
+      await fetchTasks();
     } catch (error) {
       alert(error instanceof Error ? error.message : "排序保存失败");
       await fetchTasks();

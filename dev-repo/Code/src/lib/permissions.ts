@@ -94,7 +94,7 @@ export const PERMISSION_TREE = [
   },
   {
     key: "project-progress",
-    label: "项目进度追踪",
+    label: "项目进度管理",
     type: "group",
     children: [
       {
@@ -115,6 +115,23 @@ export const PERMISSION_TREE = [
           { key: "weekly-items:edit", label: "编辑本周事项", type: "action" },
           { key: "weekly-items:delete", label: "删除本周事项", type: "action" },
           { key: "weekly-items:export", label: "导出本周事项", type: "action" },
+        ],
+      },
+    ],
+  },
+  {
+    key: "project-scope",
+    label: "项目范围管理",
+    type: "group",
+    children: [
+      {
+        key: "project-documents",
+        label: "文档清单管理",
+        type: "page",
+        children: [
+          { key: "project-documents:view", label: "查看文档清单管理", type: "section" },
+          { key: "project-documents:create", label: "上传项目文档", type: "action" },
+          { key: "project-documents:delete", label: "删除项目文档", type: "action" },
         ],
       },
     ],
@@ -219,6 +236,7 @@ PERMISSION_TREE.forEach((node) => collectDescendants(node, null));
 export const PROJECT_DETAIL_GROUP_PERMISSION_KEYS = {
   project: "project-info:view",
   gantt: "project-gantt:view",
+  documents: "project-documents:view",
   budget: "project-budget:view",
 } as const;
 
@@ -226,6 +244,7 @@ export const NAV_GROUP_PERMISSION_KEYS = {
   projectList: "project-list",
   projectDashboard: "project-dashboard",
   projectProgress: "project-progress",
+  projectScope: "project-scope",
   projectRisk: "project-risk",
   systemSettings: "system-settings",
 } as const;
@@ -234,6 +253,7 @@ export const PERMISSION_ROUTE_RULES: PermissionRouteRule[] = [
   { pathname: "/projects", permissionKey: "project-list:view" },
   { pathname: "/projects/[projectId]", queryParam: "nav", queryValue: "project", permissionKey: "project-info:view" },
   { pathname: "/projects/[projectId]", queryParam: "nav", queryValue: "gantt", permissionKey: "project-gantt:view" },
+  { pathname: "/projects/[projectId]", queryParam: "nav", queryValue: "documents", permissionKey: "project-documents:view" },
   { pathname: "/projects/[projectId]", queryParam: "nav", queryValue: "budget", permissionKey: "project-budget:view" },
   { pathname: "/role-config", permissionKey: "role-config:view" },
   { pathname: "/admin/permissions", permissionKey: "permission-config:view" },
@@ -253,6 +273,7 @@ export const DEFAULT_PERMISSION_TREE: PermissionTreeState = {
     ...allNodeKeysFor("project-list"),
     ...allNodeKeysFor("project-dashboard"),
     ...allNodeKeysFor("project-progress"),
+    ...allNodeKeysFor("project-scope"),
     ...allNodeKeysFor("project-risk"),
   ],
   "项目成员": [
@@ -274,6 +295,9 @@ export const DEFAULT_PERMISSION_TREE: PermissionTreeState = {
     "overview:view",
     "weekly-items",
     "weekly-items:view",
+    "project-scope",
+    "project-documents",
+    "project-documents:view",
     "project-risk",
     "risk-register",
     "risk-register:view",

@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
-import { ChevronLeft, ChevronRight, CornerDownRight, ZoomIn, ZoomOut } from "lucide-react";
+import { useEffect, useMemo, useState, type DragEvent, type KeyboardEvent } from "react";
+import { ChevronLeft, ChevronRight, CornerDownRight, GripVertical, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -40,6 +40,9 @@ export type GanttTaskDraft = {
   taskName: string;
   startDate: string;
   durationDays: number;
+  actualStartDate: string;
+  actualEndDate: string;
+  progress: number;
   predecessorTask: string;
 };
 
@@ -47,13 +50,14 @@ const ROW_HEIGHT = 30;
 const HEADER_HEIGHT = 32;
 const BAR_HEIGHT = 10;
 const MIN_TIMELINE_WIDTH = 860;
-const LEFT_WIDTH_EXPANDED = 840;
+const LEFT_WIDTH_EXPANDED = 1072;
 const LEFT_WIDTH_COLLAPSED = 360;
-const LEFT_COLUMNS_EXPANDED = "116px 98px 210px 70px 96px 96px 114px";
-const LEFT_COLUMNS_COLLAPSED = "140px 200px";
+const LEFT_COLUMNS_EXPANDED = "24px 112px 86px 180px 56px 94px 94px 94px 94px 76px 106px";
+const LEFT_COLUMNS_COLLAPSED = "24px 112px 200px";
 const ZOOM_LEVELS = [1, 3, 8, 20, 60];
 const ZOOM_LABELS = ["60天", "30天", "15天", "5天", "1天"];
 const DEFAULT_ZOOM_INDEX = 2;
+type DropPosition = "before" | "after";
 
 const getTickEvery = (dayWidth: number) => {
   if (dayWidth >= 60) return 1;
@@ -102,6 +106,9 @@ const toTaskDraft = (task: ProjectGanttTask): GanttTaskDraft => ({
   taskName: task.taskName,
   startDate: task.startDate,
   durationDays: task.durationDays,
+  actualStartDate: task.actualStartDate ?? "",
+  actualEndDate: task.actualEndDate ?? "",
+  progress: Math.min(100, Math.max(0, task.progress ?? 0)),
   predecessorTask: task.predecessorTask,
 });
 
@@ -110,6 +117,9 @@ const taskDraftEquals = (task: ProjectGanttTask, draft: GanttTaskDraft) => (
     && task.taskName === draft.taskName
     && task.startDate === draft.startDate
     && task.durationDays === draft.durationDays
+    && (task.actualStartDate ?? "") === draft.actualStartDate
+    && (task.actualEndDate ?? "") === draft.actualEndDate
+    && (task.progress ?? 0) === draft.progress
     && task.predecessorTask === draft.predecessorTask
     && (task.parentId ?? null) === (draft.parentId ?? null)
 );
@@ -135,6 +145,8 @@ export const GanttTimeline = ({
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
+  const [taskDropTarget, setTaskDropTarget] = useState<{ id: string; position: DropPosition } | null>(null);
+  const [flashingTaskId, setFlashingTaskId] = useState<string | null>(null);
   const [hoverCollapse, setHoverCollapse] = useState(false);
   const range = getGanttDateRange(tasks);
   const rows = useMemo(() => buildGanttRows(tasks), [tasks]);
@@ -201,7 +213,21 @@ export const GanttTimeline = ({
     });
   };
 
-  const reorderTask = (targetTaskId: string) => {
+  useEffect(() => {
+    if (!flashingTaskId) return;
+    const timer = window.setTimeout(() => setFlashingTaskId(null), 900);
+    return () => window.clearTimeout(timer);
+  }, [flashingTaskId]);
+
+  const getDropPosition = (event: DragEvent<HTMLElement>): DropPosition => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const relativeY = event.clientY - rect.top;
+    if (relativeY <= rect.height * 0.42) return "before";
+    if (relativeY >= rect.height * 0.58) return "after";
+    return taskDropTarget?.position ?? "after";
+  };
+
+  const reorderTask = (targetTaskId: string, position: DropPosition) => {
     if (!draggedTaskId || draggedTaskId === targetTaskId) return;
     const draggedRow = rows.find((row) => row.id === draggedTaskId);
     const targetRow = rows.find((row) => row.id === targetTaskId);
@@ -213,8 +239,20 @@ export const GanttTimeline = ({
     if (fromIndex < 0 || toIndex < 0) return;
     const nextTaskIds = [...taskIds];
     const [movedTaskId] = nextTaskIds.splice(fromIndex, 1);
-    nextTaskIds.splice(toIndex, 0, movedTaskId);
+    const targetIndexAfterRemoval = nextTaskIds.indexOf(targetTaskId);
+    nextTaskIds.splice(position === "after" ? targetIndexAfterRemoval + 1 : targetIndexAfterRemoval, 0, movedTaskId);
+    setFlashingTaskId(movedTaskId);
     void onReorderTasks?.(nextTaskIds);
+  };
+
+  const reorderTaskToEdge = (position: DropPosition) => {
+    if (!draggedTaskId) return;
+    const draggedRow = rows.find((row) => row.id === draggedTaskId);
+    if (!draggedRow) return;
+    const siblings = rows.filter((row) => (row.parentId ?? null) === (draggedRow.parentId ?? null));
+    const targetRow = position === "before" ? siblings[0] : siblings.at(-1);
+    if (!targetRow || targetRow.id === draggedTaskId) return;
+    reorderTask(targetRow.id, position);
   };
 
   if (!range || rows.length === 0) {
@@ -262,6 +300,12 @@ export const GanttTimeline = ({
           <div className="flex items-center gap-1 text-muted-foreground">
             <span className="inline-block h-2.5 w-5 rounded-full bg-primary" />
             任务
+          </div>
+          <div className="flex items-center gap-1 text-muted-foreground">
+            <span className="relative inline-block h-2.5 w-5 overflow-hidden rounded-full bg-primary/25">
+              <span className="absolute inset-y-0 left-0 w-1/2 bg-primary" />
+            </span>
+            进度
           </div>
           <div className="flex items-center gap-1 text-muted-foreground">
             <span className="inline-block h-2.5 w-5 rounded-full bg-destructive" />
@@ -361,6 +405,25 @@ export const GanttTimeline = ({
                 {detailsCollapsed ? <ChevronRight className="h-2.5 w-2.5 text-primary/70" /> : <ChevronLeft className="h-2.5 w-2.5 text-primary/70" />}
               </div>
             </button>
+            <div
+              className={cn(
+                "relative h-3 border-b border-border/60",
+                draggedTaskId && "bg-primary/5"
+              )}
+              onDragOver={(event) => {
+                if (!draggedTaskId) return;
+                event.preventDefault();
+                setTaskDropTarget({ id: "__edge_start__", position: "before" });
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                reorderTaskToEdge("before");
+              }}
+            >
+              {taskDropTarget?.id === "__edge_start__" && (
+                <span className="pointer-events-none absolute inset-x-0 top-0 z-20 h-3 rounded-sm border border-primary/40 bg-sky-400/20 shadow-[0_0_0_1px_rgba(96,165,250,0.22)]" />
+              )}
+            </div>
             {rows.map((row, index) => (
                 <EditableTaskRow
                   key={row.id}
@@ -368,11 +431,21 @@ export const GanttTimeline = ({
                   canEdit={canEdit}
                   creatingChild={creatingParentId === row.id}
                   dragged={draggedTaskId === row.id}
+                  dropPosition={taskDropTarget?.id === row.id && draggedTaskId !== row.id ? taskDropTarget.position : null}
+                  flashing={flashingTaskId === row.id}
                   index={index}
                   isSaving={savingTaskId === row.id}
-                  onDragEnd={() => setDraggedTaskId(null)}
-                  onDragEnter={() => reorderTask(row.id)}
+                  onDragEnd={() => {
+                    setDraggedTaskId(null);
+                    setTaskDropTarget(null);
+                  }}
+                  onDragOver={(event) => {
+                    if (!draggedTaskId || draggedTaskId === row.id) return;
+                    event.preventDefault();
+                    setTaskDropTarget({ id: row.id, position: getDropPosition(event) });
+                  }}
                   onDragStart={() => setDraggedTaskId(row.id)}
+                  onDrop={() => reorderTask(row.id, taskDropTarget?.id === row.id ? taskDropTarget.position : "before")}
                   onStartChild={() => {
                     setDetailsCollapsed(false);
                     onCreateTask?.(row);
@@ -387,6 +460,25 @@ export const GanttTimeline = ({
                   collapsed={detailsCollapsed}
                 />
             ))}
+            <div
+              className={cn(
+                "relative h-3",
+                draggedTaskId && "bg-primary/5"
+              )}
+              onDragOver={(event) => {
+                if (!draggedTaskId) return;
+                event.preventDefault();
+                setTaskDropTarget({ id: "__edge_end__", position: "after" });
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                reorderTaskToEdge("after");
+              }}
+            >
+              {taskDropTarget?.id === "__edge_end__" && (
+                <span className="pointer-events-none absolute inset-x-0 bottom-0 z-20 h-3 rounded-sm border border-primary/40 bg-sky-400/20 shadow-[0_0_0_1px_rgba(96,165,250,0.22)]" />
+              )}
+            </div>
           </div>
 
           <div className="relative" style={{ width: timelineWidth, height: bodyHeight }}>
@@ -439,6 +531,7 @@ export const GanttTimeline = ({
               const width = config.dayWidth * Math.max(1, row.durationDays);
               const showBarLabel = width >= 72;
               const barLabel = row.taskName || row.taskCode;
+              const progress = Math.min(100, Math.max(0, row.progress ?? 0));
               return (
                 <div
                   key={row.id}
@@ -452,13 +545,21 @@ export const GanttTimeline = ({
                 >
                   <div
                     className={cn(
-                      "h-full w-full rounded-sm border shadow-sm",
+                      "relative h-full w-full overflow-hidden rounded-sm border shadow-sm",
                       row.isCritical
-                        ? "border-destructive/60 bg-destructive"
-                        : "border-primary/60 bg-primary"
+                        ? "border-destructive/60 bg-destructive/25"
+                        : "border-primary/60 bg-primary/25"
                     )}
-                    title={`${barLabel}: ${row.startDate} ~ ${row.endDate}`}
-                  />
+                    title={`${barLabel}: ${row.startDate} ~ ${row.endDate}，当前进度 ${progress}%`}
+                  >
+                    <div
+                      className={cn(
+                        "h-full rounded-sm",
+                        row.isCritical ? "bg-destructive" : "bg-primary"
+                      )}
+                      style={{ width: `${progress}%` }}
+                    />
+                  </div>
                   {showBarLabel && (
                     <span className="pointer-events-none ml-2 max-w-[180px] truncate text-[11px] text-muted-foreground">
                       {barLabel}
@@ -516,6 +617,12 @@ const EmptyGanttTimeline = ({
           <div className="flex items-center gap-1 text-muted-foreground">
             <span className="inline-block h-2.5 w-5 rounded-full bg-primary" />
             任务
+          </div>
+          <div className="flex items-center gap-1 text-muted-foreground">
+            <span className="relative inline-block h-2.5 w-5 overflow-hidden rounded-full bg-primary/25">
+              <span className="absolute inset-y-0 left-0 w-1/2 bg-primary" />
+            </span>
+            进度
           </div>
           <div className="flex items-center gap-1 text-muted-foreground">
             <span className="inline-block h-2.5 w-5 rounded-full bg-destructive" />
@@ -615,20 +722,24 @@ const EmptyGanttTimeline = ({
 
 const TaskGridHeader = ({ collapsed }: { collapsed: boolean }) => (
   <div
-    className="sticky top-0 left-0 z-20 grid items-center gap-1 border-b border-r border-border bg-muted px-2 text-[11px] font-medium text-foreground"
+    className="sticky top-0 left-0 z-20 box-border grid items-center gap-1 border-b border-r border-border bg-muted px-2 text-[11px] font-medium text-foreground"
     style={{
       height: HEADER_HEIGHT,
       gridTemplateColumns: taskGridColumns(collapsed),
     }}
   >
+    <span aria-hidden="true" />
     <span>任务ID</span>
     {!collapsed && <span>任务类别</span>}
     <span>任务名称</span>
     {!collapsed && (
       <>
         <span>工期</span>
-        <span>开始</span>
-        <span>完成</span>
+        <span>计划开始</span>
+        <span>计划完成</span>
+        <span>实际开始</span>
+        <span>实际完成</span>
+        <span>当前进度</span>
         <span>紧前任务</span>
       </>
     )}
@@ -640,11 +751,14 @@ const EditableTaskRow = ({
   canEdit,
   creatingChild,
   dragged,
+  dropPosition,
+  flashing,
   index,
   isSaving,
   onDragEnd,
-  onDragEnter,
+  onDragOver,
   onDragStart,
+  onDrop,
   onStartChild,
   onToggleSelected,
   onUpdateTask,
@@ -660,11 +774,14 @@ const EditableTaskRow = ({
   collapsed: boolean;
   creatingChild: boolean;
   dragged: boolean;
+  dropPosition: DropPosition | null;
+  flashing: boolean;
   index: number;
   isSaving: boolean;
   onDragEnd: () => void;
-  onDragEnter: () => void;
+  onDragOver: (event: DragEvent<HTMLDivElement>) => void;
   onDragStart: () => void;
+  onDrop: () => void;
   onStartChild?: () => void;
   onToggleSelected: () => void;
   onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft) => void | Promise<void>;
@@ -675,7 +792,6 @@ const EditableTaskRow = ({
   selectionMode: boolean;
 }) => {
   const [draft, setDraft] = useState<GanttTaskDraft>(() => toTaskDraft(row));
-  const taskNameDisplay = row.isCritical ? `${draft.taskName}【关键路径】` : draft.taskName;
   const taskDepth = getTaskDepth(row.taskCode);
   const isChildTask = taskDepth > 0;
 
@@ -684,7 +800,7 @@ const EditableTaskRow = ({
   };
 
   const updateTaskName = (value: string) => {
-    updateDraft("taskName", value.replace(/【关键路径】/g, ""));
+    updateDraft("taskName", value.replace(/【关键路径】/g, "").replace(/【关键路径/g, "").replace(/关键路径】/g, ""));
   };
 
   const commitDraft = () => {
@@ -709,22 +825,64 @@ const EditableTaskRow = ({
   return (
     <div
       className={cn(
-        "group grid cursor-grab items-center gap-1 border-b border-border px-2 text-xs active:cursor-grabbing",
+        "group relative box-border grid cursor-default items-center gap-1 border-b border-border px-2 text-xs transition-[background,box-shadow,transform] duration-150",
         isChildTask ? "bg-primary/5" : index % 2 === 0 ? "bg-background" : "bg-muted/25",
         row.isCritical
           ? "shadow-[inset_3px_0_0_hsl(var(--destructive))]"
           : isChildTask && "shadow-[inset_3px_0_0_hsl(var(--primary))]",
         selected && "bg-primary/15",
-        dragged && "opacity-50",
+        dragged && "scale-[0.995] opacity-45 shadow-lg",
+        dropPosition && "bg-primary/10",
         "hover:bg-primary/10"
       )}
-      draggable={canEdit}
       onDragEnd={onDragEnd}
-      onDragEnter={onDragEnter}
-      onDragOver={(event) => event.preventDefault()}
-      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={(event) => {
+        event.preventDefault();
+        onDrop();
+      }}
       style={{ height: ROW_HEIGHT, gridTemplateColumns: taskGridColumns(collapsed) }}
     >
+      {flashing && (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 z-10 bg-sky-400/30 animate-[gantt-row-drop-flash_0.5s_ease-out_forwards]"
+        />
+      )}
+      {dropPosition && !dragged && (
+        <span
+          className={cn(
+            "pointer-events-none absolute left-0 right-0 z-20 h-5 rounded-sm border border-primary/45 bg-sky-400/25 shadow-[0_0_0_1px_rgba(96,165,250,0.26)]",
+            dropPosition === "before" ? "-top-2.5" : "-bottom-2.5"
+          )}
+        />
+      )}
+      <span
+        role="button"
+        tabIndex={canEdit ? 0 : -1}
+        draggable={canEdit}
+        onDragStart={(event) => {
+          if (!canEdit) return;
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", row.id);
+          onDragStart();
+        }}
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") event.preventDefault();
+        }}
+        className={cn(
+          "flex h-full w-full items-center justify-center border-0 bg-transparent p-0 text-muted-foreground/65 opacity-75 outline-none transition-colors hover:text-foreground focus-visible:text-foreground",
+          canEdit ? "cursor-grab active:cursor-grabbing" : "cursor-default opacity-30",
+          dragged && "text-primary opacity-100"
+        )}
+        title={canEdit ? "拖拽排序" : "当前不可排序"}
+        aria-label={canEdit ? "拖拽排序" : "当前不可排序"}
+        aria-disabled={!canEdit}
+      >
+        <GripVertical className="h-3.5 w-3.5 transition-transform group-hover:scale-105" strokeWidth={1.7} />
+        <span className="sr-only">拖拽排序</span>
+      </span>
       <div className="relative flex min-w-0 items-center gap-1.5 pr-1" style={{ paddingLeft: `${taskDepth * 10}px` }}>
         {selectionMode && (
           <input
@@ -780,17 +938,24 @@ const EditableTaskRow = ({
           placeholder="任务类别"
         />
       )}
-      <Input
-        value={taskNameDisplay}
-        onBlur={commitDraft}
-        onChange={(event) => updateTaskName(event.target.value)}
-        onKeyDown={handleKeyDown}
-        className={cn(inlineFieldClass, "font-medium", row.isCritical && "text-destructive")}
-        disabled={!canEdit || isSaving}
-        style={{ paddingLeft: `${8 + taskDepth * 18}px` }}
-        placeholder="任务名称"
-        title={taskNameDisplay}
-      />
+      <div className="relative min-w-0">
+        <Input
+          value={draft.taskName}
+          onBlur={commitDraft}
+          onChange={(event) => updateTaskName(event.target.value)}
+          onKeyDown={handleKeyDown}
+          className={cn(inlineFieldClass, "font-medium", row.isCritical && "pr-[76px] text-destructive")}
+          disabled={!canEdit || isSaving}
+          style={{ paddingLeft: `${8 + taskDepth * 18}px` }}
+          placeholder="任务名称"
+          title={row.isCritical ? `${draft.taskName}【关键路径】` : draft.taskName}
+        />
+        {row.isCritical && (
+          <span className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-[10px] font-medium text-destructive">
+            【关键路径】
+          </span>
+        )}
+      </div>
       {!collapsed && (
         <>
           <Input
@@ -816,8 +981,47 @@ const EditableTaskRow = ({
             onKeyDown={handleKeyDown}
             className={inlineFieldClass}
             disabled={!canEdit || isSaving}
+            aria-label="计划开始"
           />
           <span className="truncate px-2 text-muted-foreground">{row.endDate}</span>
+          <Input
+            type="date"
+            value={draft.actualStartDate}
+            onBlur={commitDraft}
+            onChange={(event) => updateDraft("actualStartDate", event.target.value)}
+            onKeyDown={handleKeyDown}
+            className={inlineFieldClass}
+            disabled={!canEdit || isSaving}
+            aria-label="实际开始"
+          />
+          <Input
+            type="date"
+            value={draft.actualEndDate}
+            onBlur={commitDraft}
+            onChange={(event) => updateDraft("actualEndDate", event.target.value)}
+            onKeyDown={handleKeyDown}
+            className={inlineFieldClass}
+            disabled={!canEdit || isSaving}
+            aria-label="实际完成"
+          />
+          <div className="flex min-w-0 items-center gap-1">
+            <Input
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              value={draft.progress}
+              onBlur={commitDraft}
+              onChange={(event) => {
+                const digits = event.target.value.replace(/\D/g, "");
+                updateDraft("progress", digits ? Math.min(100, Number(digits)) : 0);
+              }}
+              onKeyDown={handleKeyDown}
+              className={durationFieldClass}
+              disabled={!canEdit || isSaving}
+              aria-label="当前进度"
+            />
+            <span className="text-[10px] text-muted-foreground">%</span>
+          </div>
           <PredecessorSelect
             value={draft.predecessorTask}
             onChange={(value) => {

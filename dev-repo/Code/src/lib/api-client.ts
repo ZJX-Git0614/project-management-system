@@ -93,8 +93,9 @@ async function request<T>(
   retryOnExpired = true
 ): Promise<T> {
   const token = getToken()
+  const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
+    ...(isFormData ? {} : { "Content-Type": "application/json" }),
     ...(options.headers as Record<string, string>),
   }
   if (token) {
@@ -136,6 +137,25 @@ async function request<T>(
   return body.data as T
 }
 
+async function requestBlob(url: string, retryOnExpired = true): Promise<Blob> {
+  const token = getToken()
+  const res = await fetch(url, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  })
+
+  if (!res.ok) {
+    if (res.status === 401 && retryOnExpired) {
+      const newToken = await refreshToken()
+      if (newToken) return requestBlob(url, false)
+    }
+    const body = await res.json().catch(() => ({ error: "下载失败" }))
+    if (res.status === 401) redirectToLogin()
+    throw new Error(body.error || "下载失败")
+  }
+
+  return res.blob()
+}
+
 export const api = {
   get: <T>(url: string) => request<T>(url),
   post: <T>(url: string, data?: unknown) =>
@@ -143,6 +163,9 @@ export const api = {
   put: <T>(url: string, data?: unknown) =>
     request<T>(url, { method: "PUT", body: data ? JSON.stringify(data) : undefined }),
   delete: <T>(url: string) => request<T>(url, { method: "DELETE" }),
+  upload: <T>(url: string, data: FormData) =>
+    request<T>(url, { method: "POST", body: data }),
+  download: (url: string) => requestBlob(url),
   getToken,
   getStoredUser,
   saveAuth,

@@ -3,6 +3,7 @@ import type { Project } from "@/domain/models";
 export const DETAIL_NAV_GROUPS = [
   { key: "project", label: "项目信息管理" },
   { key: "gantt", label: "项目进度管理" },
+  { key: "documents", label: "文档清单管理" },
   { key: "budget", label: "项目预算管理" },
 ] as const;
 
@@ -64,5 +65,6 @@ export const getDetailGroupPermissionKey = (groupKey: DetailNavGroupKey) => PROJ
 export const PROJECT_DETAIL_GROUP_PERMISSION_KEYS: Record<DetailNavGroupKey, string> = {
   project: "project-info:view",
   gantt: "project-gantt:view",
+  documents: "project-documents:view",
   budget: "project-budget:view",
 };

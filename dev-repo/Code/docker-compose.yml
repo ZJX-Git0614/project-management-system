@@ -27,7 +27,10 @@ services:
     environment:
       - DATABASE_URL=postgresql://pms:pms-pwd-2026@postgres:5432/pms?schema=public
       - JWT_SECRET=pms-production-jwt-secret-2026
+      - PROJECT_DOCUMENT_STORAGE_DIR=/app/.local-runtime/project-documents
       - NODE_ENV=production
+    volumes:
+      - document_storage:/app/.local-runtime/project-documents
     depends_on:
       postgres:
         condition: service_healthy
@@ -35,3 +38,4 @@ services:
 
 volumes:
   pgdata:
+  document_storage:

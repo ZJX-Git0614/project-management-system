@@ -1,6 +1,6 @@
 "use client";
 
-import { KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { KeyboardEvent, type DragEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { Plus, Save, Search, Trash2, Upload } from "lucide-react";
 import { ItemHealth, ItemRiskStatus, ItemStatus, ItemPriority } from "@/domain/enums";
@@ -10,7 +10,7 @@ import {
   ITEM_HEALTH_LABEL,
   ITEM_RISK_STATUS_LABEL,
 } from "@/lib/constants";
-import { downloadTextFile, formatDateInput, toCsv, formatYearMonth, getWeekOfMonth, diffDays } from "@/lib/utils";
+import { cn, downloadTextFile, formatDateInput, toCsv, diffDays } from "@/lib/utils";
 import { usePermission } from "@/lib/use-permission";
 import { useConfirm } from "@/components/confirm-provider";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -40,11 +40,28 @@ interface Project {
   status: string;
 }
 
+interface ProjectMember {
+  id: string;
+  roleName: string;
+  personName: string;
+}
+
+interface ProjectOwnerOption {
+  personName: string;
+  label: string;
+}
+
+interface ProjectWithMembers extends Project {
+  projectMembers?: ProjectMember[];
+}
+
 interface ItemRecord {
   id: string;
   projectId: string;
   matterCode?: string;
+  sortOrder?: number;
   title: string;
+  ganttTaskId?: string | null;
   taskName?: string;
   description: string;
   dueDate: string;
@@ -75,7 +92,7 @@ interface ItemRecord {
 type EditableField =
   | "title"
   | "description"
-  | "taskName"
+  | "ganttTaskId"
   | "owner"
   | "priority"
   | "plannedStartDate"
@@ -126,8 +143,10 @@ const DATE_CELL = (s?: string) => (s && s.length >= 10 ? s.slice(5) : "-");
 const INLINE_INPUT_CLASS = "h-7 min-w-0 rounded border-border bg-background px-2 text-xs";
 const INLINE_SELECT_CLASS = "h-7 min-w-0 rounded border-border bg-background px-2 text-xs";
 const GHOST_SELECT_CLASS = "h-7 px-2 text-xs";
+const PRIORITY_SELECT_CLASS = "h-7 !w-[76px] !min-w-[76px] !max-w-[76px] px-2 text-xs";
 const INLINE_TEXTAREA_CLASS = "min-h-14 min-w-[160px] resize-y rounded border-border bg-background px-2 py-1 text-xs";
 const CURRENT_VIEW_ID = "__current__";
+type DropPosition = "before" | "after";
 
 export const ItemPanel = ({
   kind,
@@ -145,6 +164,7 @@ export const ItemPanel = ({
   const [items, setItems] = useState<ItemRecord[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [taskOptions, setTaskOptions] = useState<ProjectGanttTaskOption[]>([]);
+  const [ownerOptionsByProjectId, setOwnerOptionsByProjectId] = useState<Record<string, ProjectOwnerOption[]>>({});
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
   const [projectFilter, setProjectFilter] = useState("ALL");
@@ -164,6 +184,9 @@ export const ItemPanel = ({
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [deletingSelected, setDeletingSelected] = useState(false);
+  const [draggedItemId, setDraggedItemId] = useState<string | null>(null);
+  const [itemDropTarget, setItemDropTarget] = useState<{ id: string; position: DropPosition } | null>(null);
+  const [reordering, setReordering] = useState(false);
 
   const canView = can(`${kind}-items:view`);
   const canCreate = can(`${kind}-items:create`);
@@ -171,7 +194,7 @@ export const ItemPanel = ({
   const canDelete = can(`${kind}-items:delete`);
   const canExport = can(`${kind}-items:export`);
   const isWeekly = kind === "weekly";
-  const tableColSpan = (isWeekly ? 22 : 20) + (selectionMode ? 1 : 0);
+  const tableColSpan = (isWeekly ? 20 : 18) + (selectionMode ? 1 : 0);
   const savedViewStorageKey = `pms.saved-views.item.${kind}`;
 
   useEffect(() => {
@@ -297,9 +320,11 @@ export const ItemPanel = ({
   const sorted = useMemo(
     () =>
       [...filtered].sort((a, b) => {
+        const sortCompare = (a.sortOrder ?? 0) - (b.sortOrder ?? 0);
+        if (sortCompare !== 0) return sortCompare;
         const dateA = a.plannedStartDate || a.dueDate;
         const dateB = b.plannedStartDate || b.dueDate;
-        return dateA.localeCompare(dateB);
+        return dateA.localeCompare(dateB) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
       }),
     [filtered]
   );
@@ -320,21 +345,18 @@ export const ItemPanel = ({
   };
 
   const handleExport = () => {
-    const rows = sorted.map((it) => {
+    const rows = sorted.map((it, index) => {
       const p = projects.find((pp) => pp.id === it.projectId);
       const startDev = diffDays(it.plannedStartDate, it.actualStartDate);
       return [
-        formatYearMonth(it.plannedStartDate || it.dueDate),
-        it.priority === ItemPriority.HIGH || it.priority === ItemPriority.URGENT ? "是" : "否",
-        `第${getWeekOfMonth(it.plannedStartDate || it.dueDate) || "-"}周`,
-        ...(isWeekly ? [it.matterCode || "-", it.taskName || "-"] : []),
-        it.title,
+        String(index + 1),
+        ...(isWeekly ? [it.matterCode || "-", it.title, it.taskName || "-"] : [it.title]),
         p ? `${p.name}(${p.code})` : "-",
         it.owner,
         ITEM_PRIORITY_LABEL[it.priority as ItemPriority] ?? it.priority,
         it.plannedStartDate || "-",
-        it.actualStartDate || "-",
         it.plannedEndDate || "-",
+        it.actualStartDate || "-",
         it.actualEndDate || "-",
         startDev === null ? "-" : (startDev === 0 ? "0" : (startDev > 0 ? `+${startDev}` : `${startDev}`)),
         `${it.progress}%`,
@@ -351,19 +373,36 @@ export const ItemPanel = ({
     downloadTextFile(`${csvFilename}_${Date.now()}.csv`, csv);
   };
 
+  const getOwnerOptions = useCallback(
+    (projectId?: string, currentOwner?: string): ProjectOwnerOption[] => {
+      const options = projectId ? ownerOptionsByProjectId[projectId] ?? [] : [];
+      if (!currentOwner || options.some((option) => option.personName === currentOwner)) {
+        return options;
+      }
+      return [...options, { personName: currentOwner, label: `${currentOwner}（当前值）` }];
+    },
+    [ownerOptionsByProjectId],
+  );
+
   const openCreate = () => {
+    const ownerOptions = getOwnerOptions(currentProjectId ?? undefined);
+    const defaultOwner =
+      ownerOptions.find((option) => option.personName === user?.displayName)?.personName
+      ?? ownerOptions[0]?.personName
+      ?? "";
     setEditingId(null);
     setEditingField(null);
     setDraft({
       id: "",
       projectId: currentProjectId ?? "",
       matterCode: "",
+      ganttTaskId: null,
       title: "",
       taskName: "",
       description: "",
       dueDate: "",
       status: ItemStatus.PENDING,
-      owner: user?.displayName ?? "",
+      owner: defaultOwner,
       priority: ItemPriority.NORMAL,
       plannedStartDate: "",
       actualStartDate: "",
@@ -415,12 +454,22 @@ export const ItemPanel = ({
       console.warn("commitSelectChange: no base item");
       return;
     }
+    if (!base.id) {
+      updateDraft(key, value);
+      return;
+    }
     const updated = { ...base, [key]: value };
+    if (Object.is(base[key], value)) return;
     if (!updated.title.trim() || !updated.dueDate || updated.progress < 0) {
       console.warn("commitSelectChange: validation failed", { title: updated.title, dueDate: updated.dueDate, progress: updated.progress });
       return;
     }
     setSaving(true);
+    let previousItems: ItemRecord[] | null = null;
+    setItems((prev) => {
+      previousItems = prev;
+      return prev.map((item) => (item.id === updated.id ? updated : item));
+    });
     try {
       const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, ...payload } = updated;
       void _id; void _ca; void _ua; void _p; void _mc;
@@ -430,6 +479,9 @@ export const ItemPanel = ({
       });
       await fetchData();
     } catch (error) {
+      if (previousItems) {
+        setItems(previousItems);
+      }
       console.error("commitSelectChange error:", error);
       alert(error instanceof Error ? error.message : "保存失败");
     } finally {
@@ -460,14 +512,13 @@ export const ItemPanel = ({
     )
       .then((results) => {
         if (!alive) return;
-        const seen = new Set<string>();
         const allTasks = results.flat().filter((task) => task.taskName.trim());
-        const unique = allTasks.filter((task) => {
-          if (seen.has(task.taskName)) return false;
-          seen.add(task.taskName);
+        const seen = new Set<string>();
+        setTaskOptions(allTasks.filter((task) => {
+          if (seen.has(task.id)) return false;
+          seen.add(task.id);
           return true;
-        });
-        setTaskOptions(unique);
+        }));
       })
       .catch(() => {
         if (alive) setTaskOptions([]);
@@ -477,6 +528,58 @@ export const ItemPanel = ({
       alive = false;
     };
   }, [items, draft?.projectId, isWeekly]);
+
+  useEffect(() => {
+    if (!isWeekly) {
+      setOwnerOptionsByProjectId({});
+      return;
+    }
+
+    const ids = new Set(items.map((item) => item.projectId).filter(Boolean));
+    if (currentProjectId) ids.add(currentProjectId);
+    if (draft?.projectId) ids.add(draft.projectId);
+    const projectIds = [...ids];
+    if (projectIds.length === 0) {
+      setOwnerOptionsByProjectId({});
+      return;
+    }
+
+    let alive = true;
+    Promise.all(
+      projectIds.map((pid) =>
+        api.get<ProjectWithMembers>(`/api/projects/${pid}`).catch(() => null)
+      )
+    )
+      .then((results) => {
+        if (!alive) return;
+        const next: Record<string, ProjectOwnerOption[]> = {};
+        results.forEach((project, index) => {
+          const projectId = project?.id ?? projectIds[index];
+          const roleNamesByPerson = new Map<string, Set<string>>();
+          (project?.projectMembers ?? []).forEach((member) => {
+            if (!member.personName.trim()) return;
+            const roles = roleNamesByPerson.get(member.personName) ?? new Set<string>();
+            if (member.roleName.trim()) roles.add(member.roleName);
+            roleNamesByPerson.set(member.personName, roles);
+          });
+          next[projectId] = [...roleNamesByPerson.entries()].map(([personName, roleNames]) => {
+            const roles = [...roleNames];
+            return {
+              personName,
+              label: roles.length > 0 ? `${personName}（${roles.join("、")}）` : personName,
+            };
+          });
+        });
+        setOwnerOptionsByProjectId(next);
+      })
+      .catch(() => {
+        if (alive) setOwnerOptionsByProjectId({});
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [currentProjectId, draft?.projectId, isWeekly, items]);
 
   const submitCreate = async () => {
     if (!draft) return;
@@ -571,6 +674,44 @@ export const ItemPanel = ({
       alert(err instanceof Error ? err.message : "删除失败");
     } finally {
       setDeletingSelected(false);
+    }
+  };
+
+  const getDropPosition = (event: DragEvent<HTMLElement>): DropPosition => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+  };
+
+  const reorderItems = async (targetItemId: string, position: DropPosition) => {
+    if (!draggedItemId || draggedItemId === targetItemId || reordering) return;
+    const itemIds = sorted.map((item) => item.id);
+    const fromIndex = itemIds.indexOf(draggedItemId);
+    const toIndex = itemIds.indexOf(targetItemId);
+    if (fromIndex < 0 || toIndex < 0) return;
+
+    const nextItemIds = [...itemIds];
+    const [movedItemId] = nextItemIds.splice(fromIndex, 1);
+    const targetIndexAfterRemoval = nextItemIds.indexOf(targetItemId);
+    nextItemIds.splice(position === "after" ? targetIndexAfterRemoval + 1 : targetIndexAfterRemoval, 0, movedItemId);
+
+    setReordering(true);
+    setItems((prev) => {
+      const sortById = new Map(nextItemIds.map((id, index) => [id, index + 1]));
+      return prev.map((item) => (
+        sortById.has(item.id) ? { ...item, sortOrder: sortById.get(item.id)! } : item
+      ));
+    });
+
+    try {
+      await api.post("/api/weekly-items/reorder", { itemIds: nextItemIds });
+      await fetchData();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "排序保存失败");
+      await fetchData();
+    } finally {
+      setReordering(false);
+      setDraggedItemId(null);
+      setItemDropTarget(null);
     }
   };
 
@@ -718,6 +859,7 @@ export const ItemPanel = ({
                 <Upload className="size-3" /> 导出
               </Button>
             )}
+            {reordering && <span className="self-center text-xs text-muted-foreground">排序保存中...</span>}
             {canCreate && (
               <Button
                 size="sm"
@@ -762,18 +904,16 @@ export const ItemPanel = ({
               <TableHeader>
                 <TableRow>
                   {selectionMode && <TableHead className="w-[48px] whitespace-nowrap">选择</TableHead>}
-                  <TableHead className="whitespace-nowrap">月份</TableHead>
-                  <TableHead className="whitespace-nowrap">周重点事件</TableHead>
-                  <TableHead className="whitespace-nowrap">周</TableHead>
+                  <TableHead className="w-[64px] whitespace-nowrap">序号</TableHead>
                   {isWeekly && <TableHead className="whitespace-nowrap">事项ID</TableHead>}
                   <TableHead className="whitespace-nowrap min-w-[200px]">事项名称</TableHead>
                   {isWeekly && <TableHead className="whitespace-nowrap min-w-[140px]">关联任务名称</TableHead>}
                   <TableHead className="whitespace-nowrap min-w-[160px]">归属方</TableHead>
-                  <TableHead className="whitespace-nowrap">责任人</TableHead>
+                  <TableHead className="whitespace-nowrap min-w-[150px]">责任人</TableHead>
                   <TableHead className="whitespace-nowrap">优先级</TableHead>
                   <TableHead className="whitespace-nowrap">计划<br/>开始时间</TableHead>
-                  <TableHead className="whitespace-nowrap">实际<br/>开始时间</TableHead>
                   <TableHead className="whitespace-nowrap">计划<br/>结束时间</TableHead>
+                  <TableHead className="whitespace-nowrap">实际<br/>开始时间</TableHead>
                   <TableHead className="whitespace-nowrap">实际<br/>结束时间</TableHead>
                   <TableHead className="whitespace-nowrap">任务偏差</TableHead>
                   <TableHead className="whitespace-nowrap min-w-[90px]">进度</TableHead>
@@ -789,11 +929,7 @@ export const ItemPanel = ({
                 {draft && editingId === null && (
                   <TableRow className="h-8 align-top bg-primary/5">
                     {selectionMode && <TableCell className="text-xs" />}
-                    <TableCell className="text-xs">{formatYearMonth(draft.plannedStartDate || draft.dueDate)}</TableCell>
-                    <TableCell className="text-xs">
-                      {draft.priority === ItemPriority.HIGH || draft.priority === ItemPriority.URGENT ? "是" : "否"}
-                    </TableCell>
-                    <TableCell className="text-xs">第{getWeekOfMonth(draft.plannedStartDate || draft.dueDate) || "-"}周</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">-</TableCell>
                     {isWeekly && (
                       <TableCell className="whitespace-nowrap font-mono text-xs font-semibold text-muted-foreground">
                         保存后生成
@@ -821,14 +957,14 @@ export const ItemPanel = ({
                     {isWeekly && (
                       <TableCell className="text-xs">
                         <Select
-                          value={draft.taskName ?? ""}
-                          onChange={(e) => commitSelectChange("taskName", e.target.value)}
+                          value={draft.ganttTaskId ?? ""}
+                          onChange={(e) => updateDraft("ganttTaskId", e.target.value)}
                           onKeyDown={handleCreateKeyDown}
                           className={INLINE_SELECT_CLASS}
                         >
                           <option value="">不关联</option>
                           {taskOptions.map((task) => (
-                            <option key={task.id} value={task.taskName}>
+                            <option key={task.id} value={task.id}>
                               {task.taskCode ? `${task.taskCode} · ${task.taskName}` : task.taskName}
                             </option>
                           ))}
@@ -843,20 +979,27 @@ export const ItemPanel = ({
                         </>
                       ) : "-"}
                     </TableCell>
-                    <TableCell className="text-xs">
-                      <Input
+                    <TableCell className="text-xs min-w-[150px]">
+                      <Select
                         value={draft.owner}
                         onChange={(e) => updateDraft("owner", e.target.value)}
                         onKeyDown={handleCreateKeyDown}
-                        className={`${INLINE_INPUT_CLASS} w-[96px]`}
-                      />
+                        className={`${INLINE_SELECT_CLASS} w-[150px]`}
+                      >
+                        <option value="">请选择责任人</option>
+                        {getOwnerOptions(draft.projectId, draft.owner).map((ownerOption) => (
+                          <option key={ownerOption.personName} value={ownerOption.personName}>
+                            {ownerOption.label}
+                          </option>
+                        ))}
+                      </Select>
                     </TableCell>
                     <TableCell>
                       <Select
                         value={draft.priority}
-                        onChange={(e) => commitSelectChange("priority", e.target.value as ItemPriority)}
+                        onChange={(e) => updateDraft("priority", e.target.value as ItemPriority)}
                         onKeyDown={handleCreateKeyDown}
-                        className={`${INLINE_SELECT_CLASS} w-[76px]`}
+                        className={PRIORITY_SELECT_CLASS}
                       >
                         {Object.values(ItemPriority).map((priority) => (
                           <option key={priority} value={priority}>{ITEM_PRIORITY_LABEL[priority]}</option>
@@ -875,8 +1018,11 @@ export const ItemPanel = ({
                     <TableCell className="text-xs whitespace-nowrap">
                       <Input
                         type="date"
-                        value={formatDateInput(draft.actualStartDate)}
-                        onChange={(e) => updateDraft("actualStartDate", e.target.value)}
+                        value={formatDateInput(draft.plannedEndDate)}
+                        onChange={(e) => {
+                          updateDraft("plannedEndDate", e.target.value);
+                          updateDraft("dueDate", e.target.value || draft.dueDate);
+                        }}
                         onKeyDown={handleCreateKeyDown}
                         className={`${INLINE_INPUT_CLASS} w-[122px]`}
                       />
@@ -884,11 +1030,8 @@ export const ItemPanel = ({
                     <TableCell className="text-xs whitespace-nowrap">
                       <Input
                         type="date"
-                        value={formatDateInput(draft.plannedEndDate)}
-                        onChange={(e) => {
-                          updateDraft("plannedEndDate", e.target.value);
-                          updateDraft("dueDate", e.target.value || draft.dueDate);
-                        }}
+                        value={formatDateInput(draft.actualStartDate)}
+                        onChange={(e) => updateDraft("actualStartDate", e.target.value)}
                         onKeyDown={handleCreateKeyDown}
                         className={`${INLINE_INPUT_CLASS} w-[122px]`}
                       />
@@ -920,7 +1063,7 @@ export const ItemPanel = ({
                     <TableCell>
                       <Select
                         value={draft.status}
-                        onChange={(e) => commitSelectChange("status", e.target.value as ItemStatus)}
+                        onChange={(e) => updateDraft("status", e.target.value as ItemStatus)}
                         onKeyDown={handleCreateKeyDown}
                         className={`${INLINE_SELECT_CLASS} w-[88px]`}
                       >
@@ -932,7 +1075,7 @@ export const ItemPanel = ({
                     <TableCell>
                       <Select
                         value={draft.health}
-                        onChange={(e) => commitSelectChange("health", e.target.value as ItemHealth)}
+                        onChange={(e) => updateDraft("health", e.target.value as ItemHealth)}
                         onKeyDown={handleCreateKeyDown}
                         className={`${INLINE_SELECT_CLASS} w-[88px]`}
                       >
@@ -994,10 +1137,9 @@ export const ItemPanel = ({
                     </TableCell>
                   </TableRow>
                 )}
-                {sorted.map((item) => {
+                {sorted.map((item, index) => {
                   const editing = editingId === item.id && draft?.id === item.id;
                   const row = editing && draft ? draft : item;
-                  const monthAnchor = row.plannedStartDate || row.dueDate;
                   const startDev = diffDays(row.plannedStartDate, row.actualStartDate);
                   const endDev = diffDays(row.plannedEndDate, row.actualEndDate);
                   const showDev = startDev !== null || endDev !== null;
@@ -1007,12 +1149,46 @@ export const ItemPanel = ({
                   return (
                     <TableRow
                       key={item.id}
+                      draggable={canEdit && !selectionMode && !editing && !saving}
+                      onDragStart={(event) => {
+                        if (!canEdit || selectionMode || editing) return;
+                        setDraggedItemId(item.id);
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("text/plain", item.id);
+                      }}
+                      onDragOver={(event) => {
+                        if (!draggedItemId || draggedItemId === item.id) return;
+                        event.preventDefault();
+                        setItemDropTarget({ id: item.id, position: getDropPosition(event) });
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        void reorderItems(item.id, itemDropTarget?.id === item.id ? itemDropTarget.position : "before");
+                      }}
+                      onDragEnd={() => {
+                        setDraggedItemId(null);
+                        setItemDropTarget(null);
+                      }}
                       className={
                         editing
                           ? "h-8 align-top bg-primary/5"
                           : canEdit
-                            ? "h-8 align-top hover:bg-primary/5"
-                            : "h-8 align-top"
+                            ? [
+                                "h-8 cursor-grab align-top transition-[background,box-shadow,transform] duration-150 active:cursor-grabbing",
+                                index % 2 === 0 ? "bg-background" : "bg-muted/20",
+                                "hover:bg-primary/5",
+                                draggedItemId === item.id ? "scale-[0.995] opacity-45 shadow-lg" : "",
+                                itemDropTarget?.id === item.id && draggedItemId !== item.id && itemDropTarget.position === "before"
+                                  ? "translate-y-1 bg-primary/10 shadow-[inset_0_6px_0_hsl(var(--primary)/0.16),inset_0_2px_0_hsl(var(--primary))]"
+                                  : "",
+                                itemDropTarget?.id === item.id && draggedItemId !== item.id && itemDropTarget.position === "after"
+                                  ? "-translate-y-1 bg-primary/10 shadow-[inset_0_-6px_0_hsl(var(--primary)/0.16),inset_0_-2px_0_hsl(var(--primary))]"
+                                  : "",
+                              ].filter(Boolean).join(" ")
+                            : [
+                                "h-8 align-top",
+                                index % 2 === 0 ? "bg-background" : "bg-muted/20",
+                              ].join(" ")
                       }
                     >
                       {selectionMode && (
@@ -1026,11 +1202,7 @@ export const ItemPanel = ({
                           />
                         </TableCell>
                       )}
-                      <TableCell className="text-xs">{formatYearMonth(monthAnchor)}</TableCell>
-                      <TableCell className="text-xs">
-                        {row.priority === ItemPriority.HIGH || row.priority === ItemPriority.URGENT ? "是" : "否"}
-                      </TableCell>
-                      <TableCell className="text-xs">第{getWeekOfMonth(monthAnchor) || "-"}周</TableCell>
+                      <TableCell className="text-xs tabular-nums text-muted-foreground">{index + 1}</TableCell>
                       {isWeekly && (
                         <TableCell className="whitespace-nowrap font-mono text-xs font-semibold text-muted-foreground">
                           {row.matterCode || "-"}
@@ -1082,13 +1254,13 @@ export const ItemPanel = ({
                         <TableCell>
                           <Select
                             variant="ghost"
-                            value={item.taskName ?? ""}
-                            onChange={(e) => commitSelectChange("taskName", e.target.value, item)}
+                            value={item.ganttTaskId ?? ""}
+                            onChange={(e) => commitSelectChange("ganttTaskId", e.target.value, item)}
                             className={`${GHOST_SELECT_CLASS} min-w-[180px]`}
                           >
                             <option value="">不关联</option>
                             {taskOptions.map((task) => (
-                              <option key={task.id} value={task.taskName}>
+                              <option key={task.id} value={task.id}>
                                 {task.taskCode ? `${task.taskCode} · ${task.taskName}` : task.taskName}
                               </option>
                             ))}
@@ -1103,33 +1275,35 @@ export const ItemPanel = ({
                           </>
                         ) : "-"}
                       </TableCell>
-                      <TableCell className={canEdit ? "cursor-pointer text-xs hover:bg-primary/5" : "text-xs"} {...editTriggerProps(item, "owner")}>
-                        {isEditingField("owner") ? (
-                          <Input
-                            value={row.owner}
-                            onChange={(e) => updateDraft("owner", e.target.value)}
-                            onKeyDown={handleEditKeyDown}
-                            className={`${INLINE_INPUT_CLASS} w-[96px]`}
-                            autoFocus
-                          />
-                        ) : (
-                          item.owner
-                        )}
+                      <TableCell className="text-xs min-w-[150px]">
+                        <Select
+                          variant="ghost"
+                          value={item.owner}
+                          onChange={(e) => commitSelectChange("owner", e.target.value, item)}
+                          className={`${GHOST_SELECT_CLASS} w-[150px]`}
+                          disabled={!canEdit}
+                        >
+                          {getOwnerOptions(item.projectId, item.owner).map((ownerOption) => (
+                            <option key={ownerOption.personName} value={ownerOption.personName}>
+                              {ownerOption.label}
+                            </option>
+                          ))}
+                        </Select>
                       </TableCell>
                       <TableCell>
                         <Select
                           variant="ghost"
                           value={item.priority}
                           onChange={(e) => commitSelectChange("priority", e.target.value as ItemPriority, item)}
-                          className={`${GHOST_SELECT_CLASS} w-[76px]`}
+                          className={cn(GHOST_SELECT_CLASS, "!w-[76px] !min-w-[76px] !max-w-[76px]")}
                         >
                           {Object.values(ItemPriority).map((priority) => (
                             <option key={priority} value={priority}>{ITEM_PRIORITY_LABEL[priority]}</option>
                           ))}
-                        </Select>
-                      </TableCell>
-                      <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-nowrap hover:bg-primary/5" : "text-xs whitespace-nowrap"} {...editTriggerProps(item, "plannedStartDate")}>
-                        {isEditingField("plannedStartDate") ? (
+                      </Select>
+                    </TableCell>
+                    <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-nowrap hover:bg-primary/5" : "text-xs whitespace-nowrap"} {...editTriggerProps(item, "plannedStartDate")}>
+                      {isEditingField("plannedStartDate") ? (
                           <Input
                             type="date"
                             value={formatDateInput(row.plannedStartDate)}
@@ -1139,18 +1313,6 @@ export const ItemPanel = ({
                             autoFocus
                           />
                         ) : DATE_CELL(item.plannedStartDate)}
-                      </TableCell>
-                      <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-nowrap hover:bg-primary/5" : "text-xs whitespace-nowrap"} {...editTriggerProps(item, "actualStartDate")}>
-                        {isEditingField("actualStartDate") ? (
-                          <Input
-                            type="date"
-                            value={formatDateInput(row.actualStartDate)}
-                            onChange={(e) => updateDraft("actualStartDate", e.target.value)}
-                            onKeyDown={handleEditKeyDown}
-                            className={`${INLINE_INPUT_CLASS} w-[122px]`}
-                            autoFocus
-                          />
-                        ) : DATE_CELL(item.actualStartDate)}
                       </TableCell>
                       <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-nowrap hover:bg-primary/5" : "text-xs whitespace-nowrap"} {...editTriggerProps(item, "plannedEndDate")}>
                         {isEditingField("plannedEndDate") ? (
@@ -1166,6 +1328,18 @@ export const ItemPanel = ({
                             autoFocus
                           />
                         ) : DATE_CELL(item.plannedEndDate)}
+                      </TableCell>
+                      <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-nowrap hover:bg-primary/5" : "text-xs whitespace-nowrap"} {...editTriggerProps(item, "actualStartDate")}>
+                        {isEditingField("actualStartDate") ? (
+                          <Input
+                            type="date"
+                            value={formatDateInput(row.actualStartDate)}
+                            onChange={(e) => updateDraft("actualStartDate", e.target.value)}
+                            onKeyDown={handleEditKeyDown}
+                            className={`${INLINE_INPUT_CLASS} w-[122px]`}
+                            autoFocus
+                          />
+                        ) : DATE_CELL(item.actualStartDate)}
                       </TableCell>
                       <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-nowrap hover:bg-primary/5" : "text-xs whitespace-nowrap"} {...editTriggerProps(item, "actualEndDate")}>
                         {isEditingField("actualEndDate") ? (

@@ -1,4 +1,7 @@
 node_modules
+.env
+.env.*
+!.env.example
 .next
 out
 build
@@ -7,6 +10,7 @@ coverage
 .DS_Store
 tsconfig.tsbuildinfo
 .local-runtime
+.codegraph
 
 .worktrees
 *.db*
