@@ -85,7 +85,7 @@ if (-not $composeImage) {
   throw "The current Ceastar PMS image name could not be determined."
 }
 
-$rollbackImage = "ceastar-project-management:rollback-20260727-1-amd64"
+$rollbackImage = "ceastar-project-management:rollback-20260727-2-amd64"
 docker image inspect $composeImage *> $null
 Assert-LastExitCode "The current Ceastar PMS image is missing."
 docker tag $composeImage $rollbackImage
@@ -116,7 +116,7 @@ $state = @(
   "rollbackImage=$rollbackImage",
   "updatedAt=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 )
-Set-Content -Path (Join-Path $deploymentDirectory ".ceastar-update-20260727-1.state") -Value $state -Encoding ASCII
+Set-Content -Path (Join-Path $deploymentDirectory ".ceastar-update-20260727-2.state") -Value $state -Encoding ASCII
 
 Write-Host ""
 Write-Host "Ceastar PMS update completed successfully." -ForegroundColor Green

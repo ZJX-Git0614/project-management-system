@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { SystemBackupSettings } from "@prisma/client";
@@ -7,9 +7,16 @@ import type { SystemBackupSettings } from "@prisma/client";
 import { decryptAssistantSecret } from "@/lib/assistant-secrets";
 import { prisma } from "@/lib/prisma";
 import { PROJECT_DOCUMENT_STORAGE_ROOT } from "@/lib/project-document-storage";
-import { ensureWebDavDirectory, uploadFileToWebDav, type WebDavBackupConfig } from "@/lib/webdav-backup";
+import {
+  ensureWebDavDirectory,
+  pruneWebDavBackups,
+  uploadFileToWebDav,
+  type WebDavBackupConfig,
+} from "@/lib/webdav-backup";
 
 export const SYSTEM_BACKUP_INTERVAL_HOURS = 6;
+export const LOCAL_BACKUP_LIMIT_BYTES = 5 * 1024 * 1024 * 1024;
+export const CLOUD_BACKUP_LIMIT_BYTES = 20 * 1024 * 1024 * 1024;
 export const DEFAULT_SYSTEM_BACKUP_ROOT = path.resolve(
   process.env.SYSTEM_BACKUP_DIR?.trim() || path.join(process.cwd(), ".local-runtime", "system-backups"),
 );
@@ -85,6 +92,118 @@ const calculateDirectorySize = async (directory: string): Promise<number> => {
   return sizes.reduce((sum, size) => sum + size, 0);
 };
 
+export const getLocalBackupUsageBytes = async () => {
+  const records = await prisma.systemBackupRecord.findMany({
+    where: { backupDirectory: { not: "" } },
+    select: { backupDirectory: true, sizeBytes: true },
+  });
+  const sizes = await Promise.all(records.map((record) => (
+    calculateDirectorySize(record.backupDirectory).catch(() => Math.max(0, record.sizeBytes))
+  )));
+  return sizes.reduce((sum, size) => sum + size, 0);
+};
+
+export const selectBackupIdsForPruning = (
+  records: Array<{ id: string; createdAt: Date; sizeBytes: number }>,
+  maxBytes: number,
+) => {
+  let totalBytes = records.reduce((sum, record) => sum + Math.max(0, record.sizeBytes), 0);
+  const ids: string[] = [];
+  for (const record of [...records].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())) {
+    if (totalBytes <= maxBytes) break;
+    totalBytes -= Math.max(0, record.sizeBytes);
+    ids.push(record.id);
+  }
+  return { ids, totalBytes: Math.max(0, totalBytes) };
+};
+
+const pruneLocalBackups = async (settings: SystemBackupSettings, currentRecordId: string) => {
+  const records = await prisma.systemBackupRecord.findMany({
+    where: { backupDirectory: { not: "" }, sizeBytes: { gt: 0 } },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, createdAt: true, sizeBytes: true, backupDirectory: true, cloudStatus: true },
+  });
+  const measured = await Promise.all(records.map(async (record) => ({
+    ...record,
+    sizeBytes: await calculateDirectorySize(record.backupDirectory).catch(() => record.sizeBytes),
+  })));
+  const { ids, totalBytes } = selectBackupIdsForPruning(measured, LOCAL_BACKUP_LIMIT_BYTES);
+  const root = backupRoot(settings);
+  for (const record of measured.filter((item) => ids.includes(item.id))) {
+    const expiredDirectory = path.resolve(record.backupDirectory);
+    if (!expiredDirectory.startsWith(`${root}${path.sep}`)) continue;
+    await rm(expiredDirectory, { recursive: true, force: true });
+    const currentRemoved = record.id === currentRecordId;
+    await prisma.systemBackupRecord.update({
+      where: { id: record.id },
+      data: {
+        backupDirectory: "",
+        databaseFileName: "",
+        documentArchiveFileName: "",
+        ...(currentRemoved ? {
+          status: record.cloudStatus === "COMPLETED" ? "PARTIAL" : "FAILED",
+          errorMessage: record.cloudStatus === "COMPLETED"
+            ? "本次备份超过本地 5GB 容量上限，本地文件已清理，云端备份仍可用"
+            : "本次备份超过本地 5GB 容量上限，已自动清理",
+        } : {}),
+      },
+    });
+  }
+  return { totalBytes, currentRemoved: ids.includes(currentRecordId) };
+};
+
+const markPrunedCloudRecords = async (directoryNames: string[]) => {
+  if (directoryNames.length === 0) return;
+  const records = await prisma.systemBackupRecord.findMany({
+    where: { cloudStatus: "COMPLETED" },
+    select: { id: true, backupDirectory: true, cloudPath: true },
+  });
+  const removed = new Set(directoryNames);
+  await Promise.all(records
+    .filter((record) => {
+      const localName = record.backupDirectory ? path.basename(record.backupDirectory) : "";
+      let cloudName = "";
+      try {
+        cloudName = decodeURIComponent(new URL(record.cloudPath).pathname).split("/").filter(Boolean).at(-1) || "";
+      } catch {
+        cloudName = record.cloudPath.split(/[\\/]+/).filter(Boolean).at(-1) || "";
+      }
+      return removed.has(localName) || removed.has(cloudName);
+    })
+    .map((record) => prisma.systemBackupRecord.update({
+      where: { id: record.id },
+      data: { cloudStatus: "PRUNED", cloudPath: "" },
+    })));
+};
+
+const uploadBackupFilesToCloud = async ({
+  settings,
+  directory,
+  databaseFileName,
+  documentArchiveFileName,
+}: {
+  settings: SystemBackupSettings;
+  directory: string;
+  databaseFileName: string;
+  documentArchiveFileName: string;
+}) => {
+  const config = cloudConfig(settings);
+  const directoryName = path.basename(directory);
+  const cloudPath = await ensureWebDavDirectory(config, [directoryName]);
+  await uploadFileToWebDav(config, [directoryName, databaseFileName], path.join(directory, databaseFileName));
+  await uploadFileToWebDav(config, [directoryName, documentArchiveFileName], path.join(directory, documentArchiveFileName));
+  const manifestPath = path.join(directory, "manifest.json");
+  if (await access(manifestPath).then(() => true).catch(() => false)) {
+    await uploadFileToWebDav(config, [directoryName, "manifest.json"], manifestPath);
+  }
+  const pruned = await pruneWebDavBackups(config, CLOUD_BACKUP_LIMIT_BYTES);
+  await markPrunedCloudRecords(pruned.removed);
+  if (pruned.removed.includes(directoryName)) {
+    throw new Error("单次备份超过云盘 20GB 容量上限，已自动移除该云端备份");
+  }
+  return cloudPath;
+};
+
 export const createSystemBackup = async ({
   triggerMode,
   operator,
@@ -147,11 +266,7 @@ export const createSystemBackup = async ({
     let cloudError = "";
     if (settings.cloudEnabled) {
       try {
-        const config = cloudConfig(settings);
-        cloudPath = await ensureWebDavDirectory(config, [directoryName]);
-        await uploadFileToWebDav(config, [directoryName, databaseFileName], databasePath);
-        await uploadFileToWebDav(config, [directoryName, documentArchiveFileName], documentArchivePath);
-        await uploadFileToWebDav(config, [directoryName, "manifest.json"], path.join(directory, "manifest.json"));
+        cloudPath = await uploadBackupFilesToCloud({ settings, directory, databaseFileName, documentArchiveFileName });
         cloudStatus = "COMPLETED";
       } catch (error) {
         cloudStatus = "FAILED";
@@ -183,23 +298,10 @@ export const createSystemBackup = async ({
       },
     });
 
-    const expiredRecords = await prisma.systemBackupRecord.findMany({
-      where: { status: { in: ["COMPLETED", "PARTIAL"] }, backupDirectory: { not: "" } },
-      orderBy: { createdAt: "desc" },
-      skip: settings.retentionCount,
-    });
-    const root = backupRoot(settings);
-    for (const expired of expiredRecords) {
-      const expiredDirectory = path.resolve(expired.backupDirectory);
-      if (expiredDirectory.startsWith(`${root}${path.sep}`)) {
-        await rm(expiredDirectory, { recursive: true, force: true });
-        await prisma.systemBackupRecord.update({
-          where: { id: expired.id },
-          data: { backupDirectory: "", databaseFileName: "", documentArchiveFileName: "" },
-        });
-      }
-    }
-    return completed;
+    const pruning = await pruneLocalBackups(settings, record.id);
+    return pruning.currentRemoved
+      ? prisma.systemBackupRecord.findUniqueOrThrow({ where: { id: record.id } })
+      : completed;
   } catch (error) {
     const message = error instanceof Error ? error.message : "备份失败";
     if (recordId) {
@@ -213,6 +315,55 @@ export const createSystemBackup = async ({
       data: { lastBackupStatus: "FAILED", lastBackupMessage: message },
     }).catch(() => undefined);
     throw error;
+  } finally {
+    backupInProgress = false;
+  }
+};
+
+export const syncLatestSystemBackupToCloud = async ({ operator }: { operator: string }) => {
+  if (backupInProgress) throw new Error("已有备份或云盘同步任务正在执行");
+  backupInProgress = true;
+  try {
+    const settings = await getSystemBackupSettings();
+    if (!settings.cloudEnabled) throw new Error("请先启用并保存公司云盘配置");
+    const record = await prisma.systemBackupRecord.findFirst({
+      where: {
+        backupDirectory: { not: "" },
+        databaseFileName: { not: "" },
+        documentArchiveFileName: { not: "" },
+        status: { in: ["COMPLETED", "PARTIAL"] },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    if (!record) throw new Error("没有可同步的本地备份，请先执行一次完整备份");
+    try {
+      const cloudPath = await uploadBackupFilesToCloud({
+        settings,
+        directory: record.backupDirectory,
+        databaseFileName: record.databaseFileName,
+        documentArchiveFileName: record.documentArchiveFileName,
+      });
+      const updated = await prisma.systemBackupRecord.update({
+        where: { id: record.id },
+        data: { cloudStatus: "COMPLETED", cloudPath, operator, errorMessage: "", status: "COMPLETED" },
+      });
+      await prisma.systemBackupSettings.update({
+        where: { id: "default" },
+        data: { lastBackupStatus: "COMPLETED", lastBackupMessage: "最新本地备份已同步到公司云盘" },
+      });
+      return updated;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "云盘同步失败";
+      await prisma.systemBackupRecord.update({
+        where: { id: record.id },
+        data: { cloudStatus: "FAILED", status: "PARTIAL", operator, errorMessage: message },
+      });
+      await prisma.systemBackupSettings.update({
+        where: { id: "default" },
+        data: { lastBackupStatus: "PARTIAL", lastBackupMessage: message },
+      });
+      throw error;
+    }
   } finally {
     backupInProgress = false;
   }

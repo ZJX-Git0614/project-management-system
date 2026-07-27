@@ -2,6 +2,18 @@
 # backup compatibility does not depend on Debian's default client version.
 FROM postgres:16-alpine AS postgres-client
 
+# The npm native MPP converter requires AVX2 on Linux. A Java MPXJ fallback
+# keeps MPP imports compatible with older x86 Windows hosts running Docker.
+FROM maven:3.9-eclipse-temurin-21 AS mpp-converter-builder
+
+WORKDIR /build
+COPY deployment/mpp-converter/pom.xml ./pom.xml
+RUN mvn -q -DskipTests dependency:go-offline
+COPY deployment/mpp-converter/src ./src
+RUN mvn -q -DskipTests package
+
+FROM eclipse-temurin:21-jre-jammy AS java-runtime
+
 # ============ Build Stage ============
 FROM node:20-bookworm-slim AS builder
 
@@ -49,6 +61,8 @@ COPY --from=postgres-client /usr/lib/libkrb5support.so.0* /opt/postgresql16/lib/
 COPY --from=postgres-client /usr/lib/liblber.so.2* /opt/postgresql16/lib/
 COPY --from=postgres-client /usr/lib/libsasl2.so.3* /opt/postgresql16/lib/
 COPY --from=postgres-client /usr/lib/libkeyutils.so.1* /opt/postgresql16/lib/
+COPY --from=java-runtime /opt/java/openjdk /opt/java/openjdk
+COPY --from=mpp-converter-builder /build/target/mpp-converter.jar /opt/ceastar/mpp-converter.jar
 
 RUN printf '%s\n' '#!/bin/sh' \
     'exec /opt/postgresql16/lib/ld-musl-x86_64.so.1 --library-path /opt/postgresql16/lib /opt/postgresql16/bin/pg_dump "$@"' \
@@ -60,6 +74,8 @@ RUN printf '%s\n' '#!/bin/sh' \
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV MPP_CONVERTER_JAR=/opt/ceastar/mpp-converter.jar
+ENV PATH="/opt/java/openjdk/bin:${PATH}"
 
 # 从 builder 复制全部产物
 COPY --from=builder /app/next.config.ts ./

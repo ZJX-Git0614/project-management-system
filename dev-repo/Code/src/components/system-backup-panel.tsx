@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Cloud, DatabaseBackup, Download, RefreshCw, Save, ShieldCheck, Upload } from "lucide-react";
+import { Cloud, CloudUpload, DatabaseBackup, Download, Save, ShieldCheck } from "lucide-react";
 
 import { useConfirm } from "@/components/confirm-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { api } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 
@@ -14,7 +15,8 @@ interface BackupSettings {
   automaticBackupEnabled: boolean;
   intervalHours: number;
   localDirectory: string;
-  retentionCount: number;
+  localLimitBytes: number;
+  cloudLimitBytes: number;
   cloudEnabled: boolean;
   cloudProvider: string;
   cloudBaseUrl: string;
@@ -44,6 +46,8 @@ interface BackupRecord {
 interface BackupData {
   settings: BackupSettings;
   records: BackupRecord[];
+  pagination: { page: number; pageSize: number; total: number; totalPages: number };
+  localUsageBytes: number;
 }
 
 interface BackupDraft extends BackupSettings {
@@ -64,6 +68,7 @@ const statusLabel: Record<string, string> = {
   PARTIAL: "本地完成，云盘失败",
   FAILED: "失败",
   SKIPPED: "未启用",
+  PRUNED: "已按容量清理",
 };
 
 export function SystemBackupPanel() {
@@ -75,13 +80,16 @@ export function SystemBackupPanel() {
   const [saving, setSaving] = useState(false);
   const [backingUp, setBackingUp] = useState(false);
   const [testingCloud, setTestingCloud] = useState(false);
+  const [syncingCloud, setSyncingCloud] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [message, setMessage] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(5);
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
+  const fetchData = useCallback(async (targetPage: number, targetPageSize: number, silent = false) => {
+    if (!silent) setLoading(true);
     try {
-      const result = await api.get<BackupData>("/api/admin/system-data/backups");
+      const result = await api.get<BackupData>(`/api/admin/system-data/backups?page=${targetPage}&pageSize=${targetPageSize}`);
       setData(result);
       setDraft((current) => ({
         ...result.settings,
@@ -90,13 +98,20 @@ export function SystemBackupPanel() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "备份信息加载失败");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void fetchData();
-  }, [fetchData]);
+    void fetchData(page, pageSize);
+    const refresh = () => void fetchData(page, pageSize, true);
+    const interval = window.setInterval(refresh, 30_000);
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [fetchData, page, pageSize]);
 
   const saveSettings = async () => {
     if (!draft) return;
@@ -119,12 +134,26 @@ export function SystemBackupPanel() {
     setMessage("");
     try {
       await api.post("/api/admin/system-data/backups");
-      setMessage("完整备份已创建");
-      await fetchData();
+      setMessage(draft?.cloudEnabled ? "本地备份已创建并同步到公司云盘" : "本地完整备份已创建");
+      await fetchData(page, pageSize, true);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "备份失败");
     } finally {
       setBackingUp(false);
+    }
+  };
+
+  const syncLatestBackupToCloud = async () => {
+    setSyncingCloud(true);
+    setMessage("");
+    try {
+      const result = await api.post<{ message: string }>("/api/admin/system-data/backups/sync-cloud");
+      setMessage(result.message);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "公司云盘备份失败");
+    } finally {
+      await fetchData(page, pageSize, true);
+      setSyncingCloud(false);
     }
   };
 
@@ -188,14 +217,9 @@ export function SystemBackupPanel() {
             <CardTitle className="flex items-center gap-2 text-sm"><DatabaseBackup className="size-4 text-primary" />数据备份与恢复</CardTitle>
             <CardDescription className="text-xs">完整备份包含 PostgreSQL 数据库与项目上传文档；自动备份固定每 6 小时执行一次。</CardDescription>
           </div>
-          <div className="flex items-center gap-2">
-            <Button type="button" variant="outline" size="sm" className="h-8 text-xs" onClick={() => void fetchData()} disabled={loading || backingUp}>
-              <RefreshCw className="size-3.5" /> 刷新
-            </Button>
-            <Button type="button" size="sm" className="h-8 text-xs" onClick={() => void createBackup()} disabled={loading || backingUp}>
-              <DatabaseBackup className="size-3.5" /> {backingUp ? "备份中..." : "立即备份"}
-            </Button>
-          </div>
+          <Button type="button" size="sm" className="h-8 text-xs" onClick={() => void createBackup()} disabled={loading || backingUp || syncingCloud}>
+            <DatabaseBackup className="size-3.5" /> {backingUp ? "备份中..." : "立即完整备份"}
+          </Button>
         </div>
       </CardHeader>
       <CardContent className="space-y-5">
@@ -209,8 +233,10 @@ export function SystemBackupPanel() {
               <Field label="执行周期">
                 <div className="flex h-9 items-center rounded-md border border-border bg-muted/20 px-3 text-xs">每 {draft.intervalHours} 小时</div>
               </Field>
-              <Field label="本地保留份数">
-                <Input type="number" min={1} max={365} value={draft.retentionCount} onChange={(event) => setDraft({ ...draft, retentionCount: Number(event.target.value) })} />
+              <Field label="本地备份空间">
+                <div className="flex h-9 items-center rounded-md border border-border bg-muted/20 px-3 text-xs tabular-nums">
+                  {formatBytes(data?.localUsageBytes ?? 0)} / {formatBytes(draft.localLimitBytes)}
+                </div>
               </Field>
               <Field label="下次自动备份">
                 <div className="flex h-9 items-center rounded-md border border-border bg-muted/20 px-3 text-xs">{draft.automaticBackupEnabled ? formatDateTime(draft.nextAutomaticBackupAt) : "已关闭"}</div>
@@ -224,8 +250,11 @@ export function SystemBackupPanel() {
             <div className="space-y-3 border-t border-border pt-4">
               <label className="flex items-center gap-2 text-xs font-medium">
                 <input type="checkbox" checked={draft.cloudEnabled} onChange={(event) => setDraft({ ...draft, cloudEnabled: event.target.checked })} className="size-4 accent-primary" />
-                <Cloud className="size-4 text-primary" /> 同步到公司云盘（WebDAV）
+                <Cloud className="size-4 text-primary" /> 公司云盘备份（WebDAV）
               </label>
+              <div className="text-[11px] leading-5 text-muted-foreground">
+                启用后，每 6 小时自动备份和“立即完整备份”都会同步云盘；云端目录最多使用 {formatBytes(draft.cloudLimitBytes)}，超出后自动删除最旧备份。
+              </div>
               {draft.cloudEnabled && (
                 <div className="grid gap-3 md:grid-cols-2">
                   <Field label="WebDAV 地址"><Input value={draft.cloudBaseUrl} onChange={(event) => setDraft({ ...draft, cloudBaseUrl: event.target.value })} placeholder="https://cloud.example.com/dav/" /></Field>
@@ -243,9 +272,14 @@ export function SystemBackupPanel() {
               </div>
               <div className="flex items-center gap-2">
                 {draft.cloudEnabled && (
-                  <Button type="button" variant="outline" size="sm" className="h-8 text-xs" onClick={() => void testCloud()} disabled={testingCloud || saving}>
-                    <ShieldCheck className="size-3.5" /> {testingCloud ? "检测中..." : "测试云盘登录"}
-                  </Button>
+                  <>
+                    <Button type="button" variant="outline" size="sm" className="h-8 text-xs" onClick={() => void syncLatestBackupToCloud()} disabled={syncingCloud || backingUp || saving}>
+                      <CloudUpload className="size-3.5" /> {syncingCloud ? "同步中..." : "同步最新备份"}
+                    </Button>
+                    <Button type="button" variant="outline" size="sm" className="h-8 text-xs" onClick={() => void testCloud()} disabled={testingCloud || saving || syncingCloud}>
+                      <ShieldCheck className="size-3.5" /> {testingCloud ? "检测中..." : "测试云盘登录"}
+                    </Button>
+                  </>
                 )}
                 <Button type="button" variant="outline" size="sm" className="h-8 text-xs" onClick={() => void saveSettings()} disabled={saving}>
                   <Save className="size-3.5" /> {saving ? "保存中..." : "保存设置"}
@@ -262,11 +296,31 @@ export function SystemBackupPanel() {
           </div>
           <input ref={restoreInputRef} type="file" accept=".dump,application/octet-stream" className="hidden" onChange={(event) => void restoreDatabase(event.target.files?.[0])} />
           <Button type="button" variant="outline" size="sm" className="h-8 text-xs" onClick={() => restoreInputRef.current?.click()} disabled={restoring || backingUp}>
-            <Upload className="size-3.5" /> {restoring ? "恢复中..." : "导入数据库备份"}
+            <Download className="size-3.5" /> {restoring ? "恢复中..." : "导入数据库备份"}
           </Button>
         </div>
 
         {message && <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs">{message}</div>}
+
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="text-xs font-medium">备份历史</div>
+          <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            <span>每页</span>
+            <Select
+              value={String(pageSize)}
+              className="h-8 w-20 text-xs"
+              onChange={(event) => {
+                setPageSize(Number(event.target.value));
+                setPage(1);
+              }}
+            >
+              <option value="5">5 条</option>
+              <option value="10">10 条</option>
+              <option value="20">20 条</option>
+            </Select>
+            <span>共 {data?.pagination.total ?? 0} 条</span>
+          </div>
+        </div>
 
         <div className="overflow-x-auto rounded-md border border-border">
           <table className="w-full min-w-[900px] text-left text-xs">
@@ -297,6 +351,13 @@ export function SystemBackupPanel() {
             </tbody>
           </table>
         </div>
+        {(data?.pagination.totalPages ?? 1) > 1 && (
+          <div className="flex items-center justify-end gap-2 text-xs">
+            <Button type="button" size="sm" variant="outline" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>上一页</Button>
+            <span className="min-w-16 text-center text-muted-foreground">{page} / {data?.pagination.totalPages ?? 1}</span>
+            <Button type="button" size="sm" variant="outline" disabled={page >= (data?.pagination.totalPages ?? 1) || loading} onClick={() => setPage((current) => current + 1)}>下一页</Button>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

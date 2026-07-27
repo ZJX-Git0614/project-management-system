@@ -24,6 +24,7 @@ import { queryRagLite } from "@/lib/raglite-client";
 import { requireUser } from "@/lib/server-auth";
 import { buildDocumentAssistantContext, type DocumentExtractionResult } from "@/lib/assistant-document-processing";
 import { isDocumentRevisionRequest, reviseDocumentsWithSmallModel } from "@/lib/assistant-document-revision";
+import { buildAssistantSuggestions } from "@/lib/assistant-suggestions";
 
 type StoredMessage = {
   id: string;
@@ -110,13 +111,22 @@ export async function GET(req: NextRequest) {
         : block;
     }),
   }));
+  const suggestionContext = await buildProjectAssistantContext({ user, projectId }).catch(() => null);
   return ok({
     messages: serializedMessages,
     runtime: publicRuntime(runtime),
+    suggestions: buildAssistantSuggestions({
+      context: suggestionContext,
+      history: serializedMessages.map((message) => ({
+        role: message.role === "assistant" ? "assistant" as const : "user" as const,
+        content: message.content,
+      })),
+    }),
   });
 }
 
 export async function POST(req: NextRequest) {
+  const requestStartedAt = Date.now();
   const user = await requireUser(req);
   if ("status" in user) return user;
   const runtime = await loadAssistantRuntimeConfig();
@@ -250,6 +260,7 @@ export async function POST(req: NextRequest) {
     projectId: context.project?.id ?? null,
     projectName: context.project?.name ?? null,
     source,
+    durationMs: Date.now() - requestStartedAt,
   };
 
   const [userMessage, assistantMessage] = await prisma.$transaction(async (tx) => {
@@ -297,5 +308,9 @@ export async function POST(req: NextRequest) {
     userMessage: serializeMessage(userMessage),
     assistantMessage: serializeMessage(assistantMessage),
     runtime: publicRuntime(runtime),
+    suggestions: buildAssistantSuggestions({
+      context,
+      history: [...history, { role: "user", content: message }, { role: "assistant", content: answer }],
+    }),
   });
 }

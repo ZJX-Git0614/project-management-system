@@ -99,8 +99,8 @@ git status --short
 每次更新使用两个版本变量：
 
 ```bash
-RELEASE_VERSION=2026.07.27.1
-RELEASE_STAMP=20260727-1
+RELEASE_VERSION=2026.07.27.2
+RELEASE_STAMP=20260727-2
 IMAGE_NAME=ceastar-project-management:${RELEASE_VERSION}-amd64
 PACKAGE_NAME=Ceastar-PMS-更新包-${RELEASE_STAMP}
 ```
@@ -127,7 +127,6 @@ image-name.txt
 update.ps1
 rollback.ps1
 更新手册.txt
-build_update_manual.py
 ```
 
 需要同步修改：
@@ -135,8 +134,7 @@ build_update_manual.py
 - `image-name.txt` 中的新镜像标签；
 - `update.ps1` 中的回退镜像标签；
 - `update.ps1` 和 `rollback.ps1` 中的 `.ceastar-update-YYYYMMDD.state` 文件名；
-- 更新手册中的版本号和更新包目录名；
-- Word 手册生成脚本中的版本号和目录示例。
+- 更新手册中的版本号和更新包目录名。
 
 检查是否还有旧版本号残留：
 
@@ -191,7 +189,7 @@ docker buildx build \
 PowerShell 等价命令：
 
 ```powershell
-$ReleaseVersion = "2026.07.27.1"
+$ReleaseVersion = "2026.07.27.2"
 $ImageName = "ceastar-project-management:$ReleaseVersion-amd64"
 docker buildx build --platform linux/amd64 --tag $ImageName --load .
 ```
@@ -212,15 +210,15 @@ docker image inspect "${IMAGE_NAME}" --format '{{.Os}}/{{.Architecture}} {{.Id}}
 linux/amd64
 ```
 
-验证容器内 Node 平台、应用产物、Prisma、MPP 转换器和迁移文件：
+验证容器内 Node 平台、应用产物、Prisma、Java MPXJ 转换器和迁移文件：
 
 ```bash
 docker run --rm --entrypoint sh "${IMAGE_NAME}" -lc '
   node -p "process.platform + \"/\" + process.arch" &&
+  java -version &&
   test -d /app/.next &&
   test -f /app/prisma/schema.prisma &&
-  test -f /app/node_modules/@byteink/mppjs/dist/cli.js &&
-  test -x /app/node_modules/@byteink/mppjs-linux-x64/bin/mpxj-convert &&
+  test -f /opt/ceastar/mpp-converter.jar &&
   pg_dump --version | grep "PostgreSQL) 16\." &&
   pg_restore --version | grep "PostgreSQL) 16\." &&
   test -f /app/.next/server/app/api/admin/system-data/backups/route.js &&
@@ -234,7 +232,7 @@ docker run --rm --entrypoint sh "${IMAGE_NAME}" -lc '
 linux/x64
 ```
 
-如果 `@byteink/mppjs-linux-x64` 不存在，MPP 导入在 Windows Docker 环境中会失败，不能发布该镜像。
+如果 Java 或 `/opt/ceastar/mpp-converter.jar` 不存在，MPP 导入在旧款 x86 Windows Docker 环境中会失败，不能发布该镜像。生产环境不再依赖需要 AVX2 的 mppjs 原生转换器。
 如果 `pg_dump` 或 `pg_restore` 不是 16.x，系统备份无法连接 PostgreSQL 16，也不能发布该镜像。
 
 ## 10. 可选的临时运行验证
@@ -294,13 +292,13 @@ image.sha256
 Windows PowerShell：
 
 ```powershell
-(Get-FileHash ".\images\ceastar-pms-2026.07.27.1-amd64.tar" -Algorithm SHA256).Hash.ToLowerInvariant()
+(Get-FileHash ".\images\ceastar-pms-2026.07.27.2-amd64.tar" -Algorithm SHA256).Hash.ToLowerInvariant()
 ```
 
 同时创建 `image-name.txt`，内容必须与构建时的镜像标签完全一致：
 
 ```text
-ceastar-project-management:2026.07.27.1-amd64
+ceastar-project-management:2026.07.27.2-amd64
 ```
 
 ## 13. 组装更新包
@@ -315,7 +313,6 @@ Ceastar-PMS-更新包-YYYYMMDD/
 ├── update.ps1
 ├── rollback.bat
 ├── rollback.ps1
-├── 更新手册.docx
 ├── 更新手册.txt
 └── images/
     └── ceastar-pms-YYYY.MM.DD-amd64.tar
@@ -410,7 +407,8 @@ unzip -l "/目标目录/${PACKAGE_NAME}.zip" | rg '__MACOSX|\.DS_Store|\.env|bac
 - [ ] `npm run build` 通过；
 - [ ] 镜像平台为 `linux/amd64`；
 - [ ] 容器内 Node 平台为 `linux/x64`；
-- [ ] Linux x64 MPP 转换二进制存在且可执行；
+- [ ] Java 21 运行时与 MPXJ 转换 JAR 存在；
+- [ ] 真实 MPP 样例已在 `linux/amd64` 容器内转换为 Project XML；
 - [ ] Prisma schema 和增量迁移已进入镜像；
 - [ ] 镜像 tar 的 SHA-256 已复核；
 - [ ] 更新脚本和回退脚本使用本次版本号；
@@ -435,17 +433,17 @@ unzip -l "/目标目录/${PACKAGE_NAME}.zip" | rg '__MACOSX|\.DS_Store|\.env|bac
 检查镜像内是否存在：
 
 ```text
-/app/node_modules/@byteink/mppjs-linux-x64/bin/mpxj-convert
+/opt/ceastar/mpp-converter.jar
 ```
 
-如果不存在，通常是镜像未按 `linux/amd64` 构建，或安装依赖时没有安装 optional dependency。
+同时执行 `java -version`。任一项失败都说明更新镜像不完整，需重新导入本次离线镜像。
 
 ### MPP 导入出现 `path argument ... number`
 
-生产构建中不能把 `require.resolve()` 的结果交给 `path.dirname()` 查找 MPP CLI，因为 Webpack 可能把模块路径编译成数字模块 ID。当前实现应通过 `process.cwd()` 拼接：
+新版生产镜像应优先调用 Java MPXJ 转换器：
 
 ```text
-/app/node_modules/@byteink/mppjs/dist/cli.js
+/opt/ceastar/mpp-converter.jar
 ```
 
 ### 更新后页面无法访问

@@ -3,7 +3,6 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -21,11 +20,13 @@ import {
   Send,
   Sparkles,
   Square,
+  Timer,
   UserRound,
   X,
 } from "lucide-react"
 
 import { AssistantMessageContent } from "@/components/assistant-message-content"
+import { OperationErrorDialog } from "@/components/operation-error-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
@@ -86,6 +87,7 @@ type AssistantTrace = {
     risks?: number
     documents?: number
   }
+  durationMs?: number
 }
 
 type ChatMessage = {
@@ -146,20 +148,25 @@ const formatMessageTime = (value?: string) => {
   })
 }
 
+const formatDuration = (value?: number) => {
+  if (!value || value < 0) return "0.0 秒"
+  return `${(value / 1000).toFixed(1)} 秒`
+}
+
 const AssistantTraceDetails = ({ trace }: { trace?: AssistantTrace }) => {
   if (!trace) return null
   const counts = trace.dataCounts
   const retrieved = Array.isArray(trace.retrieved) ? trace.retrieved : []
   const steps = Array.isArray(trace.steps) ? trace.steps : []
   const evidence = Array.isArray(trace.evidence) ? trace.evidence : []
-  const hasDetails = Boolean(trace.intent || trace.provider || trace.model || counts || retrieved.length || steps.length || evidence.length)
+  const hasDetails = Boolean(trace.intent || trace.provider || trace.model || counts || retrieved.length || steps.length || evidence.length || trace.durationMs)
   if (!hasDetails) return null
 
   return (
     <details className="group mt-1.5 rounded-md border border-border/70 bg-background/30 text-[10px] text-muted-foreground">
       <summary className="flex cursor-pointer list-none items-center gap-1.5 px-2 py-1.5 transition-colors hover:bg-primary/[0.06] hover:text-foreground active:bg-primary/10">
         <FileSearch className="size-3" />
-        <span>查看数据依据</span>
+        <span>思考与数据依据{trace.durationMs ? ` · ${formatDuration(trace.durationMs)}` : ""}</span>
         <ChevronDown className="ml-auto size-3 transition-transform duration-150 group-open:rotate-180" />
       </summary>
       <div className="space-y-1.5 border-t border-border/60 px-2 py-2 leading-4">
@@ -251,7 +258,10 @@ export function ProjectAssistant({
   const [modelConfigured, setModelConfigured] = useState(false)
   const [uploadingAttachment, setUploadingAttachment] = useState(false)
   const [attachments, setAttachments] = useState<AssistantAttachment[]>([])
-  const [saveAttachmentsToProject, setSaveAttachmentsToProject] = useState(false)
+  const [suggestions, setSuggestions] = useState<string[]>([])
+  const [thinkingStartedAt, setThinkingStartedAt] = useState<number | null>(null)
+  const [thinkingElapsedMs, setThinkingElapsedMs] = useState(0)
+  const [operationError, setOperationError] = useState<{ title: string; message: string } | null>(null)
   const [runtime, setRuntime] = useState<AssistantRuntime>(DEFAULT_RUNTIME)
   const [messages, setMessages] = useState<ChatMessage[]>([welcomeMessage(DEFAULT_RUNTIME)])
   const [position, setPosition] = useState<Point | null>(null)
@@ -269,10 +279,6 @@ export function ProjectAssistant({
     moved: boolean
   } | null>(null)
   const suppressClickRef = useRef(false)
-
-  const quickPrompts = useMemo(() => currentProjectId
-    ? ["项目概况", "本周风险事项", "预算与利润率", "甘特关键任务", "我的待办"]
-    : ["项目组合概况", "进行中的项目", "我的待办"], [currentProjectId])
 
   useEffect(() => {
     let initial = defaultPosition()
@@ -297,10 +303,11 @@ export function ProjectAssistant({
       setLoadingHistory(true)
       try {
         const query = currentProjectId ? `?projectId=${encodeURIComponent(currentProjectId)}` : ""
-        const result = await api.get<{ messages: ChatMessage[]; runtime: AssistantRuntime }>(`/api/assistant/chat${query}`)
+        const result = await api.get<{ messages: ChatMessage[]; runtime: AssistantRuntime; suggestions?: string[] }>(`/api/assistant/chat${query}`)
         if (cancelled) return
         setRuntime(result.runtime)
         setMessages(result.messages.length > 0 ? result.messages : [welcomeMessage(result.runtime)])
+        setSuggestions(Array.isArray(result.suggestions) ? result.suggestions : [])
         setModelConfigured(result.runtime.modelConfigured)
       } catch {
         if (!cancelled) setMessages([welcomeMessage(DEFAULT_RUNTIME)])
@@ -315,6 +322,14 @@ export function ProjectAssistant({
       window.removeEventListener(ASSISTANT_SETTINGS_CHANGED_EVENT, loadHistory)
     }
   }, [currentProjectId, currentProjectName])
+
+  useEffect(() => {
+    if (!sending || thinkingStartedAt === null) return
+    const updateElapsed = () => setThinkingElapsedMs(Date.now() - thinkingStartedAt)
+    updateElapsed()
+    const timer = window.setInterval(updateElapsed, 100)
+    return () => window.clearInterval(timer)
+  }, [sending, thinkingStartedAt])
 
   useEffect(() => {
     if (!open) return
@@ -431,6 +446,9 @@ export function ProjectAssistant({
     }])
     setInput("")
     setSending(true)
+    setSuggestions([])
+    setThinkingStartedAt(Date.now())
+    setThinkingElapsedMs(0)
     const controller = new AbortController()
     abortRef.current = controller
 
@@ -455,7 +473,14 @@ export function ProjectAssistant({
       })
       const payload = await response.json().catch(() => ({})) as {
         error?: string
-        data?: { userMessage?: ChatMessage; assistantMessage?: ChatMessage; answer?: string; source?: AssistantSource; runtime?: AssistantRuntime }
+        data?: {
+          userMessage?: ChatMessage
+          assistantMessage?: ChatMessage
+          answer?: string
+          source?: AssistantSource
+          runtime?: AssistantRuntime
+          suggestions?: string[]
+        }
       }
       if (!response.ok || !payload.data) throw new Error(payload.error || "助手暂时无法响应")
       const result = payload.data
@@ -472,6 +497,7 @@ export function ProjectAssistant({
           createdAt: new Date().toISOString(),
         },
       ])
+      setSuggestions(Array.isArray(result.suggestions) ? result.suggestions : [])
       setAttachments([])
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return
@@ -484,6 +510,7 @@ export function ProjectAssistant({
     } finally {
       if (abortRef.current === controller) abortRef.current = null
       setSending(false)
+      setThinkingStartedAt(null)
     }
   }
 
@@ -493,7 +520,7 @@ export function ProjectAssistant({
     try {
       const formData = new FormData()
       formData.append("projectId", currentProjectId)
-      formData.append("scope", saveAttachmentsToProject ? "PROJECT" : "CHAT")
+      formData.append("scope", "CHAT")
       formData.append("file", file)
       const token = api.getToken()
       const response = await fetch("/api/assistant/attachments", {
@@ -505,9 +532,19 @@ export function ProjectAssistant({
       if (!response.ok || !payload.data) throw new Error(payload.error || "附件上传失败")
       setAttachments((current) => [...current.filter((item) => item.id !== payload.data!.id), payload.data!].slice(-5))
       const errors = payload.data.diagnostics?.filter((item) => item.severity === "ERROR") ?? []
-      notify(errors[0]?.message || `已解析 ${payload.data.name}`, errors.length > 0 ? "warning" : "success")
+      if (errors.length > 0) {
+        setOperationError({
+          title: "附件解析未完成",
+          message: errors.map((item) => `[${item.code}] ${item.message}`).join("\n"),
+        })
+      } else {
+        notify(`已解析 ${payload.data.name}`, "success")
+      }
     } catch (error) {
-      notify(error instanceof Error ? error.message : "附件上传失败", "error")
+      setOperationError({
+        title: "附件上传或解析失败",
+        message: error instanceof Error ? error.message : "附件上传失败",
+      })
     } finally {
       setUploadingAttachment(false)
       if (attachmentInputRef.current) attachmentInputRef.current.value = ""
@@ -518,6 +555,7 @@ export function ProjectAssistant({
     abortRef.current?.abort()
     abortRef.current = null
     setSending(false)
+    setThinkingStartedAt(null)
   }
 
   const updateActionBlock = (action: AssistantAction) => {
@@ -629,7 +667,7 @@ export function ProjectAssistant({
                   </Badge>
                 </div>
                 <p className="truncate text-[11px] text-muted-foreground">
-                  {currentProjectName ? `当前项目：${currentProjectName}` : "项目组合范围"}
+                  {launcherWelcomeText(runtime)}
                 </p>
               </div>
               <Button
@@ -719,8 +757,42 @@ export function ProjectAssistant({
                     <div className="flex size-7 items-center justify-center rounded-md border border-primary/25 bg-primary/10 text-primary">
                       <Bot className="size-4 animate-pulse" />
                     </div>
-                    <div className="rounded-md border border-border bg-background/55 px-3 py-2.5 text-xs text-muted-foreground">
-                      正在理解问题并组织回答...
+                    <div className="min-w-0 flex-1 rounded-md border border-primary/25 bg-primary/[0.05] px-3 py-2.5 text-xs">
+                      <div className="flex items-center gap-2 font-medium text-foreground">
+                        <Sparkles className="size-3.5 animate-pulse text-primary" />
+                        正在处理
+                        <span className="ml-auto inline-flex items-center gap-1 tabular-nums text-muted-foreground">
+                          <Timer className="size-3" />{formatDuration(thinkingElapsedMs)}
+                        </span>
+                      </div>
+                      <div className="mt-2 grid gap-1 text-[11px] text-muted-foreground sm:grid-cols-2">
+                        {["分析问题与会话上下文", "读取授权的项目数据", "检索附件与项目知识库", "组织可核验的回答"].map((step, index) => {
+                          const reached = thinkingElapsedMs >= index * 650
+                          return (
+                            <div key={step} className={cn("flex items-center gap-1.5", reached && "text-foreground")}>
+                              <span className={cn("size-1.5 rounded-full bg-muted-foreground/35", reached && "bg-primary shadow-[0_0_6px_hsl(var(--primary))]")} />
+                              {step}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {!sending && suggestions.length > 0 && (
+                  <div className="ml-9 rounded-md border border-border/70 bg-background/35 px-3 py-2.5">
+                    <div className="mb-2 text-[10px] font-medium text-muted-foreground">接下来可以继续查看</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {suggestions.map((suggestion) => (
+                        <button
+                          key={suggestion}
+                          type="button"
+                          className="rounded-md border border-border bg-card/60 px-2 py-1 text-[11px] text-muted-foreground transition-[color,background-color,border-color,transform] hover:border-primary/35 hover:bg-primary/[0.08] hover:text-foreground active:scale-[.98]"
+                          onClick={() => void sendMessage(suggestion)}
+                        >
+                          {suggestion}
+                        </button>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -729,45 +801,7 @@ export function ProjectAssistant({
 
             <footer className="min-w-0 shrink-0 border-t border-border bg-background/25 px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
               <div className={cn("mx-auto", fullScreen ? "max-w-5xl" : "max-w-none")}>
-                {attachments.length > 0 && (
-                  <div className="mb-2 flex flex-wrap gap-1.5">
-                    {attachments.map((attachment) => (
-                      <div key={attachment.id} className="flex max-w-full items-center gap-1.5 rounded-md border border-border bg-background/55 px-2 py-1 text-[11px]">
-                        <FileSearch className="size-3 shrink-0 text-primary" />
-                        <span className="max-w-56 truncate">{attachment.name}</span>
-                        <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} title="移除附件">
-                          <X className="size-3" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {currentProjectId && (
-                  <label className="mb-2 flex w-fit cursor-pointer items-center gap-2 text-[11px] text-muted-foreground">
-                    <input
-                      type="checkbox"
-                      checked={saveAttachmentsToProject}
-                      onChange={(event) => setSaveAttachmentsToProject(event.target.checked)}
-                      disabled={sending || uploadingAttachment}
-                      className="size-3.5 accent-primary"
-                    />
-                    同时保存到项目文档
-                  </label>
-                )}
-                <div className="mb-2 flex gap-1.5 overflow-x-auto pb-1">
-                  {quickPrompts.map((prompt) => (
-                    <button
-                      key={prompt}
-                      type="button"
-                      className="shrink-0 rounded-md border border-border bg-background/45 px-2 py-1 text-[11px] text-muted-foreground transition-[color,background-color,border-color] hover:border-primary/35 hover:bg-primary/8 hover:text-foreground"
-                      onClick={() => void sendMessage(prompt)}
-                      disabled={sending}
-                    >
-                      {prompt}
-                    </button>
-                  ))}
-                </div>
-                <div className="flex items-end gap-2">
+                <div className="rounded-md border border-border bg-card/70 p-2 shadow-[var(--app-shadow-soft)] transition-colors focus-within:border-primary/45 focus-within:bg-card">
                   <input
                     ref={attachmentInputRef}
                     type="file"
@@ -775,40 +809,64 @@ export function ProjectAssistant({
                     className="hidden"
                     onChange={(event) => void uploadAttachment(event.target.files?.[0])}
                   />
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    className="size-9 shrink-0"
-                    onClick={() => attachmentInputRef.current?.click()}
-                    disabled={!currentProjectId || sending || uploadingAttachment || attachments.length >= 5}
-                    title={currentProjectId ? "添加文档或进度文件" : "请先选择项目"}
-                  >
-                    {uploadingAttachment ? <Sparkles className="animate-pulse" /> : <Paperclip />}
-                  </Button>
+                  {attachments.length > 0 && (
+                    <div className="mb-1.5 flex max-h-16 flex-wrap gap-1.5 overflow-y-auto border-b border-border/60 pb-2">
+                      {attachments.map((attachment) => (
+                        <div key={attachment.id} className="flex max-w-full items-center gap-1.5 rounded-md bg-muted/45 px-2 py-1 text-[11px]">
+                          <FileSearch className="size-3 shrink-0 text-primary" />
+                          <span className="max-w-56 truncate">{attachment.name}</span>
+                          <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} title="移除附件">
+                            <X className="size-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   <Textarea
                     value={input}
                     onChange={(event) => setInput(event.target.value)}
                     onKeyDown={handleComposerKeyDown}
                     placeholder="输入项目问题，Enter 发送，Shift+Enter 换行"
-                    className="min-h-[62px] max-h-32 resize-none text-xs"
+                    className="min-h-[54px] max-h-32 resize-none border-0 bg-transparent px-1 py-1 text-xs shadow-none focus-visible:ring-0"
                     maxLength={1000}
                     disabled={sending}
                   />
-                  {sending ? (
-                    <Button variant="outline" size="icon" className="size-9 shrink-0" onClick={stopMessage} title="停止回答">
-                      <Square className="size-3.5 fill-current" />
+                  <div className="mt-1 flex items-center justify-between gap-2 border-t border-border/60 pt-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-[11px] text-muted-foreground"
+                      onClick={() => attachmentInputRef.current?.click()}
+                      disabled={!currentProjectId || sending || uploadingAttachment || attachments.length >= 5}
+                      title={currentProjectId ? "添加文档或进度文件" : "请先选择项目"}
+                    >
+                      {uploadingAttachment ? <Sparkles className="size-3.5 animate-pulse" /> : <Paperclip className="size-3.5" />}
+                      {uploadingAttachment ? "解析中" : "附件"}
                     </Button>
-                  ) : (
-                    <Button size="icon" className="size-9 shrink-0" onClick={() => void sendMessage()} disabled={!input.trim()} title="发送">
-                      <Send />
-                    </Button>
-                  )}
+                    {sending ? (
+                      <Button variant="outline" size="icon" className="size-8 shrink-0" onClick={stopMessage} title="停止回答">
+                        <Square className="size-3.5 fill-current" />
+                      </Button>
+                    ) : (
+                      <Button size="icon" className="size-8 shrink-0" onClick={() => void sendMessage()} disabled={!input.trim()} title="发送">
+                        <Send className="size-3.5" />
+                      </Button>
+                    )}
+                  </div>
                 </div>
               </div>
             </footer>
           </div>
         </aside>
       )}
+      <OperationErrorDialog
+        open={Boolean(operationError)}
+        title={operationError?.title || "操作失败"}
+        message={operationError?.message || "未知错误"}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) setOperationError(null)
+        }}
+      />
     </>
   )
 }

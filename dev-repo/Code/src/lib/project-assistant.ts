@@ -102,8 +102,6 @@ export const buildProjectAssistantContext = async (params: {
                 },
               },
             },
-            scheduleMetadata: true,
-            scheduleAnalyses: { orderBy: { createdAt: "desc" }, take: 5 },
             weeklyItems: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }], take: 160 },
             budgetCategories: {
               orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
@@ -138,6 +136,19 @@ export const buildProjectAssistantContext = async (params: {
     }),
   ])
 
+  // Optional schedule-analysis tables may be created after the core project tables
+  // during an offline Docker update. Keep the assistant usable throughout that window.
+  const [scheduleMetadata, scheduleAnalyses] = projectId
+    ? await Promise.all([
+        prisma.projectScheduleImportMetadata.findUnique({ where: { projectId } }).catch(() => null),
+        prisma.scheduleAnalysisRun.findMany({
+          where: { projectId },
+          orderBy: { createdAt: "desc" },
+          take: 5,
+        }).catch(() => []),
+      ])
+    : [null, []]
+
   const contractAmount = project?.budgetSetting?.contractAmount ?? (project?.amountWan ?? 0) * 10_000
   const budgetCategories = (project?.budgetCategories ?? []).map((category) => {
     const items = category.items.map((item) => ({
@@ -164,7 +175,7 @@ export const buildProjectAssistantContext = async (params: {
         projectId: project.id,
         statusDate,
         tasks: project.ganttTasks,
-        metadata: project.scheduleMetadata,
+        metadata: scheduleMetadata,
       })
     : null
   const tasks = (schedule?.tasks ?? []).map((task) => ({
@@ -185,7 +196,7 @@ export const buildProjectAssistantContext = async (params: {
   const overdueTasks = tasks.filter((task) => task.progress < 100 && task.plannedEnd && task.plannedEnd < statusDate)
   const visibleProjectTodos = (project?.todos ?? []).filter((todo) =>
     !todo.targetPersonName || todo.targetPersonName === params.user.displayName)
-  const scheduleComparisons = (project?.scheduleAnalyses ?? []).map((run) => {
+  const scheduleComparisons = scheduleAnalyses.map((run) => {
     try {
       const result = JSON.parse(run.resultJson || "{}")
       return {

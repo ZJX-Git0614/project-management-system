@@ -20,6 +20,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { GanttTimeline, type GanttTaskDraft } from "@/components/gantt-timeline";
+import { OperationErrorDialog } from "@/components/operation-error-dialog";
 import { useConfirm } from "@/components/confirm-provider";
 import { usePermission } from "@/lib/use-permission";
 import { api } from "@/lib/api-client";
@@ -72,6 +73,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
   const [mppExportAvailable, setMppExportAvailable] = useState(false);
   const [importPreview, setImportPreview] = useState<ScheduleImportPreview | null>(null);
+  const [operationError, setOperationError] = useState<{ title: string; message: string } | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const confirm = useConfirm();
   const { can } = usePermission();
@@ -129,7 +131,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       if (!response.ok || !body.success) throw new Error(body.error || "导入失败");
       setImportPreview({ file, ...body.data });
     } catch (error) {
-      alert(error instanceof Error ? error.message : "导入失败");
+      setOperationError({ title: "计划文件解析失败", message: error instanceof Error ? error.message : "导入失败" });
     } finally {
       setImporting(false);
       if (importInputRef.current) importInputRef.current.value = "";
@@ -156,7 +158,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
         ? `已合并更新 ${body.data.updatedCount} 个任务，新增 ${body.data.createdCount} 个任务`
         : `已追加导入 ${body.data.createdCount} 个任务`);
     } catch (error) {
-      alert(error instanceof Error ? error.message : "导入失败");
+      setOperationError({ title: "计划导入失败", message: error instanceof Error ? error.message : "导入失败" });
     } finally {
       setImporting(false);
     }
@@ -183,7 +185,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       anchor.click();
       URL.revokeObjectURL(url);
     } catch (error) {
-      alert(error instanceof Error ? error.message : "导出失败");
+      setOperationError({ title: "计划导出失败", message: error instanceof Error ? error.message : "导出失败" });
     } finally {
       setExportingFormat(null);
     }
@@ -336,14 +338,14 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                     onClick={() => importInputRef.current?.click()}
                     title="支持 MPP、Project XML 和 Excel，导入时追加到现有任务"
                   >
-                    <Upload className="size-3.5" /> {importing ? "导入中..." : "导入"}
+                    <Download className="size-3.5" /> {importing ? "导入中..." : "导入"}
                   </Button>
                 </>
               )}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button type="button" size="sm" variant="outline" className="h-8 text-xs" disabled={Boolean(exportingFormat)}>
-                    <Download className="size-3.5" /> {exportingFormat ? "导出中..." : "导出"}<ChevronDown className="size-3" />
+                    <Upload className="size-3.5" /> {exportingFormat ? "导出中..." : "导出"}<ChevronDown className="size-3" />
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-56">
@@ -432,6 +434,12 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <OperationErrorDialog
+        open={Boolean(operationError)}
+        title={operationError?.title || "操作失败"}
+        message={operationError?.message || "未知错误"}
+        onOpenChange={(open) => !open && setOperationError(null)}
+      />
     </div>
   );
 };

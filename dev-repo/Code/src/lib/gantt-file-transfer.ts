@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -60,30 +60,78 @@ export interface GanttImportBundle {
   metadata: ProjectScheduleMetadata | null;
 }
 
-const convertMppFileToXml = async (inputPath: string, outputPath: string) => {
-  // Static require.resolve calls are converted to numeric Webpack module IDs in production builds.
-  const cliPath = path.join(process.cwd(), "node_modules", "@byteink", "mppjs", "dist", "cli.js");
+const MPP_CONVERTER_TIMEOUT_MS = 120_000;
+const MPP_CONVERTER_OUTPUT_LIMIT = 16_000;
+
+const readableFile = async (filePath: string) => access(filePath).then(() => true).catch(() => false);
+
+const runMppConverter = async ({
+  command,
+  args,
+  label,
+}: {
+  command: string;
+  args: string[];
+  label: string;
+}) => {
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(process.execPath, [cliPath, inputPath, outputPath], {
+    const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],
     });
+    let stdout = "";
     let stderr = "";
+    let settled = false;
     const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
       child.kill("SIGKILL");
-      reject(new Error("MPP 文件转换超时"));
-    }, 120_000);
+      reject(new Error(`MPP 文件转换超时（转换器：${label}，等待 ${MPP_CONVERTER_TIMEOUT_MS / 1000} 秒）`));
+    }, MPP_CONVERTER_TIMEOUT_MS);
+    child.stdout.on("data", (chunk) => {
+      stdout = `${stdout}${chunk.toString()}`.slice(-MPP_CONVERTER_OUTPUT_LIMIT);
+    });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+      stderr = `${stderr}${chunk.toString()}`.slice(-MPP_CONVERTER_OUTPUT_LIMIT);
     });
     child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      reject(error);
+      reject(new Error(`无法启动 MPP 转换器（${label}）：${error.message}`));
     });
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       if (code === 0) resolve();
-      else reject(new Error(stderr.trim() || `MPP 文件转换失败（退出码 ${code}）`));
+      else {
+        const details = stderr.trim() || stdout.trim() || "转换器未返回错误详情";
+        reject(new Error([
+          `MPP 文件转换失败（转换器：${label}，退出码：${code ?? "无"}${signal ? `，信号：${signal}` : ""}）`,
+          details,
+        ].join("\n")));
+      }
     });
+  });
+};
+
+const convertMppFileToXml = async (inputPath: string, outputPath: string) => {
+  const converterJar = process.env.MPP_CONVERTER_JAR?.trim() || "/opt/ceastar/mpp-converter.jar";
+  if (await readableFile(converterJar)) {
+    await runMppConverter({
+      command: process.env.JAVA_BIN?.trim() || "java",
+      args: ["-jar", converterJar, inputPath, outputPath],
+      label: "Java MPXJ",
+    });
+    return;
+  }
+
+  // Local development keeps using the platform package; production Docker uses Java MPXJ above.
+  const cliPath = path.join(process.cwd(), "node_modules", "@byteink", "mppjs", "dist", "cli.js");
+  await runMppConverter({
+    command: process.execPath,
+    args: [cliPath, inputPath, outputPath],
+    label: "mppjs 原生转换器",
   });
 };
 

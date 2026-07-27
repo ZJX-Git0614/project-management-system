@@ -6,8 +6,11 @@ import { encryptAssistantSecret } from "@/lib/assistant-secrets";
 import { err, ok } from "@/lib/api-utils";
 import {
   createSystemBackup,
+  CLOUD_BACKUP_LIMIT_BYTES,
   DEFAULT_SYSTEM_BACKUP_ROOT,
   getSystemBackupSettings,
+  getLocalBackupUsageBytes,
+  LOCAL_BACKUP_LIMIT_BYTES,
   SYSTEM_BACKUP_INTERVAL_HOURS,
 } from "@/lib/system-backup";
 import { prisma } from "@/lib/prisma";
@@ -17,7 +20,8 @@ const serializeSettings = (settings: Awaited<ReturnType<typeof getSystemBackupSe
   automaticBackupEnabled: settings.automaticBackupEnabled,
   intervalHours: SYSTEM_BACKUP_INTERVAL_HOURS,
   localDirectory: settings.localDirectory || DEFAULT_SYSTEM_BACKUP_ROOT,
-  retentionCount: settings.retentionCount,
+  localLimitBytes: LOCAL_BACKUP_LIMIT_BYTES,
+  cloudLimitBytes: CLOUD_BACKUP_LIMIT_BYTES,
   cloudEnabled: settings.cloudEnabled,
   cloudProvider: settings.cloudProvider,
   cloudBaseUrl: settings.cloudBaseUrl,
@@ -38,11 +42,21 @@ export async function GET(req: NextRequest) {
   const auth = await requireSuperAdmin(req);
   if ("response" in auth) return auth.response;
 
-  const [settings, records] = await Promise.all([
+  const requestedPageSize = Number(req.nextUrl.searchParams.get("pageSize"));
+  const pageSize = [5, 10, 20].includes(requestedPageSize) ? requestedPageSize : 5;
+  const page = Math.max(1, Number(req.nextUrl.searchParams.get("page")) || 1);
+  const [settings, records, total, localUsageBytes] = await Promise.all([
     getSystemBackupSettings(),
-    prisma.systemBackupRecord.findMany({ orderBy: { createdAt: "desc" }, take: 50 }),
+    prisma.systemBackupRecord.findMany({ orderBy: { createdAt: "desc" }, skip: (page - 1) * pageSize, take: pageSize }),
+    prisma.systemBackupRecord.count(),
+    getLocalBackupUsageBytes(),
   ]);
-  return ok({ settings: serializeSettings(settings), records });
+  return ok({
+    settings: serializeSettings(settings),
+    records,
+    pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) },
+    localUsageBytes,
+  });
 }
 
 export async function PUT(req: NextRequest) {
@@ -55,7 +69,6 @@ export async function PUT(req: NextRequest) {
   const cloudUsername = String(body.cloudUsername ?? "").trim();
   const cloudDirectory = String(body.cloudDirectory ?? "").trim();
   const cloudPassword = String(body.cloudPassword ?? "");
-  const retentionCount = Math.min(365, Math.max(1, Number(body.retentionCount) || 28));
 
   if (!localDirectory) return err("请填写服务器本地备份目录");
   if (!path.isAbsolute(localDirectory)) return err("本地备份目录必须是服务器上的绝对路径");
@@ -71,7 +84,6 @@ export async function PUT(req: NextRequest) {
       automaticBackupEnabled: body.automaticBackupEnabled !== false,
       intervalHours: SYSTEM_BACKUP_INTERVAL_HOURS,
       localDirectory,
-      retentionCount,
       cloudEnabled,
       cloudProvider: "WEBDAV",
       cloudBaseUrl,
@@ -90,7 +102,8 @@ export async function PUT(req: NextRequest) {
       detail: `更新系统备份设置：自动备份${settings.automaticBackupEnabled ? "开启" : "关闭"}，周期 ${SYSTEM_BACKUP_INTERVAL_HOURS} 小时，云盘${settings.cloudEnabled ? "开启" : "关闭"}`,
       snapshot: JSON.stringify({
         localDirectory: settings.localDirectory,
-        retentionCount: settings.retentionCount,
+        localLimitBytes: LOCAL_BACKUP_LIMIT_BYTES,
+        cloudLimitBytes: CLOUD_BACKUP_LIMIT_BYTES,
         cloudEnabled: settings.cloudEnabled,
         cloudBaseUrl: settings.cloudBaseUrl,
         cloudUsername: settings.cloudUsername,
