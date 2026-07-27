@@ -60,8 +60,7 @@ npm --version
 **/.env
 .local-runtime
 **/.local-runtime
-backups
-**/backups
+backups/**
 *.dump
 *.tar
 *.tar.gz
@@ -69,6 +68,9 @@ deployment/windows-x86/images
 ```
 
 `.env.example` 可以保留，但任何真实 `.env` 都不能进入 Docker build context。
+
+不要使用 `**/backups`：该规则会同时排除源码中的
+`src/app/api/admin/system-data/backups`，导致系统数据备份 API 缺失。
 
 ## 4. 确认本次要发布的源代码
 

@@ -18,8 +18,7 @@ prisma/dev.db
 !**/.env.example
 .local-runtime
 **/.local-runtime
-backups
-**/backups
+backups/**
 *.dump
 *.tar
 *.tar.gz
