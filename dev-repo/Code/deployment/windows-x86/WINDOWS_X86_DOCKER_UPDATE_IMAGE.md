@@ -99,8 +99,8 @@ git status --short
 每次更新使用两个版本变量：
 
 ```bash
-RELEASE_VERSION=2026.07.27
-RELEASE_STAMP=20260727
+RELEASE_VERSION=2026.07.27.1
+RELEASE_STAMP=20260727-1
 IMAGE_NAME=ceastar-project-management:${RELEASE_VERSION}-amd64
 PACKAGE_NAME=Ceastar-PMS-更新包-${RELEASE_STAMP}
 ```
@@ -191,7 +191,7 @@ docker buildx build \
 PowerShell 等价命令：
 
 ```powershell
-$ReleaseVersion = "2026.07.27"
+$ReleaseVersion = "2026.07.27.1"
 $ImageName = "ceastar-project-management:$ReleaseVersion-amd64"
 docker buildx build --platform linux/amd64 --tag $ImageName --load .
 ```
@@ -221,6 +221,9 @@ docker run --rm --entrypoint sh "${IMAGE_NAME}" -lc '
   test -f /app/prisma/schema.prisma &&
   test -f /app/node_modules/@byteink/mppjs/dist/cli.js &&
   test -x /app/node_modules/@byteink/mppjs-linux-x64/bin/mpxj-convert &&
+  pg_dump --version | grep "PostgreSQL) 16\." &&
+  pg_restore --version | grep "PostgreSQL) 16\." &&
+  test -f /app/.next/server/app/api/admin/system-data/backups/route.js &&
   find /app/prisma/manual-migrations -maxdepth 1 -type f -name "*.sql" -print
 '
 ```
@@ -232,6 +235,7 @@ linux/x64
 ```
 
 如果 `@byteink/mppjs-linux-x64` 不存在，MPP 导入在 Windows Docker 环境中会失败，不能发布该镜像。
+如果 `pg_dump` 或 `pg_restore` 不是 16.x，系统备份无法连接 PostgreSQL 16，也不能发布该镜像。
 
 ## 10. 可选的临时运行验证
 
@@ -290,13 +294,13 @@ image.sha256
 Windows PowerShell：
 
 ```powershell
-(Get-FileHash ".\images\ceastar-pms-2026.07.27-amd64.tar" -Algorithm SHA256).Hash.ToLowerInvariant()
+(Get-FileHash ".\images\ceastar-pms-2026.07.27.1-amd64.tar" -Algorithm SHA256).Hash.ToLowerInvariant()
 ```
 
 同时创建 `image-name.txt`，内容必须与构建时的镜像标签完全一致：
 
 ```text
-ceastar-project-management:2026.07.27-amd64
+ceastar-project-management:2026.07.27.1-amd64
 ```
 
 ## 13. 组装更新包
