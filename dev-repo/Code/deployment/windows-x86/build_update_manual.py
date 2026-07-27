@@ -17,9 +17,10 @@ INK = RGBColor(30, 36, 44)
 LIGHT_BLUE = "E8EEF5"
 LIGHT_RED = "FDECEC"
 LIGHT_GRAY = "F2F4F7"
+DOCUMENT_FONT = "Microsoft YaHei"
 
 
-def set_run_font(run, size=11, bold=False, color=INK, east_asia="Microsoft YaHei"):
+def set_run_font(run, size=11, bold=False, color=INK, east_asia=DOCUMENT_FONT):
     run.font.name = east_asia
     run.font.size = Pt(size)
     run.font.bold = bold
@@ -228,7 +229,7 @@ def add_code(doc, text):
     run.font.name = "Consolas"
     run.font.size = Pt(9.5)
     run.font.color.rgb = INK
-    run._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), "Microsoft YaHei")
+    run._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), DOCUMENT_FONT)
     return paragraph
 
 
@@ -260,11 +261,11 @@ section.footer_distance = Inches(0.492)
 
 styles = doc.styles
 normal = styles["Normal"]
-normal.font.name = "Microsoft YaHei"
+normal.font.name = DOCUMENT_FONT
 normal.font.size = Pt(11)
 normal.paragraph_format.space_after = Pt(6)
 normal.paragraph_format.line_spacing = 1.25
-normal._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), "Microsoft YaHei")
+normal._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), DOCUMENT_FONT)
 
 for name, size, color, before, after in (
     ("Heading 1", 16, BLUE, 18, 10),
@@ -272,11 +273,11 @@ for name, size, color, before, after in (
     ("Heading 3", 12, DARK_BLUE, 10, 5),
 ):
     style = styles[name]
-    style.font.name = "Microsoft YaHei"
+    style.font.name = DOCUMENT_FONT
     style.font.size = Pt(size)
     style.font.bold = True
     style.font.color.rgb = color
-    style._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), "Microsoft YaHei")
+    style._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), DOCUMENT_FONT)
     style.paragraph_format.space_before = Pt(before)
     style.paragraph_format.space_after = Pt(after)
     style.paragraph_format.keep_with_next = True
@@ -300,7 +301,7 @@ set_run_font(subtitle.add_run("Windows x86 离线更新手册"), size=18, bold=T
 meta = doc.add_table(rows=3, cols=2)
 set_table_geometry(meta, [2200, 7160])
 meta_data = [
-    ("更新版本", "2026.07.24"),
+    ("更新版本", "2026.07.27"),
     ("适用环境", "Windows 10/11 x86-64，已完成 Ceastar PMS 首次安装"),
     ("更新方式", "离线 Docker 镜像增量更新，保留数据库与上传文档"),
 ]
@@ -346,7 +347,7 @@ add_numbered(doc, "启动 Docker Desktop，并等待其显示运行正常。", p
 add_numbered(doc, "确认系统盘或 Docker 数据盘至少有 4 GB 可用空间。", prepare_numbering)
 add_numbered(doc, "等待当前用户操作保存完成，暂时关闭正在使用系统的浏览器页面。", prepare_numbering)
 add_numbered(doc, "把整个更新包文件夹复制到原部署目录中，更新包文件夹与 docker-compose.yml 直接相邻。", prepare_numbering)
-add_code(doc, "D:\\PMS\\Ceastar-PMS-内网完整部署-20260723\\docker-compose.yml\nD:\\PMS\\Ceastar-PMS-内网完整部署-20260723\\Ceastar-PMS-更新包-20260724\\update.bat")
+add_code(doc, "D:\\PMS\\Ceastar-PMS-内网完整部署-20260723\\docker-compose.yml\nD:\\PMS\\Ceastar-PMS-内网完整部署-20260723\\Ceastar-PMS-更新包-20260727\\update.bat")
 
 doc.add_heading("3. 执行更新", level=1)
 update_numbering = create_decimal_numbering(doc)
@@ -406,7 +407,7 @@ for issue, solution in (
 set_table_geometry(faq, [3200, 6160])
 
 doc.core_properties.title = "Ceastar项目管理系统 Windows x86 离线更新手册"
-doc.core_properties.subject = "Ceastar PMS 2026.07.24 离线更新操作说明"
+doc.core_properties.subject = "Ceastar PMS 2026.07.27 离线更新操作说明"
 doc.core_properties.author = "Ceastar项目管理系统"
 doc.save(OUTPUT)
 print(OUTPUT)

@@ -1,12 +1,10 @@
-version: "3.8"
-
 services:
   postgres:
     image: postgres:16-alpine
     container_name: pms-postgres
     environment:
       - POSTGRES_USER=pms
-      - POSTGRES_PASSWORD=pms-pwd-2026
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be configured in .env}
       - POSTGRES_DB=pms
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -25,8 +23,8 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - DATABASE_URL=postgresql://pms:pms-pwd-2026@postgres:5432/pms?schema=public
-      - JWT_SECRET=pms-production-jwt-secret-2026
+      - DATABASE_URL=postgresql://pms:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be configured in .env}@postgres:5432/pms?schema=public
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be configured in .env}
       - PROJECT_DOCUMENT_STORAGE_DIR=/app/.local-runtime/project-documents
       - SYSTEM_BACKUP_DIR=/app/.local-runtime/system-backups
       - PROJECT_MPP_EXPORT_SERVICE_URL=${PROJECT_MPP_EXPORT_SERVICE_URL:-}
@@ -34,7 +32,7 @@ services:
       - ASSISTANT_MODEL_BASE_URL=${ASSISTANT_MODEL_BASE_URL:-}
       - ASSISTANT_MODEL=${ASSISTANT_MODEL:-}
       - ASSISTANT_MODEL_API_KEY=${ASSISTANT_MODEL_API_KEY:-}
-      - ASSISTANT_CONFIG_ENCRYPTION_KEY=${ASSISTANT_CONFIG_ENCRYPTION_KEY:-pms-local-assistant-encryption-key-change-in-production}
+      - ASSISTANT_CONFIG_ENCRYPTION_KEY=${ASSISTANT_CONFIG_ENCRYPTION_KEY:?ASSISTANT_CONFIG_ENCRYPTION_KEY must be configured in .env}
       - RAGLITE_SERVICE_URL=${RAGLITE_SERVICE_URL:-}
       - RAGLITE_SERVICE_TOKEN=${RAGLITE_SERVICE_TOKEN:-}
       - NODE_ENV=production

@@ -1,0 +1,4 @@
+deployment/windows-x86/update.bat text eol=crlf
+deployment/windows-x86/update.ps1 text eol=crlf
+deployment/windows-x86/rollback.bat text eol=crlf
+deployment/windows-x86/rollback.ps1 text eol=crlf
