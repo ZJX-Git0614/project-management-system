@@ -3,13 +3,29 @@ import { prisma } from "@/lib/prisma"
 import { getUserFromRequest } from "@/lib/auth"
 import { ok, err, unauthorized } from "@/lib/api-utils"
 import { ItemStatus } from "@/domain/enums"
-import { nextWeeklyMatterCode, renumberWeeklyMatterCodes } from "@/lib/weekly-matter-codes"
+import { nextWeeklyMatterCode, renumberWeeklyMatterCodesByProject } from "@/lib/weekly-matter-codes"
 
 const SERIALIZE_KEYS = [
   "id", "projectId", "matterCode", "sortOrder", "title", "ganttTaskId", "taskName", "description", "dueDate", "status", "owner", "priority",
   "plannedStartDate", "actualStartDate", "plannedEndDate", "actualEndDate",
   "progress", "health", "issueAndAction", "dependency", "risk", "riskStatus", "remark",
 ] as const
+
+const LINKED_RISK_SELECT = {
+  id: true,
+  riskCode: true,
+  riskName: true,
+  weeklyItemId: true,
+  category: true,
+  trigger: true,
+  probability: true,
+  impact: true,
+  level: true,
+  response: true,
+  owner: true,
+  status: true,
+  targetDate: true,
+} as const
 
 function serializeItem(item: Record<string, unknown>) {
   const out: Record<string, unknown> = { project: (item as { project?: unknown }).project }
@@ -19,6 +35,11 @@ function serializeItem(item: Record<string, unknown>) {
   const linkedTask = item.ganttTask as { taskName?: string } | null | undefined
   out.ganttTaskId = item.ganttTaskId ?? null
   out.taskName = linkedTask?.taskName ?? item.taskName ?? ""
+  out.linkedRisks = ((item.riskItems as Array<Record<string, unknown>> | undefined) ?? []).map((risk) => ({
+    ...risk,
+    linkedItemCode: item.matterCode ?? "",
+    linkedItemName: item.title ?? "",
+  }))
   out.createdAt = (item.createdAt as Date).toISOString()
   out.updatedAt = (item.updatedAt as Date).toISOString()
   return out
@@ -26,7 +47,7 @@ function serializeItem(item: Record<string, unknown>) {
 
 const EXTRA_FIELDS: readonly string[] = [
   "plannedStartDate", "actualStartDate", "plannedEndDate", "actualEndDate",
-  "progress", "health", "issueAndAction", "dependency", "risk", "riskStatus", "remark",
+  "progress", "health", "issueAndAction", "dependency", "remark",
 ]
 
 function buildExtraData(body: Record<string, unknown>): Record<string, unknown> {
@@ -37,8 +58,8 @@ function buildExtraData(body: Record<string, unknown>): Record<string, unknown> 
   return data
 }
 
-async function normalizeWeeklyMatterCodes<T extends { id: string; matterCode: string; sortOrder?: number; createdAt: Date | string }>(items: T[]) {
-  const codedItems = renumberWeeklyMatterCodes(items)
+async function normalizeWeeklyMatterCodes<T extends { id: string; projectId: string; matterCode: string; sortOrder?: number; createdAt: Date | string }>(items: T[]) {
+  const codedItems = renumberWeeklyMatterCodesByProject(items)
   await Promise.all(
     codedItems
       .filter((item, index) => item.matterCode !== items[index].matterCode)
@@ -82,6 +103,10 @@ export async function GET(req: NextRequest) {
       ganttTask: {
         select: { id: true, taskName: true },
       },
+      riskItems: {
+        orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+        select: LINKED_RISK_SELECT,
+      },
     },
   })
 
@@ -106,6 +131,7 @@ export async function POST(req: NextRequest) {
   }
 
   const existingItems = await prisma.weeklyItem.findMany({
+    where: { projectId: body.projectId },
     select: { id: true, matterCode: true, sortOrder: true, createdAt: true },
   })
   const matterCode = nextWeeklyMatterCode(existingItems)
@@ -131,7 +157,7 @@ export async function POST(req: NextRequest) {
       sortOrder: (lastItem?.sortOrder ?? 0) + 1,
       title: body.title,
       ganttTaskId: linkedTask?.id ?? null,
-      taskName: linkedTask?.taskName ?? (requestedTaskId ? "" : body.taskName || ""),
+      taskName: linkedTask?.taskName ?? "",
       description: body.description || "",
       dueDate: typeof body.dueDate === "string" ? body.dueDate : "",
       status: body.status || ItemStatus.PENDING,
@@ -142,6 +168,7 @@ export async function POST(req: NextRequest) {
     include: {
       project: { select: { id: true, name: true, code: true, status: true } },
       ganttTask: { select: { id: true, taskName: true } },
+      riskItems: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }], select: LINKED_RISK_SELECT },
     },
   })
 
@@ -152,7 +179,7 @@ export async function POST(req: NextRequest) {
       entityId: item.id,
       actionType: "CREATE",
       operator: user.displayName,
-      detail: `新增本周事项「${item.title}」`,
+      detail: `新增项目事项「${item.title}」`,
     },
   })
 

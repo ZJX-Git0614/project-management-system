@@ -6,6 +6,7 @@ import {
   normalizeAssistantPersonaPreset,
 } from "@/lib/assistant-persona";
 import { decryptAssistantSecret, encryptAssistantSecret } from "@/lib/assistant-secrets";
+import { DEFAULT_ASSISTANT_SYSTEM_PROMPT, defaultAssistantSettingsData } from "@/lib/assistant-settings";
 
 describe("assistant settings foundations", () => {
   const originalSecret = process.env.ASSISTANT_CONFIG_ENCRYPTION_KEY;
@@ -27,5 +28,10 @@ describe("assistant settings foundations", () => {
     expect(buildAssistantWelcomeMessage("PROFESSIONAL", "项目助手", "示例项目"))
       .toContain("示例项目");
     expect(buildAssistantPersonaInstruction("COOL", "")).toContain("冷静");
+  });
+
+  it("uses 佳佳 as the assistant identity", () => {
+    expect(defaultAssistantSettingsData().assistantName).toBe("佳佳");
+    expect(DEFAULT_ASSISTANT_SYSTEM_PROMPT).toContain("智能助手佳佳");
   });
 });

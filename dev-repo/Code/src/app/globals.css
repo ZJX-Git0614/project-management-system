@@ -174,13 +174,13 @@ button:not(:disabled),
 }
 
 @keyframes app-dialog-enter {
-  from { opacity: 0; transform: translate(-50%, calc(-50% + 4px)) scale(.985); }
-  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  from { opacity: 0; transform: translateY(4px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 @keyframes app-dialog-exit {
-  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-  to { opacity: 0; transform: translate(-50%, calc(-50% + 2px)) scale(.992); }
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(2px) scale(.992); }
 }
 
 @keyframes app-modal-enter {
@@ -925,6 +925,27 @@ button {
 
 button:hover:not(:disabled) {
   background: #171a1f;
+}
+
+button[data-slot="select"][data-variant="ghost"] {
+  min-height: 1.75rem;
+  border-color: transparent !important;
+  background: transparent !important;
+  padding-left: 0.5rem;
+  padding-right: 0.5rem;
+  box-shadow: none;
+  letter-spacing: 0;
+}
+
+button[data-slot="select"][data-variant="ghost"]:hover,
+button[data-slot="select"][data-variant="ghost"][data-state="open"] {
+  border-color: color-mix(in srgb, var(--app-border) 72%, transparent) !important;
+  background: color-mix(in srgb, var(--app-panel-soft) 52%, transparent) !important;
+}
+
+button[data-slot="select"][data-variant="ghost"]:focus-visible {
+  border-color: rgba(59, 130, 246, 0.45) !important;
+  background: color-mix(in srgb, var(--app-panel-soft) 52%, transparent) !important;
 }
 
 button:active:not(:disabled) {

@@ -1,7 +1,12 @@
 # ============ Build Stage ============
-FROM node:20-alpine AS builder
+FROM node:20-bookworm-slim AS builder
 
 WORKDIR /app
+
+# Prisma needs OpenSSL both while generating its engine and at runtime.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
 # 安装依赖
 COPY package.json package-lock.json* ./
@@ -9,13 +14,18 @@ RUN npm ci
 
 # 生成 Prisma Client 并构建
 COPY . .
+RUN mkdir -p public
 RUN npx prisma generate
 RUN npm run build
 
 # ============ Production Stage ============
-FROM node:20-alpine AS runner
+FROM node:20-bookworm-slim AS runner
 
 WORKDIR /app
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends openssl ca-certificates postgresql-client tar \
+  && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1

@@ -26,7 +26,6 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api-client";
 import { emitAssistantSettingsChanged } from "@/lib/assistant-events";
@@ -100,15 +99,27 @@ type ProviderDraft = {
   enabled: boolean;
 };
 
-const EMPTY_PROVIDER: ProviderDraft = {
-  providerKind: "LLM",
+type ProviderModelState = {
+  models: string[];
+  loading: boolean;
+  error: string;
+};
+
+type ProviderModelsResponse = {
+  ok: boolean;
+  message: string;
+  models: string[];
+};
+
+const emptyProvider = (providerKind: ProviderDraft["providerKind"]): ProviderDraft => ({
+  providerKind,
   providerType: "OPENAI_COMPATIBLE",
   name: "",
-  baseUrl: "",
-  model: "",
+  baseUrl: "https://api.openai.com/v1",
+  model: providerKind === "LLM" ? "gpt-4.1-mini" : "text-embedding-3-small",
   apiKey: "",
   enabled: true,
-};
+});
 
 const TAB_ITEMS: Array<{ id: SettingsTab; label: string; icon: typeof Bot }> = [
   { id: "BASIC", label: "基础与人设", icon: Sparkles },
@@ -149,9 +160,13 @@ export default function AssistantSettingsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [providerOpen, setProviderOpen] = useState(false);
-  const [providerDraft, setProviderDraft] = useState<ProviderDraft>(EMPTY_PROVIDER);
+  const [providerDraft, setProviderDraft] = useState<ProviderDraft>(() => emptyProvider("LLM"));
   const [providerSaving, setProviderSaving] = useState(false);
   const [busyProviderId, setBusyProviderId] = useState<string | null>(null);
+  const [providerModels, setProviderModels] = useState<Record<string, ProviderModelState>>({});
+  const [providerDraftModels, setProviderDraftModels] = useState<string[]>([]);
+  const [providerDraftModelsLoading, setProviderDraftModelsLoading] = useState(false);
+  const [providerDraftModelsError, setProviderDraftModelsError] = useState("");
   const [ragToken, setRagToken] = useState("");
 
   const load = useCallback(async () => {
@@ -192,13 +207,64 @@ export default function AssistantSettingsPage() {
     }
   };
 
-  const openNewProvider = () => {
-    setProviderDraft(EMPTY_PROVIDER);
+  const refreshProviderModels = useCallback(async (provider: ProviderItem, announce = false) => {
+    setProviderModels((current) => ({
+      ...current,
+      [provider.id]: { models: current[provider.id]?.models ?? [provider.model], loading: true, error: "" },
+    }));
+    try {
+      const result = await api.get<ProviderModelsResponse>(`/api/admin/assistant-settings/providers/${provider.id}/models`);
+      const models = Array.from(new Set([provider.model, ...result.models].filter(Boolean)));
+      setProviderModels((current) => ({
+        ...current,
+        [provider.id]: { models, loading: false, error: result.ok ? "" : result.message },
+      }));
+      if (announce) notify(result.message, result.ok ? "success" : "warning");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "模型列表获取失败";
+      setProviderModels((current) => ({
+        ...current,
+        [provider.id]: { models: [provider.model], loading: false, error: message },
+      }));
+      if (announce) notify(message, "warning");
+    }
+  }, [notify]);
+
+  useEffect(() => {
+    if (tab !== "PROVIDERS" || !data) return;
+    data.providers.forEach((provider) => {
+      if (!providerModels[provider.id]) void refreshProviderModels(provider);
+    });
+  }, [data, providerModels, refreshProviderModels, tab]);
+
+  const fetchDraftModels = async (candidate: ProviderDraft = providerDraft) => {
+    setProviderDraftModelsLoading(true);
+    setProviderDraftModelsError("");
+    try {
+      const result = await api.post<ProviderModelsResponse>("/api/admin/assistant-settings/providers/models", candidate);
+      const models = result.ok ? Array.from(new Set([candidate.model, ...result.models].filter(Boolean))) : [];
+      setProviderDraftModels(models);
+      setProviderDraftModelsError(result.ok ? "" : result.message);
+      notify(result.message, result.ok ? "success" : "warning");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "模型列表获取失败";
+      setProviderDraftModels([]);
+      setProviderDraftModelsError(message);
+      notify(message, "warning");
+    } finally {
+      setProviderDraftModelsLoading(false);
+    }
+  };
+
+  const openNewProvider = (providerKind: ProviderDraft["providerKind"]) => {
+    setProviderDraft(emptyProvider(providerKind));
+    setProviderDraftModels([]);
+    setProviderDraftModelsError("");
     setProviderOpen(true);
   };
 
   const openEditProvider = (provider: ProviderItem) => {
-    setProviderDraft({
+    const nextDraft: ProviderDraft = {
       id: provider.id,
       providerKind: provider.providerKind,
       providerType: provider.providerType,
@@ -207,7 +273,10 @@ export default function AssistantSettingsPage() {
       model: provider.model,
       apiKey: "",
       enabled: provider.enabled,
-    });
+    };
+    setProviderDraft(nextDraft);
+    setProviderDraftModels(providerModels[provider.id]?.error ? [] : providerModels[provider.id]?.models ?? [provider.model]);
+    setProviderDraftModelsError(providerModels[provider.id]?.error ?? "");
     setProviderOpen(true);
   };
 
@@ -230,7 +299,25 @@ export default function AssistantSettingsPage() {
     }
   };
 
-  const providerAction = async (provider: ProviderItem, action: "test" | "activate" | "delete" | "models") => {
+  const updateProviderModel = async (provider: ProviderItem, model: string) => {
+    if (!model || model === provider.model) return;
+    setBusyProviderId(provider.id);
+    try {
+      await api.patch(`/api/admin/assistant-settings/providers/${provider.id}`, { model });
+      setData((current) => current ? {
+        ...current,
+        providers: current.providers.map((item) => item.id === provider.id ? { ...item, model } : item),
+      } : current);
+      emitAssistantSettingsChanged();
+      notify(`默认模型已切换为 ${model}`, "success");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "默认模型更新失败", "error");
+    } finally {
+      setBusyProviderId(null);
+    }
+  };
+
+  const providerAction = async (provider: ProviderItem, action: "test" | "activate" | "delete") => {
     if (action === "delete" && !(await confirm(`确认删除供应商「${provider.name}」？`))) return;
     setBusyProviderId(provider.id);
     try {
@@ -240,9 +327,6 @@ export default function AssistantSettingsPage() {
       } else if (action === "activate") {
         const result = await api.post<{ message: string }>(`/api/admin/assistant-settings/providers/${provider.id}/activate`);
         notify(result.message, "success");
-      } else if (action === "models") {
-        const result = await api.get<{ ok: boolean; message: string; models: string[] }>(`/api/admin/assistant-settings/providers/${provider.id}/models`);
-        notify(result.models.length ? `可用模型：${result.models.join("、")}` : result.message, result.ok ? "success" : "warning");
       } else {
         const result = await api.post<{ ok: boolean; message: string }>(`/api/admin/assistant-settings/providers/${provider.id}/test`);
         notify(result.message, result.ok ? "success" : "error");
@@ -320,7 +404,81 @@ export default function AssistantSettingsPage() {
       )}
 
       {tab === "PROVIDERS" && (
-        <Card><CardHeader className="flex-row items-center justify-between"><div><CardTitle className="text-sm">模型供应商</CardTitle><CardDescription className="text-xs">大语言模型与向量模型</CardDescription></div><Button size="sm" onClick={openNewProvider}><Plus />新增供应商</Button></CardHeader><CardContent><Table><TableHeader><TableRow><TableHead>用途</TableHead><TableHead>供应商</TableHead><TableHead>协议</TableHead><TableHead>模型</TableHead><TableHead>状态</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader><TableBody>{data.providers.map((provider) => { const active = draft.activeLlmProviderId === provider.id || draft.activeEmbeddingProviderId === provider.id; return <TableRow key={provider.id}><TableCell><Badge variant="outline">{provider.providerKind === "LLM" ? "大语言模型" : "向量模型"}</Badge></TableCell><TableCell><button type="button" className="font-medium hover:text-primary" onClick={() => openEditProvider(provider)}>{provider.name}</button><div className="max-w-[260px] truncate text-[10px] text-muted-foreground">{provider.baseUrl}</div></TableCell><TableCell>{provider.providerType === "OLLAMA" ? "Ollama" : "OpenAI 兼容"}</TableCell><TableCell>{provider.model}</TableCell><TableCell>{active ? <Badge variant="success">使用中</Badge> : provider.enabled ? <Badge variant="secondary">可用</Badge> : <Badge variant="outline">停用</Badge>}</TableCell><TableCell><div className="flex justify-end gap-1"><Button variant="ghost" size="sm" disabled={busyProviderId === provider.id} onClick={() => void providerAction(provider, "test")}>测试</Button><Button variant="ghost" size="sm" disabled={active || busyProviderId === provider.id} onClick={() => void providerAction(provider, "activate")}>启用</Button><Button variant="ghost" size="icon" disabled={active || busyProviderId === provider.id} onClick={() => void providerAction(provider, "delete")} title="删除供应商"><Trash2 /></Button></div></TableCell></TableRow>; })}</TableBody></Table></CardContent></Card>
+        <div className="grid gap-4 xl:grid-cols-2">
+          {(["LLM", "EMBEDDING"] as const).map((providerKind) => {
+            const providers = data.providers.filter((provider) => provider.providerKind === providerKind);
+            const activeProviderId = providerKind === "LLM" ? draft.activeLlmProviderId : draft.activeEmbeddingProviderId;
+            const KindIcon = providerKind === "LLM" ? BrainCircuit : Database;
+            return (
+              <Card key={providerKind} className="min-w-0">
+                <CardHeader className="flex-row items-start justify-between gap-3 pb-3">
+                  <div className="flex min-w-0 items-start gap-2.5">
+                    <div className="grid size-8 shrink-0 place-items-center rounded-md border border-primary/20 bg-primary/[0.07] text-primary"><KindIcon className="size-4" /></div>
+                    <div>
+                      <CardTitle className="text-sm">{providerKind === "LLM" ? "LLM 大语言模型" : "Embedding 向量模型"}</CardTitle>
+                      <CardDescription className="mt-1 text-xs">{providerKind === "LLM" ? "负责对话理解、分析与回复生成" : "负责知识库向量化与语义检索"}</CardDescription>
+                    </div>
+                  </div>
+                  <Button variant="outline" size="sm" className="shrink-0" onClick={() => openNewProvider(providerKind)}><Plus />新增</Button>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {providers.map((provider) => {
+                    const active = activeProviderId === provider.id;
+                    const modelState = providerModels[provider.id];
+                    const modelOptions = Array.from(new Set([provider.model, ...(modelState?.models ?? [])].filter(Boolean)));
+                    return (
+                      <div key={provider.id} className="rounded-md border border-border bg-background/25 p-3 transition-colors hover:border-primary/25">
+                        <div className="flex min-w-0 items-start justify-between gap-3">
+                          <button type="button" className="min-w-0 text-left" onClick={() => openEditProvider(provider)}>
+                            <span className="flex items-center gap-2">
+                              <span className="truncate text-sm font-semibold hover:text-primary">{provider.name}</span>
+                              {active ? <Badge variant="success">当前默认</Badge> : provider.enabled ? <Badge variant="secondary">可用</Badge> : <Badge variant="outline">停用</Badge>}
+                            </span>
+                            <span className="mt-1 block truncate text-[10px] text-muted-foreground">{provider.providerType === "OLLAMA" ? "Ollama" : "OpenAI 兼容"} · {provider.baseUrl}</span>
+                          </button>
+                          <div className="flex shrink-0 items-center gap-1">
+                            <Button variant="ghost" size="sm" disabled={busyProviderId === provider.id} onClick={() => void providerAction(provider, "test")}>测试</Button>
+                            {!active && <Button variant="ghost" size="sm" disabled={!provider.enabled || busyProviderId === provider.id} onClick={() => void providerAction(provider, "activate")}>设为默认</Button>}
+                            <Button variant="ghost" size="icon" disabled={active || busyProviderId === provider.id} onClick={() => void providerAction(provider, "delete")} title="删除供应商"><Trash2 /></Button>
+                          </div>
+                        </div>
+                        <div className="mt-3 grid gap-1.5">
+                          <Label className="text-[11px] text-muted-foreground">默认模型</Label>
+                          <div className="flex min-w-0 items-center gap-1.5">
+                            <Select
+                              className="min-w-0 flex-1"
+                              value={provider.model}
+                              disabled={!provider.enabled || busyProviderId === provider.id || modelState?.loading}
+                              onChange={(event) => void updateProviderModel(provider, event.target.value)}
+                            >
+                              {modelOptions.map((model) => <option key={model} value={model}>{model}</option>)}
+                            </Select>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="size-9 shrink-0"
+                              disabled={modelState?.loading}
+                              onClick={() => void refreshProviderModels(provider, true)}
+                              title="重新获取模型列表"
+                            >
+                              <RefreshCw className={cn("size-3.5", modelState?.loading && "animate-spin")} />
+                            </Button>
+                          </div>
+                          {modelState?.error && <span className="text-[10px] text-amber-500">{modelState.error}，当前模型仍可继续使用。</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {providers.length === 0 && (
+                    <div className="grid min-h-28 place-items-center rounded-md border border-dashed border-border text-center text-xs text-muted-foreground">
+                      尚未配置{providerKind === "LLM" ? "大语言模型" : "向量模型"}供应商
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
       )}
 
       {tab === "KNOWLEDGE" && (
@@ -335,7 +493,82 @@ export default function AssistantSettingsPage() {
         <Card><CardHeader className="flex-row items-center justify-between"><div><CardTitle className="text-sm">设置历史</CardTitle><CardDescription className="text-xs">保留 {draft.historyRetentionDays} 天会话记录</CardDescription></div><div className="flex gap-2"><Button variant="outline" size="sm" onClick={() => void clearHistory("chat")}>清空会话</Button><Button variant="destructive" size="sm" onClick={() => void clearHistory("settings")}>清空设置历史</Button></div></CardHeader><CardContent><Field label="会话保留天数"><Input className="max-w-40" type="number" value={draft.historyRetentionDays} onChange={(event) => setDraft({ ...draft, historyRetentionDays: Number(event.target.value) })} /></Field><div className="mt-4 divide-y divide-border rounded-md border border-border">{data.history.map((item) => <div key={item.id} className="grid gap-1 px-3 py-2.5 text-xs md:grid-cols-[150px_120px_minmax(0,1fr)]"><span className="text-muted-foreground">{new Date(item.createdAt).toLocaleString("zh-CN")}</span><span className="font-medium">{item.operator || "系统"}</span><span>{item.summary}</span></div>)}{data.history.length === 0 && <div className="py-10 text-center text-sm text-muted-foreground">暂无设置记录</div>}</div></CardContent></Card>
       )}
 
-      <Dialog open={providerOpen} onOpenChange={setProviderOpen}><DialogContent><DialogHeader><DialogTitle>{providerDraft.id ? "编辑供应商" : "新增供应商"}</DialogTitle><DialogDescription>配置 OpenAI 兼容接口或 Ollama 服务</DialogDescription></DialogHeader><div className="grid gap-3"><div className="grid grid-cols-2 gap-3"><Field label="用途"><Select disabled={Boolean(providerDraft.id)} value={providerDraft.providerKind} onChange={(event) => setProviderDraft({ ...providerDraft, providerKind: event.target.value as ProviderDraft["providerKind"] })}><option value="LLM">大语言模型</option><option value="EMBEDDING">向量模型</option></Select></Field><Field label="协议"><Select value={providerDraft.providerType} onChange={(event) => setProviderDraft({ ...providerDraft, providerType: event.target.value as ProviderDraft["providerType"] })}><option value="OPENAI_COMPATIBLE">OpenAI 兼容</option><option value="OLLAMA">Ollama</option></Select></Field></div><Field label="供应商名称"><Input value={providerDraft.name} onChange={(event) => setProviderDraft({ ...providerDraft, name: event.target.value })} /></Field><Field label="接口地址"><Input value={providerDraft.baseUrl} onChange={(event) => setProviderDraft({ ...providerDraft, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" /></Field><Field label="模型名称"><Input value={providerDraft.model} onChange={(event) => setProviderDraft({ ...providerDraft, model: event.target.value })} /></Field><Field label={providerDraft.id ? "API Key（留空保持不变）" : "API Key"}><Input type="password" value={providerDraft.apiKey} onChange={(event) => setProviderDraft({ ...providerDraft, apiKey: event.target.value })} /></Field><SettingToggle checked={providerDraft.enabled} onChange={(enabled) => setProviderDraft({ ...providerDraft, enabled })} label="启用供应商" /></div><DialogFooter><Button variant="ghost" onClick={() => setProviderOpen(false)}>取消</Button><Button disabled={providerSaving || !providerDraft.name || !providerDraft.baseUrl || !providerDraft.model} onClick={() => void saveProvider()}>{providerSaving ? <LoaderCircle className="animate-spin" /> : <Settings2 />}保存</Button></DialogFooter></DialogContent></Dialog>
+      <Dialog open={providerOpen} onOpenChange={setProviderOpen}>
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>{providerDraft.id ? "编辑" : "新增"}{providerDraft.providerKind === "LLM" ? " LLM" : " Embedding"} 供应商</DialogTitle>
+            <DialogDescription>配置接口后自动获取模型列表，并选择该供应商的默认模型。</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="用途">
+                <div className="flex h-9 items-center rounded-md border border-border bg-muted/25 px-3 text-sm">
+                  {providerDraft.providerKind === "LLM" ? "LLM 大语言模型" : "Embedding 向量模型"}
+                </div>
+              </Field>
+              <Field label="协议">
+                <Select
+                  value={providerDraft.providerType}
+                  onChange={(event) => {
+                    setProviderDraft({ ...providerDraft, providerType: event.target.value as ProviderDraft["providerType"] });
+                    setProviderDraftModels([]);
+                    setProviderDraftModelsError("");
+                  }}
+                >
+                  <option value="OPENAI_COMPATIBLE">OpenAI 兼容</option>
+                  <option value="OLLAMA">Ollama</option>
+                </Select>
+              </Field>
+            </div>
+            <Field label="供应商名称">
+              <Input value={providerDraft.name} onChange={(event) => setProviderDraft({ ...providerDraft, name: event.target.value })} />
+            </Field>
+            <Field label="接口地址">
+              <Input value={providerDraft.baseUrl} onChange={(event) => {
+                setProviderDraft({ ...providerDraft, baseUrl: event.target.value });
+                setProviderDraftModels([]);
+                setProviderDraftModelsError("");
+              }} placeholder="https://api.example.com/v1" />
+            </Field>
+            <Field label={providerDraft.id ? "API Key（留空保持不变）" : "API Key"}>
+              <Input type="password" value={providerDraft.apiKey} onChange={(event) => {
+                setProviderDraft({ ...providerDraft, apiKey: event.target.value });
+                setProviderDraftModels([]);
+                setProviderDraftModelsError("");
+              }} />
+            </Field>
+            <Field label="默认模型">
+              <div className="flex items-center gap-2">
+                {providerDraftModels.length > 0 ? (
+                  <Select className="min-w-0 flex-1" value={providerDraft.model} onChange={(event) => setProviderDraft({ ...providerDraft, model: event.target.value })}>
+                    {providerDraftModels.map((model) => <option key={model} value={model}>{model}</option>)}
+                  </Select>
+                ) : (
+                  <Input className="min-w-0 flex-1" value={providerDraft.model} onChange={(event) => setProviderDraft({ ...providerDraft, model: event.target.value })} placeholder="先获取模型，或手动填写模型名称" />
+                )}
+                <Button
+                  variant="outline"
+                  className="shrink-0"
+                  disabled={providerDraftModelsLoading || !providerDraft.baseUrl}
+                  onClick={() => void fetchDraftModels()}
+                >
+                  <RefreshCw className={cn(providerDraftModelsLoading && "animate-spin")} />
+                  获取模型
+                </Button>
+              </div>
+              {providerDraftModelsError && <div className="text-[11px] text-amber-500">{providerDraftModelsError}</div>}
+            </Field>
+            <SettingToggle checked={providerDraft.enabled} onChange={(enabled) => setProviderDraft({ ...providerDraft, enabled })} label="启用供应商" />
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setProviderOpen(false)}>取消</Button>
+            <Button disabled={providerSaving || !providerDraft.name || !providerDraft.baseUrl || !providerDraft.model} onClick={() => void saveProvider()}>
+              {providerSaving ? <LoaderCircle className="animate-spin" /> : <Settings2 />}
+              保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

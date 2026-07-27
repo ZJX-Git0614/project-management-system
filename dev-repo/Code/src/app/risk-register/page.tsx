@@ -24,7 +24,7 @@ type RiskStatus = "识别中" | "跟踪中" | "处理中" | "已关闭";
 type DropPosition = "before" | "after";
 type EditableRiskField =
   | "riskName"
-  | "ganttTaskId"
+  | "weeklyItemId"
   | "category"
   | "trigger"
   | "probability"
@@ -38,8 +38,10 @@ type EditableRiskField =
 interface RiskRegisterItem {
   id: string;
   sortOrder?: number;
+  riskCode: string;
   riskName: string;
-  ganttTaskId?: string | null;
+  weeklyItemId?: string | null;
+  linkedItemCode: string;
   linkedItemName: string;
   category: string;
   trigger: string;
@@ -52,17 +54,17 @@ interface RiskRegisterItem {
   targetDate: string;
 }
 
-interface GanttTaskOption {
+interface ProjectItemOption {
   id: string;
-  taskName: string;
-  taskCode: string;
+  matterCode: string;
+  title: string;
 }
 
 const riskLevelOptions: RiskLevel[] = ["高", "中", "低"];
 const riskStatusOptions: RiskStatus[] = ["识别中", "跟踪中", "处理中", "已关闭"];
 
-const taskOptionLabel = (task: GanttTaskOption) =>
-  task.taskCode ? `${task.taskCode} · ${task.taskName}` : task.taskName;
+const itemOptionLabel = (item: ProjectItemOption) =>
+  item.matterCode ? `${item.matterCode} · ${item.title}` : item.title;
 
 const inlineInputClass = "h-7 min-w-0 rounded border-border bg-background px-2 text-xs";
 const inlineSelectClass = "h-7 min-w-[96px] px-2 text-xs";
@@ -73,7 +75,7 @@ export default function RiskRegisterPage() {
   const confirm = useConfirm();
   const { currentProjectId } = useCurrentProject();
   const [riskItems, setRiskItems] = useState<RiskRegisterItem[]>([]);
-  const [taskOptions, setTaskOptions] = useState<GanttTaskOption[]>([]);
+  const [itemOptions, setItemOptions] = useState<ProjectItemOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingCell, setEditingCell] = useState<{ id: string; field: EditableRiskField } | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -108,10 +110,10 @@ export default function RiskRegisterPage() {
   useEffect(() => { void fetchData(); }, [fetchData]);
 
   useEffect(() => {
-    if (!currentProjectId) { setTaskOptions([]); return; }
-    api.get<GanttTaskOption[]>(`/api/projects/${currentProjectId}/gantt-tasks`)
-      .then((tasks) => setTaskOptions(tasks.filter((t) => t.taskName.trim())))
-      .catch(() => setTaskOptions([]));
+    if (!currentProjectId) { setItemOptions([]); return; }
+    api.get<ProjectItemOption[]>(`/api/weekly-items?projectId=${encodeURIComponent(currentProjectId)}`)
+      .then((items) => setItemOptions(items.filter((item) => item.title.trim())))
+      .catch(() => setItemOptions([]));
   }, [currentProjectId]);
 
   // ---- 编辑态管理 ----
@@ -164,9 +166,8 @@ export default function RiskRegisterPage() {
 
   // ---- 新建 ----
   const openCreate = () => {
-    const firstOption = taskOptions.length > 0 ? taskOptions[0].id : "";
     setDraft({
-      id: "", sortOrder: 0, riskName: "", ganttTaskId: firstOption, linkedItemName: "", category: "", trigger: "",
+      id: "", sortOrder: 0, riskCode: "", riskName: "", weeklyItemId: null, linkedItemCode: "", linkedItemName: "", category: "", trigger: "",
       probability: "中", impact: "中", level: "中", response: "", owner: "",
       status: "识别中", targetDate: "",
     });
@@ -225,7 +226,11 @@ export default function RiskRegisterPage() {
     setReordering(true);
     setRiskItems((prev) => {
       const itemById = new Map(prev.map((item) => [item.id, item]));
-      return nextRiskIds.map((id, index) => ({ ...itemById.get(id)!, sortOrder: index + 1 }));
+      return nextRiskIds.map((id, index) => ({
+        ...itemById.get(id)!,
+        sortOrder: index + 1,
+        riskCode: `Risk${String(index + 1).padStart(3, "0")}`,
+      }));
     });
 
     try {
@@ -326,8 +331,9 @@ export default function RiskRegisterPage() {
             <TableRow>
               {selectionMode && <TableHead className="w-[48px] whitespace-nowrap">选择</TableHead>}
               <TableHead className="w-[64px] whitespace-nowrap">序号</TableHead>
+              <TableHead className="min-w-[96px] whitespace-nowrap">风险ID</TableHead>
               <TableHead className="min-w-[180px] whitespace-nowrap">风险名称</TableHead>
-              <TableHead className="min-w-[200px] whitespace-nowrap">关联事项</TableHead>
+              <TableHead className="min-w-[220px] whitespace-nowrap">关联项目事项</TableHead>
               <TableHead className="whitespace-nowrap">类别</TableHead>
               <TableHead className="min-w-[180px] whitespace-nowrap">触发条件</TableHead>
               <TableHead className="whitespace-nowrap">概率</TableHead>
@@ -345,11 +351,12 @@ export default function RiskRegisterPage() {
               <TableRow className="align-top bg-primary/5">
                 {selectionMode && <TableCell />}
                 <TableCell className="text-xs text-muted-foreground">-</TableCell>
+                <TableCell className="whitespace-nowrap font-mono text-[11px] font-semibold text-muted-foreground">保存后生成</TableCell>
                 <TableCell><Input value={draft.riskName} onChange={(e) => updateDraft("riskName", e.target.value)} className={`${inlineInputClass} min-w-[160px]`} placeholder="风险名称" autoFocus /></TableCell>
                 <TableCell>
-                  <Select value={draft.ganttTaskId ?? ""} onChange={(e) => updateDraft("ganttTaskId", e.target.value)} className={`${inlineSelectClass} min-w-[200px]`}>
+                  <Select value={draft.weeklyItemId ?? ""} onChange={(e) => updateDraft("weeklyItemId", e.target.value)} className={`${inlineSelectClass} min-w-[220px]`}>
                     <option value="">不关联</option>
-                    {taskOptions.map((t) => (<option key={t.id} value={t.id}>{taskOptionLabel(t)}</option>))}
+                    {itemOptions.map((item) => (<option key={item.id} value={item.id}>{itemOptionLabel(item)}</option>))}
                   </Select>
                 </TableCell>
                 <TableCell><Input value={draft.category} onChange={(e) => updateDraft("category", e.target.value)} className={`${inlineInputClass} w-[96px]`} placeholder="类别" /></TableCell>
@@ -416,11 +423,12 @@ export default function RiskRegisterPage() {
                   </TableCell>
                 )}
                 <TableCell className="text-xs tabular-nums text-muted-foreground">{index + 1}</TableCell>
+                <TableCell className="whitespace-nowrap font-mono text-[11px] font-semibold text-muted-foreground">{item.riskCode || `Risk${String(index + 1).padStart(3, "0")}`}</TableCell>
                 <TableCell>{renderTextCell(item, "riskName", item.riskName, `${inlineInputClass} min-w-[160px]`, "风险名称")}</TableCell>
                 <TableCell>
-                  <Select variant="ghost" value={item.ganttTaskId ?? ""} onChange={(e) => commitSelectChange(item.id, "ganttTaskId", e.target.value)} className={`${inlineSelectClass} min-w-[200px]`}>
+                  <Select variant="ghost" value={item.weeklyItemId ?? ""} onChange={(e) => commitSelectChange(item.id, "weeklyItemId", e.target.value)} className={`${inlineSelectClass} min-w-[220px]`} disabled={!canEdit}>
                     <option value="">不关联</option>
-                    {taskOptions.map((t) => (<option key={t.id} value={t.id}>{taskOptionLabel(t)}</option>))}
+                    {itemOptions.map((option) => (<option key={option.id} value={option.id}>{itemOptionLabel(option)}</option>))}
                   </Select>
                 </TableCell>
                 <TableCell>{renderTextCell(item, "category", item.category, `${inlineInputClass} w-[96px]`, "类别")}</TableCell>

@@ -25,13 +25,42 @@ export interface ProjectGanttTask extends BaseEntity {
   taskCategory: string;
   taskName: string;
   startDate: string;
+  finishDate?: string;
   durationDays: number;
+  durationMinutes?: number;
+  durationFormat?: number;
   actualStartDate: string;
   actualEndDate: string;
   progress: number;
   predecessorTask: string;
+  predecessorTaskIds?: string[];
+  predecessorDependencies?: ProjectGanttDependency[];
+  taskMode?: string;
+  isMilestone?: boolean;
+  externalUid?: string;
+  wbsCode?: string;
+  outlineNumber?: string;
+  calendarUid?: string;
+  constraintType?: number | null;
+  constraintDate?: string;
+  baselineStartDate?: string;
+  baselineFinishDate?: string;
+  baselineCost?: number;
+  budgetAtCompletion?: number;
+  actualCost?: number;
+  baselines?: unknown;
   sortOrder: number;
   project?: Pick<Project, "id" | "name" | "code" | "status">;
+}
+
+export interface ProjectGanttDependency extends BaseEntity {
+  projectId: string;
+  predecessorTaskId: string;
+  successorTaskId: string;
+  type: number;
+  lag: number;
+  lagFormat: number;
+  predecessorTask?: Pick<ProjectGanttTask, "id" | "taskCode" | "taskName">;
 }
 
 export interface ProjectBudgetCategory extends BaseEntity {
@@ -158,7 +187,9 @@ export interface OperationHistory extends BaseEntity {
     | "PROJECT"
     | "PROJECT_MEMBER"
     | "PROJECT_GANTT_TASK"
-    | "PROJECT_BUDGET_ITEM";
+    | "PROJECT_BUDGET_ITEM"
+    | "PROJECT_GANTT_IMPORT"
+    | "PROJECT_EARNED_VALUE";
   entityId: string;
   actionType: "CREATE" | "UPDATE" | "DELETE" | "STATUS_CHANGED";
   operator: string;

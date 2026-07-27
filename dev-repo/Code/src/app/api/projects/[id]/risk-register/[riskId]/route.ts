@@ -1,7 +1,8 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { getUserFromRequest } from "@/lib/auth"
-import { ok, unauthorized, notFound } from "@/lib/api-utils"
+import { ok, err, unauthorized, notFound } from "@/lib/api-utils"
+import { renumberRiskCodes } from "@/lib/risk-register-codes"
 
 const PUTTABLE_FIELDS = [
   "riskName", "category", "trigger",
@@ -26,31 +27,32 @@ export async function PUT(
     if (body[k] !== undefined) updateData[k] = body[k]
   }
 
-  if (body.ganttTaskId !== undefined) {
-    const requestedTaskId = typeof body.ganttTaskId === "string" ? body.ganttTaskId.trim() : ""
-    const linkedTask = requestedTaskId
-      ? await prisma.projectGanttTask.findFirst({
-          where: { id: requestedTaskId, projectId: existing.projectId },
-          select: { id: true, taskName: true },
+  if (body.weeklyItemId !== undefined) {
+    const requestedWeeklyItemId = typeof body.weeklyItemId === "string" ? body.weeklyItemId.trim() : ""
+    const linkedItem = requestedWeeklyItemId
+      ? await prisma.weeklyItem.findFirst({
+          where: { id: requestedWeeklyItemId, projectId: existing.projectId },
+          select: { id: true, matterCode: true, title: true },
         })
       : null
-    if (requestedTaskId && !linkedTask) return notFound("关联任务")
-    updateData.ganttTaskId = linkedTask?.id ?? null
-    updateData.linkedItemName = linkedTask?.taskName ?? ""
-  } else if (body.linkedItemName !== undefined) {
-    updateData.linkedItemName = body.linkedItemName
+    if (requestedWeeklyItemId && !linkedItem) return err("关联事项不存在或不属于当前项目")
+    updateData.weeklyItemId = linkedItem?.id ?? null
+    updateData.ganttTaskId = null
+    updateData.linkedItemName = ""
   }
 
   const item = await prisma.riskRegisterItem.update({
     where: { id: riskId },
     data: updateData,
-    include: { ganttTask: { select: { id: true, taskName: true } } },
+    include: { weeklyItem: { select: { id: true, matterCode: true, title: true } } },
   })
 
+  const { weeklyItem, ...risk } = item
   return ok({
-    ...item,
-    ganttTaskId: item.ganttTaskId ?? null,
-    linkedItemName: item.ganttTask?.taskName ?? item.linkedItemName,
+    ...risk,
+    weeklyItemId: item.weeklyItemId ?? null,
+    linkedItemCode: weeklyItem?.matterCode ?? "",
+    linkedItemName: weeklyItem?.title ?? "",
   })
 }
 
@@ -66,7 +68,21 @@ export async function DELETE(
   const existing = await prisma.riskRegisterItem.findFirst({ where: { id: riskId, projectId: id } })
   if (!existing) return notFound("风险条目")
 
-  await prisma.riskRegisterItem.delete({ where: { id: riskId } })
+  await prisma.$transaction(async (tx) => {
+    await tx.riskRegisterItem.delete({ where: { id: riskId } })
+    const remainingItems = await tx.riskRegisterItem.findMany({
+      where: { projectId: id },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+      select: { id: true, riskCode: true, sortOrder: true, createdAt: true },
+    })
+    const renumberedItems = renumberRiskCodes(
+      remainingItems.map((item, index) => ({ ...item, sortOrder: index + 1 })),
+    )
+    await Promise.all(renumberedItems.map((item) => tx.riskRegisterItem.update({
+      where: { id: item.id },
+      data: { sortOrder: item.sortOrder, riskCode: item.riskCode },
+    })))
+  })
 
   return ok({ message: "已删除" })
 }

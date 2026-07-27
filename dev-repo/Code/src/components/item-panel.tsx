@@ -15,6 +15,7 @@ import { usePermission } from "@/lib/use-permission";
 import { useConfirm } from "@/components/confirm-provider";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select } from "@/components/ui/select";
@@ -79,6 +80,7 @@ interface ItemRecord {
   risk: string;
   riskStatus: ItemRiskStatus;
   remark: string;
+  linkedRisks: LinkedRisk[];
   createdAt: string;
   updatedAt: string;
   project?: {
@@ -88,6 +90,31 @@ interface ItemRecord {
     status: string;
   };
 }
+
+interface LinkedRisk {
+  id: string;
+  riskCode: string;
+  riskName: string;
+  weeklyItemId?: string | null;
+  linkedItemCode: string;
+  linkedItemName: string;
+  category: string;
+  trigger: string;
+  probability: string;
+  impact: string;
+  level: string;
+  response: string;
+  owner: string;
+  status: string;
+  targetDate: string;
+}
+
+const RiskDetailField = ({ label, value, wide = false }: { label: string; value?: string; wide?: boolean }) => (
+  <div className={cn("min-w-0 border-b border-border/60 py-2.5", wide && "md:col-span-2")}>
+    <div className="text-[11px] text-muted-foreground">{label}</div>
+    <div className="mt-1 whitespace-pre-wrap break-words text-sm">{value || "-"}</div>
+  </div>
+);
 
 type EditableField =
   | "title"
@@ -103,8 +130,7 @@ type EditableField =
   | "status"
   | "health"
   | "issueAndAction"
-  | "dependency"
-  | "risk";
+  | "dependency";
 
 interface ProjectGanttTaskOption {
   id: string;
@@ -143,8 +169,22 @@ const DATE_CELL = (s?: string) => (s && s.length >= 10 ? s.slice(5) : "-");
 const INLINE_INPUT_CLASS = "h-7 min-w-0 rounded border-border bg-background px-2 text-xs";
 const INLINE_SELECT_CLASS = "h-7 min-w-0 rounded border-border bg-background px-2 text-xs";
 const GHOST_SELECT_CLASS = "h-7 px-2 text-xs";
-const PRIORITY_SELECT_CLASS = "h-7 !w-[76px] !min-w-[76px] !max-w-[76px] px-2 text-xs";
+const PRIORITY_SELECT_CLASS = "h-7 !w-[88px] !min-w-[88px] !max-w-[88px] px-2 text-xs";
 const INLINE_TEXTAREA_CLASS = "min-h-14 min-w-[160px] resize-y rounded border-border bg-background px-2 py-1 text-xs";
+const ITEM_LONG_TEXT_HEADER_CLASS = "w-[200px] min-w-[200px] max-w-[200px] !whitespace-normal";
+const ITEM_LONG_TEXT_CELL_CLASS = "w-[200px] min-w-[200px] max-w-[200px] overflow-hidden !whitespace-normal align-top !text-[10px] !leading-4";
+const ITEM_LONG_TEXT_EDITOR_CLASS = "!h-[52px] !min-h-[52px] !max-h-[52px] !w-full !min-w-0 !max-w-full resize-none overflow-y-auto rounded border-border bg-background px-2 py-1 !text-[10px] !leading-4";
+const FROZEN_HEADER_CLASS = "sticky z-40 !bg-muted";
+const FROZEN_CELL_CLASS = "sticky z-20";
+const FROZEN_EDGE_HEADER_CLASS = `${FROZEN_HEADER_CLASS} border-r border-border shadow-[5px_0_10px_-9px_hsl(var(--foreground))]`;
+const FROZEN_EDGE_CELL_CLASS = `${FROZEN_CELL_CLASS} border-r border-border shadow-[5px_0_10px_-9px_hsl(var(--foreground))]`;
+const ACTION_HEADER_CLASS = "sticky right-0 z-50 isolate w-[120px] min-w-[120px] max-w-[120px] overflow-hidden whitespace-nowrap border-l border-border !bg-muted shadow-[-5px_0_10px_-9px_hsl(var(--foreground))]";
+const ACTION_CELL_CLASS = "sticky right-0 z-40 isolate w-[120px] min-w-[120px] max-w-[120px] overflow-hidden border-l border-border shadow-[-5px_0_10px_-9px_hsl(var(--foreground))]";
+const FROZEN_ACTIVE_ROW_BACKGROUND = "!bg-[#0c101a]";
+const frozenDataRowBackground = (index: number) =>
+  index % 2 === 0
+    ? "!bg-background group-hover:!bg-[#0c101a]"
+    : "!bg-[#0e1014] group-hover:!bg-[#0c101a]";
 const CURRENT_VIEW_ID = "__current__";
 type DropPosition = "before" | "after";
 
@@ -187,6 +227,7 @@ export const ItemPanel = ({
   const [draggedItemId, setDraggedItemId] = useState<string | null>(null);
   const [itemDropTarget, setItemDropTarget] = useState<{ id: string; position: DropPosition } | null>(null);
   const [reordering, setReordering] = useState(false);
+  const [selectedRisk, setSelectedRisk] = useState<LinkedRisk | null>(null);
 
   const canView = can(`${kind}-items:view`);
   const canCreate = can(`${kind}-items:create`);
@@ -194,7 +235,10 @@ export const ItemPanel = ({
   const canDelete = can(`${kind}-items:delete`);
   const canExport = can(`${kind}-items:export`);
   const isWeekly = kind === "weekly";
-  const tableColSpan = (isWeekly ? 20 : 18) + (selectionMode ? 1 : 0);
+  const tableColSpan = (isWeekly ? 18 : 17) + (selectionMode ? 1 : 0);
+  const sequenceColumnLeft = selectionMode ? 48 : 0;
+  const matterCodeColumnLeft = sequenceColumnLeft + 64;
+  const titleColumnLeft = matterCodeColumnLeft + (isWeekly ? 120 : 0);
   const savedViewStorageKey = `pms.saved-views.item.${kind}`;
 
   useEffect(() => {
@@ -285,8 +329,11 @@ export const ItemPanel = ({
     }
     setLoading(true);
     try {
+      const dateQuery = dateRange.start || dateRange.end
+        ? `?startDate=${encodeURIComponent(dateRange.start)}&endDate=${encodeURIComponent(dateRange.end)}`
+        : "";
       const [itemList, projectList] = await Promise.all([
-        api.get<ItemRecord[]>(`${apiPath}?startDate=${dateRange.start}&endDate=${dateRange.end}`),
+        api.get<ItemRecord[]>(`${apiPath}${dateQuery}`),
         api.get<Project[]>("/api/projects"),
       ]);
       setItems(itemList);
@@ -346,12 +393,10 @@ export const ItemPanel = ({
 
   const handleExport = () => {
     const rows = sorted.map((it, index) => {
-      const p = projects.find((pp) => pp.id === it.projectId);
       const startDev = diffDays(it.plannedStartDate, it.actualStartDate);
       return [
         String(index + 1),
         ...(isWeekly ? [it.matterCode || "-", it.title, it.taskName || "-"] : [it.title]),
-        p ? `${p.name}(${p.code})` : "-",
         it.owner,
         ITEM_PRIORITY_LABEL[it.priority as ItemPriority] ?? it.priority,
         it.plannedStartDate || "-",
@@ -364,7 +409,7 @@ export const ItemPanel = ({
         ITEM_HEALTH_LABEL[it.health as ItemHealth] ?? it.health,
         it.issueAndAction || "-",
         it.dependency || "-",
-        it.risk || "-",
+        it.linkedRisks?.map((risk) => `${risk.riskCode} · ${risk.riskName}`).join("；") || "-",
         ITEM_RISK_STATUS_LABEL[it.riskStatus as ItemRiskStatus] ?? it.riskStatus,
         it.remark || "-",
       ];
@@ -415,6 +460,7 @@ export const ItemPanel = ({
       risk: "",
       riskStatus: ItemRiskStatus.NONE,
       remark: "",
+      linkedRisks: [],
       createdAt: "",
       updatedAt: "",
       project: currentProject
@@ -471,8 +517,8 @@ export const ItemPanel = ({
       return prev.map((item) => (item.id === updated.id ? updated : item));
     });
     try {
-      const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, ...payload } = updated;
-      void _id; void _ca; void _ua; void _p; void _mc;
+      const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, linkedRisks: _lr, ...payload } = updated;
+      void _id; void _ca; void _ua; void _p; void _mc; void _lr;
       await api.put(`${apiPath}/${updated.id}`, payload);
       flushSync(() => {
         cancelEdit();
@@ -593,8 +639,8 @@ export const ItemPanel = ({
     }
     setSaving(true);
     try {
-      const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, ...payload } = draft;
-      void _id; void _ca; void _ua; void _p; void _mc;
+      const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, linkedRisks: _lr, ...payload } = draft;
+      void _id; void _ca; void _ua; void _p; void _mc; void _lr;
       await api.post(apiPath, payload);
       clearDraft();
       await fetchData();
@@ -613,8 +659,8 @@ export const ItemPanel = ({
     }
     setSaving(true);
     try {
-      const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, ...payload } = draft;
-      void _id; void _ca; void _ua; void _p; void _mc;
+      const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, linkedRisks: _lr, ...payload } = draft;
+      void _id; void _ca; void _ua; void _p; void _mc; void _lr;
       await api.put(`${apiPath}/${draft.id}`, payload);
       cancelEdit();
       await fetchData();
@@ -731,7 +777,8 @@ export const ItemPanel = ({
             <div>
               <CardTitle className="text-sm">{title}</CardTitle>
               <CardDescription className="text-xs">
-                {description} · 时间窗口 {dateRange.start} ~ {dateRange.end}
+                {description}
+                {dateRange.start && dateRange.end ? ` · 时间窗口 ${dateRange.start} ~ ${dateRange.end}` : ""}
               </CardDescription>
             </div>
           </div>
@@ -903,14 +950,34 @@ export const ItemPanel = ({
             <Table>
               <TableHeader>
                 <TableRow>
-                  {selectionMode && <TableHead className="w-[48px] whitespace-nowrap">选择</TableHead>}
-                  <TableHead className="w-[64px] whitespace-nowrap">序号</TableHead>
-                  {isWeekly && <TableHead className="whitespace-nowrap">事项ID</TableHead>}
-                  <TableHead className="whitespace-nowrap min-w-[200px]">事项名称</TableHead>
+                  {selectionMode && (
+                    <TableHead className={`${FROZEN_HEADER_CLASS} left-0 w-[48px] min-w-[48px] max-w-[48px] whitespace-nowrap`}>
+                      选择
+                    </TableHead>
+                  )}
+                  <TableHead
+                    className={`${FROZEN_HEADER_CLASS} w-[64px] min-w-[64px] max-w-[64px] whitespace-nowrap`}
+                    style={{ left: sequenceColumnLeft }}
+                  >
+                    序号
+                  </TableHead>
+                  {isWeekly && (
+                    <TableHead
+                      className={`${FROZEN_HEADER_CLASS} w-[120px] min-w-[120px] max-w-[120px] whitespace-nowrap`}
+                      style={{ left: matterCodeColumnLeft }}
+                    >
+                      事项ID
+                    </TableHead>
+                  )}
+                  <TableHead
+                    className={`${FROZEN_EDGE_HEADER_CLASS} w-[320px] min-w-[320px] max-w-[320px] whitespace-nowrap`}
+                    style={{ left: titleColumnLeft }}
+                  >
+                    事项名称
+                  </TableHead>
                   {isWeekly && <TableHead className="whitespace-nowrap min-w-[140px]">关联任务名称</TableHead>}
-                  <TableHead className="whitespace-nowrap min-w-[160px]">归属方</TableHead>
                   <TableHead className="whitespace-nowrap min-w-[150px]">责任人</TableHead>
-                  <TableHead className="whitespace-nowrap">优先级</TableHead>
+                  <TableHead className="min-w-[88px] whitespace-nowrap">优先级</TableHead>
                   <TableHead className="whitespace-nowrap">计划<br/>开始时间</TableHead>
                   <TableHead className="whitespace-nowrap">计划<br/>结束时间</TableHead>
                   <TableHead className="whitespace-nowrap">实际<br/>开始时间</TableHead>
@@ -919,24 +986,37 @@ export const ItemPanel = ({
                   <TableHead className="whitespace-nowrap min-w-[90px]">进度</TableHead>
                   <TableHead className="whitespace-nowrap">状态</TableHead>
                   <TableHead className="whitespace-nowrap min-w-[140px]">健康</TableHead>
-                  <TableHead className="whitespace-nowrap min-w-[120px]">当前问题/措施</TableHead>
-                  <TableHead className="whitespace-nowrap min-w-[120px]">依赖条件</TableHead>
-                  <TableHead className="whitespace-nowrap">风险</TableHead>
-                  <TableHead className="whitespace-nowrap min-w-[120px] sticky right-0 bg-card">操作</TableHead>
+                  <TableHead className={ITEM_LONG_TEXT_HEADER_CLASS}>当前问题/措施</TableHead>
+                  <TableHead className={ITEM_LONG_TEXT_HEADER_CLASS}>依赖条件</TableHead>
+                  <TableHead className="w-[220px] min-w-[220px] max-w-[220px] whitespace-nowrap">风险</TableHead>
+                  <TableHead className={ACTION_HEADER_CLASS}>操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {draft && editingId === null && (
-                  <TableRow className="h-8 align-top bg-primary/5">
-                    {selectionMode && <TableCell className="text-xs" />}
-                    <TableCell className="text-xs text-muted-foreground">-</TableCell>
+                  <TableRow className="group h-8 align-top bg-primary/5">
+                    {selectionMode && <TableCell className={`${FROZEN_CELL_CLASS} ${FROZEN_ACTIVE_ROW_BACKGROUND} left-0 w-[48px] min-w-[48px] max-w-[48px] text-xs`} />}
+                    <TableCell
+                      className={`${FROZEN_CELL_CLASS} ${FROZEN_ACTIVE_ROW_BACKGROUND} w-[64px] min-w-[64px] max-w-[64px] text-xs text-muted-foreground`}
+                      style={{ left: sequenceColumnLeft }}
+                    >
+                      -
+                    </TableCell>
                     {isWeekly && (
-                      <TableCell className="whitespace-nowrap font-mono text-xs font-semibold text-muted-foreground">
-                        保存后生成
+                      <TableCell
+                        className={`${FROZEN_CELL_CLASS} ${FROZEN_ACTIVE_ROW_BACKGROUND} w-[120px] min-w-[120px] max-w-[120px] whitespace-nowrap`}
+                        style={{ left: matterCodeColumnLeft }}
+                      >
+                        <span className="font-mono text-[11px] font-semibold text-muted-foreground">
+                          保存后生成
+                        </span>
                       </TableCell>
                     )}
-                    <TableCell>
-                      <div className="flex min-w-[220px] flex-col gap-1">
+                    <TableCell
+                      className={`${FROZEN_EDGE_CELL_CLASS} ${FROZEN_ACTIVE_ROW_BACKGROUND} w-[320px] min-w-[320px] max-w-[320px]`}
+                      style={{ left: titleColumnLeft }}
+                    >
+                      <div className="flex min-w-0 flex-col gap-1">
                         <Input
                           value={draft.title}
                           onChange={(e) => updateDraft("title", e.target.value)}
@@ -971,14 +1051,6 @@ export const ItemPanel = ({
                         </Select>
                       </TableCell>
                     )}
-                    <TableCell className="text-xs">
-                      {currentProject ? (
-                        <>
-                          <div className="font-medium">{currentProject.name}</div>
-                          <div className="text-[10px] text-muted-foreground">{currentProject.code}</div>
-                        </>
-                      ) : "-"}
-                    </TableCell>
                     <TableCell className="text-xs min-w-[150px]">
                       <Select
                         value={draft.owner}
@@ -1084,31 +1156,26 @@ export const ItemPanel = ({
                         ))}
                       </Select>
                     </TableCell>
-                    <TableCell className="text-xs whitespace-pre-wrap break-words max-w-[200px]">
+                    <TableCell className={ITEM_LONG_TEXT_CELL_CLASS}>
                       <Textarea
                         value={draft.issueAndAction}
                         onChange={(e) => updateDraft("issueAndAction", e.target.value)}
                         onKeyDown={handleCreateKeyDown}
-                        className={INLINE_TEXTAREA_CLASS}
+                        className={ITEM_LONG_TEXT_EDITOR_CLASS}
                       />
                     </TableCell>
-                    <TableCell className="text-xs whitespace-pre-wrap break-words max-w-[160px]">
+                    <TableCell className={ITEM_LONG_TEXT_CELL_CLASS}>
                       <Textarea
                         value={draft.dependency}
                         onChange={(e) => updateDraft("dependency", e.target.value)}
                         onKeyDown={handleCreateKeyDown}
-                        className={INLINE_TEXTAREA_CLASS}
+                        className={ITEM_LONG_TEXT_EDITOR_CLASS}
                       />
                     </TableCell>
-                    <TableCell className="text-xs whitespace-pre-wrap break-words max-w-[160px]">
-                      <Textarea
-                        value={draft.risk}
-                        onChange={(e) => updateDraft("risk", e.target.value)}
-                        onKeyDown={handleCreateKeyDown}
-                        className={INLINE_TEXTAREA_CLASS}
-                      />
+                    <TableCell className="w-[220px] min-w-[220px] max-w-[220px] overflow-hidden text-[11px] text-muted-foreground">
+                      由风险登记册关联
                     </TableCell>
-                    <TableCell className="sticky right-0 bg-card">
+                    <TableCell className={`${ACTION_CELL_CLASS} ${FROZEN_ACTIVE_ROW_BACKGROUND}`}>
                       <div className="flex items-center gap-1">
                         <Button
                           size="sm"
@@ -1146,6 +1213,7 @@ export const ItemPanel = ({
                   const devText = (n: number | null) =>
                     n === null ? null : n === 0 ? "0" : n > 0 ? `+${n}天` : `${n}天`;
                   const isEditingField = (field: EditableField) => editing && editingField === field;
+                  const frozenRowBackground = editing ? FROZEN_ACTIVE_ROW_BACKGROUND : frozenDataRowBackground(index);
                   return (
                     <TableRow
                       key={item.id}
@@ -1171,10 +1239,10 @@ export const ItemPanel = ({
                       }}
                       className={
                         editing
-                          ? "h-8 align-top bg-primary/5"
+                          ? "group h-8 align-top bg-primary/5"
                           : canEdit
                             ? [
-                                "h-8 cursor-grab align-top transition-[background,box-shadow,transform] duration-150 active:cursor-grabbing",
+                                "group h-8 cursor-grab align-top transition-[background,box-shadow,transform] duration-150 active:cursor-grabbing",
                                 index % 2 === 0 ? "bg-background" : "bg-muted/20",
                                 "hover:bg-primary/5",
                                 draggedItemId === item.id ? "scale-[0.995] opacity-45 shadow-lg" : "",
@@ -1186,13 +1254,13 @@ export const ItemPanel = ({
                                   : "",
                               ].filter(Boolean).join(" ")
                             : [
-                                "h-8 align-top",
+                                "group h-8 align-top",
                                 index % 2 === 0 ? "bg-background" : "bg-muted/20",
                               ].join(" ")
                       }
                     >
                       {selectionMode && (
-                        <TableCell className="text-xs">
+                        <TableCell className={`${FROZEN_CELL_CLASS} ${frozenRowBackground} left-0 w-[48px] min-w-[48px] max-w-[48px] text-xs`}>
                           <input
                             type="checkbox"
                             checked={selectedIds.includes(item.id)}
@@ -1202,15 +1270,28 @@ export const ItemPanel = ({
                           />
                         </TableCell>
                       )}
-                      <TableCell className="text-xs tabular-nums text-muted-foreground">{index + 1}</TableCell>
+                      <TableCell
+                        className={`${FROZEN_CELL_CLASS} ${frozenRowBackground} w-[64px] min-w-[64px] max-w-[64px] text-xs tabular-nums text-muted-foreground`}
+                        style={{ left: sequenceColumnLeft }}
+                      >
+                        {index + 1}
+                      </TableCell>
                       {isWeekly && (
-                        <TableCell className="whitespace-nowrap font-mono text-xs font-semibold text-muted-foreground">
-                          {row.matterCode || "-"}
+                        <TableCell
+                          className={`${FROZEN_CELL_CLASS} ${frozenRowBackground} w-[120px] min-w-[120px] max-w-[120px] whitespace-nowrap`}
+                          style={{ left: matterCodeColumnLeft }}
+                        >
+                          <span className="font-mono text-[11px] font-semibold text-muted-foreground">
+                            {row.matterCode || "-"}
+                          </span>
                         </TableCell>
                       )}
-                      <TableCell>
+                      <TableCell
+                        className={`${FROZEN_EDGE_CELL_CLASS} ${frozenRowBackground} w-[320px] min-w-[320px] max-w-[320px]`}
+                        style={{ left: titleColumnLeft }}
+                      >
                         {isEditingField("title") ? (
-                          <div className="min-w-[220px]">
+                          <div className="min-w-0">
                             <Input
                               value={row.title}
                               onChange={(e) => updateDraft("title", e.target.value)}
@@ -1239,14 +1320,13 @@ export const ItemPanel = ({
                             >
                               {item.title}
                             </div>
-                            {item.description && (
-                              <div
-                                className={canEdit ? "cursor-pointer rounded px-1 py-0.5 text-[10px] text-muted-foreground line-clamp-1 hover:bg-primary/10" : "text-[10px] text-muted-foreground line-clamp-1"}
-                                {...editTriggerProps(item, "description")}
-                              >
-                                {item.description}
-                              </div>
-                            )}
+                            <div
+                              className={canEdit ? "cursor-pointer rounded px-1 py-0.5 text-[10px] text-muted-foreground line-clamp-1 hover:bg-primary/10" : "text-[10px] text-muted-foreground line-clamp-1"}
+                              {...editTriggerProps(item, "description")}
+                              title={item.description || "填写详细事件内容"}
+                            >
+                              {item.description || "-"}
+                            </div>
                           </>
                         )}
                       </TableCell>
@@ -1267,14 +1347,6 @@ export const ItemPanel = ({
                           </Select>
                         </TableCell>
                       )}
-                      <TableCell className="text-xs">
-                        {item.project ? (
-                          <>
-                            <div className="font-medium">{item.project.name}</div>
-                            <div className="text-[10px] text-muted-foreground">{item.project.code}</div>
-                          </>
-                        ) : "-"}
-                      </TableCell>
                       <TableCell className="text-xs min-w-[150px]">
                         <Select
                           variant="ghost"
@@ -1295,7 +1367,7 @@ export const ItemPanel = ({
                           variant="ghost"
                           value={item.priority}
                           onChange={(e) => commitSelectChange("priority", e.target.value as ItemPriority, item)}
-                          className={cn(GHOST_SELECT_CLASS, "!w-[76px] !min-w-[76px] !max-w-[76px]")}
+                          className={cn(GHOST_SELECT_CLASS, "!w-[88px] !min-w-[88px] !max-w-[88px]")}
                         >
                           {Object.values(ItemPriority).map((priority) => (
                             <option key={priority} value={priority}>{ITEM_PRIORITY_LABEL[priority]}</option>
@@ -1414,40 +1486,60 @@ export const ItemPanel = ({
                           ))}
                         </Select>
                       </TableCell>
-                      <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-pre-wrap break-words max-w-[200px] hover:bg-primary/5" : "text-xs whitespace-pre-wrap break-words max-w-[200px]"} {...editTriggerProps(item, "issueAndAction")}>
+                      <TableCell className={cn(ITEM_LONG_TEXT_CELL_CLASS, canEdit && "cursor-pointer hover:bg-primary/5")} {...editTriggerProps(item, "issueAndAction")}>
                         {isEditingField("issueAndAction") ? (
                           <Textarea
                             value={row.issueAndAction}
                             onChange={(e) => updateDraft("issueAndAction", e.target.value)}
                             onKeyDown={handleEditKeyDown}
-                            className={INLINE_TEXTAREA_CLASS}
+                            className={ITEM_LONG_TEXT_EDITOR_CLASS}
                             autoFocus
                           />
-                        ) : item.issueAndAction || "-"}
+                        ) : (
+                          <div className="line-clamp-2 min-w-0 break-words text-[10px] leading-4 [overflow-wrap:anywhere]" title={item.issueAndAction || undefined}>
+                            {item.issueAndAction || "-"}
+                          </div>
+                        )}
                       </TableCell>
-                      <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-pre-wrap break-words max-w-[160px] hover:bg-primary/5" : "text-xs whitespace-pre-wrap break-words max-w-[160px]"} {...editTriggerProps(item, "dependency")}>
+                      <TableCell className={cn(ITEM_LONG_TEXT_CELL_CLASS, canEdit && "cursor-pointer hover:bg-primary/5")} {...editTriggerProps(item, "dependency")}>
                         {isEditingField("dependency") ? (
                           <Textarea
                             value={row.dependency}
                             onChange={(e) => updateDraft("dependency", e.target.value)}
                             onKeyDown={handleEditKeyDown}
-                            className={INLINE_TEXTAREA_CLASS}
+                            className={ITEM_LONG_TEXT_EDITOR_CLASS}
                             autoFocus
                           />
-                        ) : item.dependency || "-"}
+                        ) : (
+                          <div className="line-clamp-2 min-w-0 break-words text-[10px] leading-4 [overflow-wrap:anywhere]" title={item.dependency || undefined}>
+                            {item.dependency || "-"}
+                          </div>
+                        )}
                       </TableCell>
-                      <TableCell className={canEdit ? "cursor-pointer text-xs whitespace-pre-wrap break-words max-w-[160px] hover:bg-primary/5" : "text-xs whitespace-pre-wrap break-words max-w-[160px]"} {...editTriggerProps(item, "risk")}>
-                        {isEditingField("risk") ? (
-                          <Textarea
-                            value={row.risk}
-                            onChange={(e) => updateDraft("risk", e.target.value)}
-                            onKeyDown={handleEditKeyDown}
-                            className={INLINE_TEXTAREA_CLASS}
-                            autoFocus
-                          />
-                        ) : item.risk || "-"}
+                      <TableCell className="w-[220px] min-w-[220px] max-w-[220px] overflow-hidden text-[11px]">
+                        {(item.linkedRisks ?? []).length > 0 ? (
+                          <div className="flex flex-wrap gap-1">
+                            {item.linkedRisks.map((risk) => (
+                              <button
+                                key={risk.id}
+                                type="button"
+                                draggable={false}
+                                className="inline-flex max-w-full items-center gap-1 rounded border border-border/70 bg-background/45 px-1.5 py-0.5 text-left text-[11px] text-muted-foreground transition-colors hover:border-primary/40 hover:bg-primary/[0.07] hover:text-foreground"
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setSelectedRisk(risk);
+                                }}
+                                title={`查看 ${risk.riskCode} 风险详情`}
+                              >
+                                <span className="shrink-0 font-mono font-semibold text-primary">{risk.riskCode}</span>
+                                <span className="truncate">{risk.riskName}</span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : "-"}
                       </TableCell>
-                      <TableCell className="sticky right-0 bg-card">
+                      <TableCell className={`${ACTION_CELL_CLASS} ${frozenRowBackground}`}>
                         <div className="flex items-center gap-1">
                           {editing ? (
                             <>
@@ -1485,7 +1577,7 @@ export const ItemPanel = ({
                   <TableRow>
                     <TableCell colSpan={tableColSpan} className="h-32 text-center text-sm text-muted-foreground">
                       {items.length === 0
-                        ? `时间窗口内暂无${title}。${
+                        ? `暂无${title}数据。${
                             canCreate
                               ? currentProjectId
                                 ? "点击右上角「新增」开始记录。"
@@ -1508,6 +1600,34 @@ export const ItemPanel = ({
           </div>
         </CardContent>
       </Card>
+
+      <Dialog open={Boolean(selectedRisk)} onOpenChange={(open) => { if (!open) setSelectedRisk(null); }}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex min-w-0 items-center gap-2">
+              <span className="shrink-0 font-mono text-sm text-primary">{selectedRisk?.riskCode}</span>
+              <span className="truncate">{selectedRisk?.riskName || "风险详情"}</span>
+            </DialogTitle>
+            <DialogDescription>该信息由风险登记册维护，项目事项中仅供查看。</DialogDescription>
+          </DialogHeader>
+          {selectedRisk && (
+            <div className="grid gap-x-5 md:grid-cols-2">
+              <RiskDetailField label="风险ID" value={selectedRisk.riskCode} />
+              <RiskDetailField label="风险名称" value={selectedRisk.riskName} />
+              <RiskDetailField label="关联项目事项" value={[selectedRisk.linkedItemCode, selectedRisk.linkedItemName].filter(Boolean).join(" · ")} wide />
+              <RiskDetailField label="类别" value={selectedRisk.category} />
+              <RiskDetailField label="状态" value={selectedRisk.status} />
+              <RiskDetailField label="发生概率" value={selectedRisk.probability} />
+              <RiskDetailField label="影响程度" value={selectedRisk.impact} />
+              <RiskDetailField label="风险等级" value={selectedRisk.level} />
+              <RiskDetailField label="责任人" value={selectedRisk.owner} />
+              <RiskDetailField label="计划关闭日期" value={selectedRisk.targetDate} />
+              <RiskDetailField label="触发条件" value={selectedRisk.trigger} wide />
+              <RiskDetailField label="应对措施" value={selectedRisk.response} wide />
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* Legacy create card replaced by the inline table row above.
       {draft && editingId === null && (

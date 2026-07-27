@@ -4,6 +4,7 @@ import {
   assignMissingWeeklyMatterCodes,
   nextWeeklyMatterCode,
   renumberWeeklyMatterCodes,
+  renumberWeeklyMatterCodesByProject,
   type WeeklyMatterCodeSource,
 } from "@/lib/weekly-matter-codes";
 
@@ -40,5 +41,17 @@ describe("weekly matter codes", () => {
 
     expect(items.find((entry) => entry.id === "second")?.matterCode).toBe("Matter001");
     expect(items.find((entry) => entry.id === "first")?.matterCode).toBe("Matter002");
+  });
+
+  it("starts matter codes from one inside each project", () => {
+    const items = renumberWeeklyMatterCodesByProject([
+      { ...item({ id: "a-2", sortOrder: 2 }), projectId: "project-a" },
+      { ...item({ id: "b-1", sortOrder: 1 }), projectId: "project-b" },
+      { ...item({ id: "a-1", sortOrder: 1 }), projectId: "project-a" },
+    ]);
+
+    expect(items.find((entry) => entry.id === "a-1")?.matterCode).toBe("Matter001");
+    expect(items.find((entry) => entry.id === "a-2")?.matterCode).toBe("Matter002");
+    expect(items.find((entry) => entry.id === "b-1")?.matterCode).toBe("Matter001");
   });
 });

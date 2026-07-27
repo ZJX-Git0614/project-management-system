@@ -2,19 +2,28 @@ import { NextRequest } from "next/server";
 
 import { err, ok } from "@/lib/api-utils";
 import { proposeAssistantAction, serializeAssistantAction } from "@/lib/assistant-actions";
-import { callAssistantProviderModel } from "@/lib/assistant-provider-client";
-import {
-  assistantModelSystemPrompt,
-  loadAssistantRuntimeConfig,
-} from "@/lib/assistant-settings";
+import { loadAssistantRuntimeConfig } from "@/lib/assistant-settings";
 import { prisma } from "@/lib/prisma";
 import {
-  buildDatabaseAssistantAnswer,
   buildProjectAssistantContext,
   type AssistantMessageInput,
 } from "@/lib/project-assistant";
+import {
+  callProjectAssistantModel,
+  planProjectAssistantQueryWithModel,
+} from "@/lib/project-assistant-model";
+import {
+  buildProjectAssistantAnswerTrace,
+  buildProjectAssistantFallbackAnswer,
+  detectProjectAssistantQueryIntent,
+  mergeProjectAssistantQueryIntents,
+  projectAssistantRagCategories,
+  shouldPlanProjectAssistantQuery,
+} from "@/lib/project-assistant-query";
 import { queryRagLite } from "@/lib/raglite-client";
 import { requireUser } from "@/lib/server-auth";
+import { buildDocumentAssistantContext, type DocumentExtractionResult } from "@/lib/assistant-document-processing";
+import { isDocumentRevisionRequest, reviseDocumentsWithSmallModel } from "@/lib/assistant-document-revision";
 
 type StoredMessage = {
   id: string;
@@ -117,6 +126,7 @@ export async function POST(req: NextRequest) {
     message?: string;
     projectId?: string | null;
     history?: AssistantMessageInput[];
+    attachmentIds?: string[];
   };
   const message = String(body.message || "").trim();
   if (!message) return err("请输入需要查询的内容");
@@ -127,86 +137,135 @@ export async function POST(req: NextRequest) {
       Boolean(item) && (item.role === "user" || item.role === "assistant") && typeof item.content === "string")
       .slice(-runtime.historyLimit)
     : [];
-  const context = await buildProjectAssistantContext({ user, projectId });
-  if (projectId && !context.project) return err("当前项目不存在", 404);
+  const attachmentIds = Array.isArray(body.attachmentIds)
+    ? Array.from(new Set(body.attachmentIds.map((value) => String(value || "").trim()).filter(Boolean))).slice(0, 5)
+    : [];
+  const attachments = attachmentIds.length > 0
+    ? await prisma.assistantAttachment.findMany({
+        where: { id: { in: attachmentIds }, userId: user.userId, projectId, status: "READY" },
+        include: { extraction: true },
+      })
+    : [];
+  if (attachments.length !== attachmentIds.length) return err("附件不存在、尚未解析完成或不属于当前项目", 400);
+  const attachmentContexts = attachments.flatMap((attachment) => {
+    if (!attachment.extraction) return [];
+    const structured = parseJsonObject(attachment.extraction.structuredJson) ?? {};
+    const diagnostics = parseJsonArray(attachment.extraction.diagnosticsJson);
+    const extraction: DocumentExtractionResult = {
+      format: String(structured.format || "text"),
+      content: attachment.extraction.content,
+      sections: Array.isArray(structured.sections) ? structured.sections as DocumentExtractionResult["sections"] : [],
+      diagnostics: diagnostics as DocumentExtractionResult["diagnostics"],
+      metadata: structured.metadata && typeof structured.metadata === "object" ? structured.metadata as Record<string, unknown> : {},
+      truncated: Boolean(structured.truncated),
+    };
+    return [{ attachmentId: attachment.id, fileName: attachment.originalName, ...buildDocumentAssistantContext(extraction) }];
+  });
 
   let answer = "";
-  let source = "DATABASE";
+  let source: "DATABASE" | "MODEL" | "RAG" | "MODEL_RAG" | "AGENT" | "SYSTEM" = "DATABASE";
   let blocks: unknown[] = [];
+  let ragResult: Awaited<ReturnType<typeof queryRagLite>> = null;
   let retrievedChunks: Array<{ content: string; metadata?: Record<string, unknown> }> = [];
 
-  const action = await proposeAssistantAction({ message, projectId, user, runtime });
+  const action = await proposeAssistantAction({ message, projectId, user, runtime, history });
+  if (req.signal.aborted) return err("本次回答已终止", 499);
+  const ruleIntent = detectProjectAssistantQueryIntent(message);
+  const modelIntent = !action && shouldPlanProjectAssistantQuery(ruleIntent, message)
+    ? await planProjectAssistantQueryWithModel({ message, history, runtime, signal: req.signal })
+    : null;
+  if (req.signal.aborted) return err("本次回答已终止", 499);
+  const intent = mergeProjectAssistantQueryIntents(ruleIntent, modelIntent);
+  const context = await buildProjectAssistantContext({ user, projectId });
+  if (projectId && !context.project && !intent.identityOnly && !intent.domains.includes("GENERAL")) {
+    return err("当前项目不存在", 404);
+  }
+
   if (action) {
     answer = `已生成操作建议：**${action.title}**。请核对操作内容后确认执行。`;
     source = "AGENT";
     blocks = [{ type: "action-proposal", action }];
   } else {
-    const ragResult = await queryRagLite({
-      query: message,
-      projectId: projectId || undefined,
-      categories: ["project-document", "project-task", "weekly-item", "risk", "budget"],
-    }, runtime, req.signal);
+    const ragCategories = projectAssistantRagCategories(intent);
+    ragResult = !intent.identityOnly && context.project?.id && ragCategories.length > 0
+      ? await queryRagLite({
+          query: message,
+          projectId: context.project.id,
+          categories: ragCategories,
+        }, runtime, req.signal)
+      : null;
     retrievedChunks = ragResult?.chunks ?? [];
+    if (req.signal.aborted) return err("本次回答已终止", 499);
 
-    if (runtime.llmProvider) {
-      try {
-        answer = await callAssistantProviderModel({
-          provider: runtime.llmProvider,
-          temperature: runtime.temperature,
-          maxTokens: runtime.maxTokens,
+    answer = attachmentContexts.length > 0 && isDocumentRevisionRequest(message)
+      ? await reviseDocumentsWithSmallModel({
+          message,
+          documents: attachmentContexts.map((attachment) => ({
+            attachmentId: String(attachment.attachmentId),
+            fileName: String(attachment.fileName),
+            format: String(attachment.format),
+            diagnostics: Array.isArray(attachment.diagnostics) ? attachment.diagnostics : [],
+            content: String(attachment.content || ""),
+          })),
+          runtime,
           signal: req.signal,
-          messages: [
-            { role: "system", content: assistantModelSystemPrompt(runtime) },
-            ...history,
-            {
-              role: "user",
-              content: [
-                `实时数据库上下文：${JSON.stringify(context).slice(0, 90_000)}`,
-                retrievedChunks.length
-                  ? `授权知识库片段：${JSON.stringify(retrievedChunks).slice(0, 35_000)}`
-                  : "授权知识库片段：无",
-                `用户问题：${message}`,
-              ].join("\n\n"),
-            },
-          ],
-        });
-        source = retrievedChunks.length ? "MODEL_RAG" : "MODEL";
-      } catch (error) {
-        if (req.signal.aborted) return err("本次回答已终止", 499);
-        console.error("[project-assistant] configured model failed", error);
-      }
-    }
+        }) || ""
+      : await callProjectAssistantModel({
+          message,
+          history,
+          context,
+          rag: ragResult,
+          runtime,
+          intent,
+          attachments: attachmentContexts,
+          signal: req.signal,
+        }) || "";
+    if (req.signal.aborted) return err("本次回答已终止", 499);
+    if (answer) source = retrievedChunks.length ? "MODEL_RAG" : "MODEL";
     if (!answer && ragResult?.answer) {
-      answer = ragResult.answer;
-      source = "RAG";
+      answer = ragResult.answer.trim();
+      if (answer) source = "RAG";
     }
     if (!answer) {
-      answer = buildDatabaseAssistantAnswer(message, context);
-      source = "DATABASE";
+      const fallback = buildProjectAssistantFallbackAnswer({
+        message,
+        intent,
+        context,
+        assistantName: runtime.assistantName,
+      });
+      answer = fallback.answer;
+      source = fallback.source;
     }
   }
 
   const trace = {
+    ...buildProjectAssistantAnswerTrace({
+      intent,
+      context,
+      rag: ragResult,
+      providerName: runtime.llmProvider?.name,
+      modelName: runtime.llmProvider?.model,
+      fallbackUsed: !["MODEL", "MODEL_RAG", "RAG"].includes(source),
+    }),
     projectId: context.project?.id ?? null,
     projectName: context.project?.name ?? null,
     source,
-    provider: runtime.llmProvider?.name ?? null,
-    model: runtime.llmProvider?.model ?? null,
-    retrieved: retrievedChunks.slice(0, 8).map((chunk) => ({
-      title: String(chunk.metadata?.fileName || chunk.metadata?.title || "知识库片段"),
-      category: String(chunk.metadata?.category || ""),
-    })),
-    dataCounts: {
-      tasks: context.progress.total,
-      weeklyItems: context.weeklyItems.length,
-      risks: context.risks.length,
-      documents: context.documents.length,
-    },
   };
 
   const [userMessage, assistantMessage] = await prisma.$transaction(async (tx) => {
     const storedUser = await tx.assistantChatMessage.create({
-      data: { userId: user.userId, username: user.username, displayName: user.displayName, projectId, role: "user", content: message },
+      data: {
+        userId: user.userId,
+        username: user.username,
+        displayName: user.displayName,
+        projectId,
+        role: "user",
+        content: message,
+        blocks: JSON.stringify(attachments.map((attachment) => ({
+          type: "attachment",
+          attachment: { id: attachment.id, name: attachment.originalName, mimeType: attachment.mimeType, sizeBytes: attachment.sizeBytes },
+        }))),
+      },
       select: { id: true, role: true, content: true, source: true, trace: true, blocks: true, createdAt: true },
     });
     const storedAssistant = await tx.assistantChatMessage.create({

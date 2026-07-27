@@ -11,6 +11,15 @@ interface SelectProps extends Omit<React.SelectHTMLAttributes<HTMLSelectElement>
   variant?: "default" | "ghost";
 }
 
+const readOptionLabel = (node: React.ReactNode): string => {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(readOptionLabel).join("");
+  if (React.isValidElement<{ children?: React.ReactNode }>(node)) {
+    return readOptionLabel(node.props.children);
+  }
+  return "";
+};
+
 function Select({
   className,
   children,
@@ -28,7 +37,7 @@ function Select({
       if (React.isValidElement<{ value?: string; children?: React.ReactNode }>(child) && child.type === "option") {
         options.push({
           value: child.props.value ?? "",
-          label: typeof child.props.children === "string" ? child.props.children : child.props.value ?? "",
+          label: readOptionLabel(child.props.children) || child.props.value || "",
         });
       }
     });
@@ -68,14 +77,21 @@ function Select({
             ref={buttonRef}
             type="button"
             data-slot="select"
+            data-variant={variant}
             className={cn(
-              "flex h-9 w-full min-w-0 cursor-pointer items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm transition-[color,background-color,border-color,box-shadow] duration-150 ease-out hover:border-primary/35",
-              "focus-visible:border-primary/60 focus-visible:bg-background/80 focus-visible:ring-2 focus-visible:ring-ring/30 focus-visible:outline-none",
+              "group/select flex h-9 w-full min-w-0 cursor-pointer items-center justify-between gap-2 rounded-md border py-1 text-sm text-foreground transition-[color,background-color,border-color,box-shadow] duration-150 ease-out",
               "disabled:cursor-not-allowed disabled:opacity-50",
-              variant === "ghost" && [
-                "border-transparent bg-transparent shadow-none text-muted-foreground",
-                "hover:border-border hover:bg-accent/50 hover:text-foreground",
-              ],
+              variant === "ghost"
+                ? [
+                    "border-transparent bg-transparent px-2 shadow-none",
+                    "hover:border-border/60 hover:bg-accent/45",
+                    "focus-visible:border-primary/45 focus-visible:bg-accent/45 focus-visible:ring-2 focus-visible:ring-ring/20 focus-visible:outline-none",
+                    "data-[state=open]:border-border/70 data-[state=open]:bg-accent/55",
+                  ]
+                : [
+                    "border-input bg-background px-3 shadow-sm hover:border-primary/35",
+                    "focus-visible:border-primary/60 focus-visible:bg-background/80 focus-visible:ring-2 focus-visible:ring-ring/30 focus-visible:outline-none",
+                  ],
               className
             )}
             disabled={disabled}
@@ -83,13 +99,19 @@ function Select({
             <span className={cn("flex-1 truncate text-left", !selectedOption && "text-muted-foreground")}>
               {selectedOption?.label ?? ""}
             </span>
-            <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200", open && "rotate-180")} />
+            <ChevronDown
+              className={cn(
+                "h-4 w-4 shrink-0 text-muted-foreground transition-[opacity,transform] duration-150",
+                variant === "ghost" && "opacity-0 group-hover/select:opacity-70 group-focus-visible/select:opacity-70",
+                open && "rotate-180 opacity-70",
+              )}
+            />
           </button>
         </DropdownMenuPrimitive.Trigger>
         <DropdownMenuPrimitive.Portal>
           <DropdownMenuPrimitive.Content
             data-slot="select-content"
-            className="z-[110] max-h-60 min-w-[8rem] overflow-auto rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-[var(--app-shadow-popover)]"
+            className="z-[110] max-h-60 min-w-[var(--radix-dropdown-menu-trigger-width)] overflow-auto rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-[var(--app-shadow-popover)]"
             align="start"
             sideOffset={4}
           >

@@ -1,0 +1,26 @@
+﻿Ceastar项目管理系统 离线部署环境版本与来源
+============================================
+
+Docker Desktop for Windows x86-64
+版本：2026-07-22 官方 latest 安装包
+来源：https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe
+SHA-256：d812d89da0cda66c97cdf9decb60debf17d71c358900db33c48eb9ee9604f40c
+
+Windows Subsystem for Linux (WSL)
+版本：2.7.10 x64
+来源：https://github.com/microsoft/WSL/releases/tag/2.7.10
+SHA-256：1a62f90a43c03cc5bda47dfd0b6faf496ac70fd4389190518120a4f84fc895cf
+
+Ollama for Windows x86-64（可选）
+版本：0.32.1
+来源：https://github.com/ollama/ollama/releases/tag/v0.32.1
+SHA-256：2f53afab45547896e66b2879174ee78bb1f079f4a20b0858e0e377da0c3631f0
+
+离线模型（可选）
+LLM：qwen3.5:9b
+Embedding：bge-m3:latest
+
+说明
+----
+项目、PostgreSQL 数据库和运行依赖都在项目部署包中。
+目标电脑无需另外安装 Node.js、npm、PostgreSQL、Prisma、Java 或 Python。

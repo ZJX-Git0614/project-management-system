@@ -35,4 +35,17 @@ describe("Select", () => {
     expect(onValueChange).toHaveBeenCalledWith("HIGH");
     expect(screen.getByRole("button", { name: "高" })).toBeInTheDocument();
   });
+
+  it("uses the complete rendered option label instead of exposing its database value", () => {
+    render(
+      <Select value="cmr4nr9mo0002srifnxzai8gd">
+        <option value="cmr4nr9mo0002srifnxzai8gd">
+          测试A（{"2026"}）
+        </option>
+      </Select>,
+    );
+
+    expect(screen.getByRole("button", { name: "测试A（2026）" })).toBeInTheDocument();
+    expect(screen.queryByText("cmr4nr9mo0002srifnxzai8gd")).not.toBeInTheDocument();
+  });
 });

@@ -93,6 +93,22 @@ export const PERMISSION_TREE = [
     ],
   },
   {
+    key: "project-performance",
+    label: "项目绩效管理",
+    type: "group",
+    children: [
+      {
+        key: "earned-value",
+        label: "挣值分析",
+        type: "page",
+        children: [
+          { key: "earned-value:view", label: "查看挣值分析", type: "section" },
+          { key: "earned-value:edit", label: "维护任务 BAC 与 AC", type: "action" },
+        ],
+      },
+    ],
+  },
+  {
     key: "project-progress",
     label: "项目进度管理",
     type: "group",
@@ -107,14 +123,14 @@ export const PERMISSION_TREE = [
       },
       {
         key: "weekly-items",
-        label: "本周事项",
+        label: "项目事项管理",
         type: "page",
         children: [
-          { key: "weekly-items:view", label: "查看本周事项", type: "section" },
-          { key: "weekly-items:create", label: "新增本周事项", type: "action" },
-          { key: "weekly-items:edit", label: "编辑本周事项", type: "action" },
-          { key: "weekly-items:delete", label: "删除本周事项", type: "action" },
-          { key: "weekly-items:export", label: "导出本周事项", type: "action" },
+          { key: "weekly-items:view", label: "查看项目事项", type: "section" },
+          { key: "weekly-items:create", label: "新增项目事项", type: "action" },
+          { key: "weekly-items:edit", label: "编辑项目事项", type: "action" },
+          { key: "weekly-items:delete", label: "删除项目事项", type: "action" },
+          { key: "weekly-items:export", label: "导出项目事项", type: "action" },
         ],
       },
     ],
@@ -235,6 +251,7 @@ PERMISSION_TREE.forEach((node) => collectDescendants(node, null));
 
 export const PROJECT_DETAIL_GROUP_PERMISSION_KEYS = {
   project: "project-info:view",
+  performance: "earned-value:view",
   gantt: "project-gantt:view",
   documents: "project-documents:view",
   budget: "project-budget:view",
@@ -243,6 +260,7 @@ export const PROJECT_DETAIL_GROUP_PERMISSION_KEYS = {
 export const NAV_GROUP_PERMISSION_KEYS = {
   projectList: "project-list",
   projectDashboard: "project-dashboard",
+  projectPerformance: "project-performance",
   projectProgress: "project-progress",
   projectScope: "project-scope",
   projectRisk: "project-risk",
@@ -252,6 +270,7 @@ export const NAV_GROUP_PERMISSION_KEYS = {
 export const PERMISSION_ROUTE_RULES: PermissionRouteRule[] = [
   { pathname: "/projects", permissionKey: "project-list:view" },
   { pathname: "/projects/[projectId]", queryParam: "nav", queryValue: "project", permissionKey: "project-info:view" },
+  { pathname: "/projects/[projectId]", queryParam: "nav", queryValue: "performance", permissionKey: "earned-value:view" },
   { pathname: "/projects/[projectId]", queryParam: "nav", queryValue: "gantt", permissionKey: "project-gantt:view" },
   { pathname: "/projects/[projectId]", queryParam: "nav", queryValue: "documents", permissionKey: "project-documents:view" },
   { pathname: "/projects/[projectId]", queryParam: "nav", queryValue: "budget", permissionKey: "project-budget:view" },
@@ -272,6 +291,7 @@ export const DEFAULT_PERMISSION_TREE: PermissionTreeState = {
   "项目经理": [
     ...allNodeKeysFor("project-list"),
     ...allNodeKeysFor("project-dashboard"),
+    ...allNodeKeysFor("project-performance"),
     ...allNodeKeysFor("project-progress"),
     ...allNodeKeysFor("project-scope"),
     ...allNodeKeysFor("project-risk"),
@@ -286,6 +306,9 @@ export const DEFAULT_PERMISSION_TREE: PermissionTreeState = {
     "project-info:core-view",
     "project-gantt",
     "project-gantt:view",
+    "project-performance",
+    "earned-value",
+    "earned-value:view",
     "project-budget",
     "project-budget:view",
     "project-members",

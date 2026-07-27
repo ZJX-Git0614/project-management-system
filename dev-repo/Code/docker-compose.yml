@@ -28,6 +28,9 @@ services:
       - DATABASE_URL=postgresql://pms:pms-pwd-2026@postgres:5432/pms?schema=public
       - JWT_SECRET=pms-production-jwt-secret-2026
       - PROJECT_DOCUMENT_STORAGE_DIR=/app/.local-runtime/project-documents
+      - SYSTEM_BACKUP_DIR=/app/.local-runtime/system-backups
+      - PROJECT_MPP_EXPORT_SERVICE_URL=${PROJECT_MPP_EXPORT_SERVICE_URL:-}
+      - PROJECT_MPP_EXPORT_SERVICE_TOKEN=${PROJECT_MPP_EXPORT_SERVICE_TOKEN:-}
       - ASSISTANT_MODEL_BASE_URL=${ASSISTANT_MODEL_BASE_URL:-}
       - ASSISTANT_MODEL=${ASSISTANT_MODEL:-}
       - ASSISTANT_MODEL_API_KEY=${ASSISTANT_MODEL_API_KEY:-}
@@ -37,6 +40,7 @@ services:
       - NODE_ENV=production
     volumes:
       - document_storage:/app/.local-runtime/project-documents
+      - ./backups:/app/.local-runtime/system-backups
     depends_on:
       postgres:
         condition: service_healthy

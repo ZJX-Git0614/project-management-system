@@ -3,7 +3,14 @@ import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getUserFromRequest } from "@/lib/auth";
 import { ensureMutableProject, err, notFound, ok, unauthorized } from "@/lib/api-utils";
-import { renumberProjectGanttTaskCodes, serializeGanttTask } from "@/lib/gantt-task-service";
+import { addDaysInclusive } from "@/lib/gantt";
+import {
+  getOrderedGanttTasks,
+  parseGanttDependencyInput,
+  renumberProjectGanttTaskCodes,
+  replaceGanttTaskDependencies,
+  serializeGanttTask,
+} from "@/lib/gantt-task-service";
 
 export async function PUT(
   req: NextRequest,
@@ -19,17 +26,22 @@ export async function PUT(
   const existing = await prisma.projectGanttTask.findFirst({ where: { id: taskId, projectId: id } });
   if (!existing) return notFound("甘特任务");
 
-  const body = await req.json();
+  const body = await req.json() as Record<string, unknown>;
   const taskCategory = String(body.taskCategory ?? "").trim();
   const taskName = String(body.taskName ?? "").trim();
   const startDate = String(body.startDate ?? "").trim();
   const durationDays = Number(body.durationDays);
+  const finishDate = String(body.endDate ?? body.finishDate ?? "").trim() || addDaysInclusive(startDate, durationDays);
   const actualStartDate = String(body.actualStartDate ?? "").trim();
   const actualEndDate = String(body.actualEndDate ?? "").trim();
   const progress = Number(body.progress ?? 0);
   const predecessorTask = String(body.predecessorTask ?? "").trim();
+  const dependencies = parseGanttDependencyInput(body);
+  const hasDependencyInput = "predecessorDependencies" in body || "predecessorTaskIds" in body || "predecessorTaskId" in body;
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return err("计划开始时间格式应为 YYYY-MM-DD");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(finishDate)) return err("计划完成时间格式应为 YYYY-MM-DD");
+  if (finishDate < startDate) return err("计划完成时间不能早于计划开始时间");
   if (actualStartDate && !/^\d{4}-\d{2}-\d{2}$/.test(actualStartDate)) return err("实际开始时间格式应为 YYYY-MM-DD");
   if (actualEndDate && !/^\d{4}-\d{2}-\d{2}$/.test(actualEndDate)) return err("实际完成时间格式应为 YYYY-MM-DD");
   if (!Number.isInteger(durationDays) || durationDays <= 0) return err("任务周期必须为大于 0 的整数天数");
@@ -42,7 +54,9 @@ export async function PUT(
       taskCategory,
       taskName,
       startDate,
+      finishDate,
       durationDays,
+      durationMinutes: durationDays * 480,
       actualStartDate,
       actualEndDate,
       progress,
@@ -50,10 +64,12 @@ export async function PUT(
     };
 
     if (!shouldRegroupByCategory) {
-      return tx.projectGanttTask.update({
+      const updated = await tx.projectGanttTask.update({
         where: { id: taskId },
         data: baseData,
       });
+      if (hasDependencyInput) await replaceGanttTaskDependencies(tx, id, taskId, dependencies);
+      return updated;
     }
 
     const siblings = await tx.projectGanttTask.findMany({
@@ -68,10 +84,12 @@ export async function PUT(
     });
 
     if (insertAfterIndex < 0) {
-      return tx.projectGanttTask.update({
+      const updated = await tx.projectGanttTask.update({
         where: { id: taskId },
         data: baseData,
       });
+      if (hasDependencyInput) await replaceGanttTaskDependencies(tx, id, taskId, dependencies);
+      return updated;
     }
 
     const orderedIds = remainingSiblings.map((item) => item.id);
@@ -89,14 +107,15 @@ export async function PUT(
         })
       ))
     );
+    if (hasDependencyInput) await replaceGanttTaskDependencies(tx, id, taskId, dependencies);
     return updated;
   });
   if (shouldRegroupByCategory) {
     await renumberProjectGanttTaskCodes(id);
   }
-  const normalizedTask = await prisma.projectGanttTask.findUnique({ where: { id: taskId } });
+  const normalizedTask = (await getOrderedGanttTasks(id)).find((item) => item.id === taskId);
 
-  return ok(serializeGanttTask(normalizedTask ?? task));
+  return ok(normalizedTask ? serializeGanttTask(normalizedTask) : task);
 }
 
 export async function DELETE(

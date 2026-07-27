@@ -58,7 +58,7 @@ export const getGanttDateRange = (tasks: ProjectGanttTask[]): GanttDateRange | n
 
   const datePairs = tasks.map((task) => ({
     startDate: task.startDate,
-    endDate: addDaysInclusive(task.startDate, task.durationDays),
+    endDate: task.finishDate || addDaysInclusive(task.startDate, task.durationDays),
   }));
   const startDate = datePairs.map((item) => item.startDate).sort()[0];
   const endDate = datePairs.map((item) => item.endDate).sort().at(-1) ?? startDate;
@@ -71,12 +71,25 @@ export const getGanttDateRange = (tasks: ProjectGanttTask[]): GanttDateRange | n
 };
 
 export const buildGanttDependencyLinks = (tasks: ProjectGanttTask[]): GanttDependencyLink[] => {
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
   const taskByName = new Map<string, ProjectGanttTask>();
   for (const task of tasks) {
     if (!taskByName.has(task.taskName)) taskByName.set(task.taskName, task);
   }
 
   return tasks.flatMap((task) => {
+    if (task.predecessorTaskIds && task.predecessorTaskIds.length > 0) {
+      return task.predecessorTaskIds.flatMap((predecessorId) => {
+        const predecessor = taskById.get(predecessorId);
+        if (!predecessor || predecessor.id === task.id) return [];
+        return [{
+          predecessorId: predecessor.id,
+          successorId: task.id,
+          predecessorName: predecessor.taskName,
+          successorName: task.taskName,
+        }];
+      });
+    }
     const predecessorNames = parsePredecessorNames(task.predecessorTask);
     return predecessorNames.flatMap((predecessorName) => {
       const predecessor = taskByName.get(predecessorName);
@@ -157,9 +170,9 @@ export const buildGanttRows = (tasks: ProjectGanttTask[]): GanttRow[] => {
   const criticalIds = findGanttCriticalTaskIds(tasks);
 
   return tasks.map((task) => {
-    const endDate = addDaysInclusive(task.startDate, task.durationDays);
+    const endDate = task.finishDate || addDaysInclusive(task.startDate, task.durationDays);
     const offsetDays = diffDaysInclusive(range.startDate, task.startDate) - 1;
-    const durationDays = Math.max(1, task.durationDays);
+    const durationDays = Math.max(1, diffDaysInclusive(task.startDate, endDate));
 
     return {
       ...task,

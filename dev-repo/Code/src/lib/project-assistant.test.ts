@@ -51,7 +51,10 @@ const context = {
       actualStart: "",
       actualEnd: "",
       progress: 60,
-      critical: false,
+      externalUid: "11",
+      wbsCode: "1.2.1",
+      outlineNumber: "1.2.1",
+      isMilestone: false,
     }],
   },
   weeklyItems: [{
@@ -99,6 +102,11 @@ describe("project assistant database answers", () => {
     expect(answer).toContain("项目内搜索结果")
     expect(answer).toContain("Matter001")
     expect(answer).toContain("Task001")
+  })
+
+  it("finds schedule tasks by WBS and external UID", () => {
+    expect(buildDatabaseAssistantAnswer("1.2.1", context)).toContain("Task001")
+    expect(buildDatabaseAssistantAnswer("11", context)).toContain("Task001")
   })
 
   it("does not expose project details without a selected project", () => {

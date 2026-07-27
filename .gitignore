@@ -8,6 +8,11 @@ coverage/
 tsconfig.tsbuildinfo
 .local-runtime/
 .superpowers/
+.omx/
+outputs/
+qwen3.5-4b-ollama-windows*
+dev-repo/Code/src/graphify-out/
+dev-repo/Code/tmp/
 .env
 .env.*
 !.env.example

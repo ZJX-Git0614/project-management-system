@@ -80,18 +80,29 @@ export const callAssistantProviderModel = async (params: {
   temperature: number;
   maxTokens: number;
   signal?: AbortSignal;
+  timeoutMs?: number;
 }) => {
-  const response = await fetch(`${normalizedBaseUrl(params.provider)}/chat/completions`, {
-    method: "POST",
-    headers: headers(params.provider),
-    signal: params.signal,
-    body: JSON.stringify({
-      model: params.provider.model,
-      temperature: params.temperature,
-      max_tokens: params.maxTokens,
-      messages: params.messages,
-    }),
-  });
-  if (!response.ok) throw new Error(`模型调用失败（HTTP ${response.status}）`);
-  return extractModelText(await response.json());
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Math.max(1_000, params.timeoutMs ?? 60_000));
+  const abortFromCaller = () => controller.abort();
+  if (params.signal?.aborted) controller.abort();
+  else params.signal?.addEventListener("abort", abortFromCaller, { once: true });
+  try {
+    const response = await fetch(`${normalizedBaseUrl(params.provider)}/chat/completions`, {
+      method: "POST",
+      headers: headers(params.provider),
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: params.provider.model,
+        temperature: params.temperature,
+        max_tokens: params.maxTokens,
+        messages: params.messages,
+      }),
+    });
+    if (!response.ok) throw new Error(`模型调用失败（HTTP ${response.status}）`);
+    return extractModelText(await response.json());
+  } finally {
+    clearTimeout(timeout);
+    params.signal?.removeEventListener("abort", abortFromCaller);
+  }
 };

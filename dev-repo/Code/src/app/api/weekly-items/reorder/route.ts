@@ -31,32 +31,45 @@ export async function POST(req: NextRequest) {
     return err("项目已作废或已完成，不允许调整事项排序")
   }
 
-  await prisma.$transaction(async (tx) => {
-    await Promise.all(
-      itemIds.map((itemId: string, index: number) => (
-        tx.weeklyItem.update({
-          where: { id: itemId },
-          data: { sortOrder: index + 1 },
-        })
-      ))
-    )
+  const projectIdByItemId = new Map(items.map((item) => [item.id, item.projectId]))
+  const submittedIdsByProject = new Map<string, string[]>()
+  itemIds.forEach((itemId) => {
+    const projectId = projectIdByItemId.get(itemId)!
+    const projectItemIds = submittedIdsByProject.get(projectId) ?? []
+    projectItemIds.push(itemId)
+    submittedIdsByProject.set(projectId, projectItemIds)
+  })
 
-    const orderedItems = await tx.weeklyItem.findMany({
-      where: { id: { in: itemIds } },
-      select: { id: true, matterCode: true, sortOrder: true, createdAt: true },
+  await prisma.$transaction(async (tx) => {
+    const allProjectItems = await tx.weeklyItem.findMany({
+      where: { projectId: { in: projects.map((project) => project.id) } },
+      select: { id: true, projectId: true, matterCode: true, sortOrder: true, createdAt: true },
       orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
     })
-    const renumbered = renumberWeeklyMatterCodes(orderedItems)
-    await Promise.all(
-      renumbered
-        .filter((item, index) => item.matterCode !== orderedItems[index].matterCode)
-        .map((item) => (
+
+    for (const project of projects) {
+      const projectItems = allProjectItems.filter((item) => item.projectId === project.id)
+      const submittedIds = submittedIdsByProject.get(project.id) ?? []
+      const submittedIdSet = new Set(submittedIds)
+      let submittedIndex = 0
+      const reorderedItems = projectItems.map((item) => (
+        submittedIdSet.has(item.id)
+          ? projectItems.find((candidate) => candidate.id === submittedIds[submittedIndex++])!
+          : item
+      ))
+      const renumbered = renumberWeeklyMatterCodes(
+        reorderedItems.map((item, index) => ({ ...item, sortOrder: index + 1 })),
+      )
+
+      await Promise.all(
+        renumbered.map((item) => (
           tx.weeklyItem.update({
             where: { id: item.id },
-            data: { matterCode: item.matterCode },
+            data: { sortOrder: item.sortOrder, matterCode: item.matterCode },
           })
-        ))
-    )
+        )),
+      )
+    }
 
     await Promise.all(
       projects.map((project) => (
@@ -67,7 +80,7 @@ export async function POST(req: NextRequest) {
             entityId: project.id,
             actionType: "UPDATE",
             operator: user.displayName,
-            detail: "调整本周事项排序",
+            detail: "调整项目事项排序",
           },
         })
       ))

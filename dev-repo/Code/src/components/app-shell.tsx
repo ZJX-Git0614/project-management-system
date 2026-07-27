@@ -2,11 +2,13 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Bot,
   CalendarDays,
+  ChartNoAxesCombined,
   ClipboardList,
+  DatabaseBackup,
   FileText,
   LayoutDashboard,
   ListTodo,
@@ -17,7 +19,6 @@ import {
   Search,
   ShieldAlert,
   TrendingUp,
-  Trash2,
   User,
   Wallet,
   X,
@@ -45,12 +46,9 @@ import {
   TooltipTrigger,
   TooltipProvider,
 } from "@/components/ui/tooltip";
-import { api } from "@/lib/api-client";
 import { CurrentProjectSwitcher } from "@/components/current-project-switcher";
-import { TODO_CHANGED_EVENT, TODO_CHANGED_STORAGE_KEY } from "@/lib/todo-events";
 import { ADMIN_ROLE_NAME } from "@/lib/permissions";
 import { ProjectAssistant } from "@/components/project-assistant";
-import { useSystemFeedback } from "@/components/system-feedback-provider";
 
 const AUTH_FREE_PATHS = ["/login", "/force-change-password"];
 const SIDEBAR_VISIBILITY_STORAGE_KEY = "pms.desktopSidebarVisible";
@@ -187,7 +185,6 @@ const SidebarContent = ({
 );
 
 export const AppShell = ({ children }: { children: React.ReactNode }) => {
-  const { notify } = useSystemFeedback();
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -199,8 +196,6 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [desktopSidebarVisible, setDesktopSidebarVisible] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
-  const [todoCount, setTodoCount] = useState<number>(0);
-  const previousTodoCount = useRef<number | null>(null);
 
   const isAuthFree = AUTH_FREE_PATHS.includes(pathname);
 
@@ -236,43 +231,6 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
 
   // 项目列表是唯一项目入口：只有点击项目列表并写入当前项目后才展开项目详情导航。
   const hasSelectedProject = Boolean(currentProjectId);
-
-  const refreshTodoCount = useCallback(async () => {
-    if (isAuthFree || !authUser) return;
-    try {
-      const data = await api.get<{ count: number }>("/api/todos/count");
-      if (previousTodoCount.current !== null && data.count > previousTodoCount.current) {
-        notify(`您有 ${data.count - previousTodoCount.current} 条新的待办事项`, "info");
-      }
-      previousTodoCount.current = data.count;
-      setTodoCount(data.count);
-    } catch {
-      // ignore badge refresh failure
-    }
-  }, [isAuthFree, authUser, notify]);
-
-  useEffect(() => {
-    if (isAuthFree || !authUser) return;
-    void Promise.resolve().then(refreshTodoCount);
-    const handleTodoChanged = () => {
-      void refreshTodoCount();
-    };
-    const handleTodoStorageChanged = (event: StorageEvent) => {
-      if (event.key === TODO_CHANGED_STORAGE_KEY) {
-        void refreshTodoCount();
-      }
-    };
-    window.addEventListener(TODO_CHANGED_EVENT, handleTodoChanged);
-    window.addEventListener("storage", handleTodoStorageChanged);
-    window.addEventListener("focus", handleTodoChanged);
-    const interval = setInterval(handleTodoChanged, 30000);
-    return () => {
-      window.removeEventListener(TODO_CHANGED_EVENT, handleTodoChanged);
-      window.removeEventListener("storage", handleTodoStorageChanged);
-      window.removeEventListener("focus", handleTodoChanged);
-      clearInterval(interval);
-    };
-  }, [isAuthFree, authUser, refreshTodoCount]);
 
   const handleLogout = () => {
     authLogout();
@@ -323,6 +281,20 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
       ],
     },
     {
+      title: "项目绩效管理",
+      items: hasSelectedProject
+        ? [
+            {
+              href: currentProjectId ? `/projects/${currentProjectId}?nav=performance` : "/projects",
+              label: "挣值分析",
+              active: isDetailGroupActive(fullPath, "performance"),
+              permissionKey: getDetailGroupPermissionKey("performance"),
+              icon: <ChartNoAxesCombined className="size-4" />,
+            },
+          ]
+        : [],
+    },
+    {
       title: "项目进度管理",
       items: hasSelectedProject
         ? [
@@ -335,7 +307,7 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
             },
             {
               href: "/weekly-items",
-              label: "本周事项",
+              label: "项目事项管理",
               active: pathname === "/weekly-items",
               permissionKey: "weekly-items:view",
               icon: <CalendarDays className="size-4" />,
@@ -413,10 +385,10 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
               } as NavMenuItem,
               {
                 href: "/admin/data-cleanup",
-                label: "模块数据删除",
+                label: "系统数据管理",
                 active: pathname === "/admin/data-cleanup",
                 permissionKey: "account-management:view",
-                icon: <Trash2 className="size-4" />,
+                icon: <DatabaseBackup className="size-4" />,
               } as NavMenuItem,
             ]
           : []),
@@ -511,11 +483,6 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
                     className="h-8 text-xs relative"
                   >
                     待办中心
-                    {todoCount > 0 && (
-                      <span className="absolute -right-1.5 -top-1.5 flex size-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white leading-none">
-                        {todoCount > 99 ? "99+" : todoCount}
-                      </span>
-                    )}
                   </Button>
                 </Link>
               </TooltipTrigger>
@@ -553,7 +520,6 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
         <ProjectAssistant
           currentProjectId={currentProjectId}
           currentProjectName={currentProject?.name}
-          todoCount={todoCount}
         />
       </div>
     </TooltipProvider>

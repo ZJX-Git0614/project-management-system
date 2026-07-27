@@ -1,0 +1,59 @@
+﻿Ceastar项目管理系统 Windows x86 部署说明
+=========================================
+
+一、目标电脑要求
+
+1. Windows 10 或 Windows 11，Intel/AMD 64 位处理器。
+2. 安装 Docker Desktop，并使用 Linux 容器模式。
+3. 至少 8 GB 内存和 10 GB 可用磁盘空间。
+4. 安装过程中不需要访问互联网，镜像已经包含在部署包中。
+
+二、首次安装
+
+1. 将整个部署包复制到目标电脑并完整解压。
+2. 启动 Docker Desktop，等待 Docker Desktop 显示运行正常。
+3. 右键“install.bat”，选择“以管理员身份运行”。
+4. 脚本会自动加载离线镜像、恢复数据库、恢复上传文档并启动系统。
+5. 安装完成后，在目标电脑打开：http://localhost:3000
+6. 内网其他电脑打开：http://目标电脑IP:3000
+
+三、日常使用
+
+- 启动系统：双击 start.bat
+- 停止系统：双击 stop.bat
+- 备份数据：可在“系统设置 > 系统数据管理”中立即备份，也可双击 backup.bat
+
+系统默认每 6 小时自动备份一次。页面创建的本地备份保存在部署目录下的 backups 文件夹，
+也可以在页面中配置支持 WebDAV 的公司云盘账号与目录进行同步。
+
+停止服务不会删除数据库或上传文档。Docker Desktop 可以随 Windows 自动启动，
+容器也配置了自动重启，通常不需要每天手动启动。
+
+四、数据安全
+
+1. 禁止执行：docker compose down -v
+2. 禁止删除 ceastar-pms_pgdata 和 ceastar-pms_document_storage 数据卷。
+3. 定期运行 backup.bat，并将 backups 文件夹复制到其他磁盘。
+4. install.bat 只用于首次安装。不要重复运行，否则可能覆盖目标电脑中的新数据。
+5. 部署包包含数据库、账号和加密密钥，请勿上传到 GitHub 或公共网盘。
+
+五、内网访问
+
+安装脚本会尝试自动放行 Windows 防火墙 TCP 3000 端口。
+如果其他电脑无法访问，请在 Windows 防火墙中手动允许 TCP 3000 入站访问。
+
+六、智能助手
+
+数据库中已经包含智能助手设置和供应商配置。
+
+- 当前主要 LLM 供应商是外部网络服务，目标电脑必须能够访问该服务。
+- 如果目标电脑使用本机 Ollama，需要另行安装 Ollama 和对应模型。
+- Docker 中的项目管理系统访问 Windows 本机 Ollama 时，供应商地址应填写：
+  http://host.docker.internal:11434
+- 不要填写 http://127.0.0.1:11434，因为该地址在容器中指向容器自身。
+
+七、排查命令
+
+查看服务状态：docker compose ps
+查看系统日志：docker compose logs --tail 200 pms
+查看数据库日志：docker compose logs --tail 200 postgres

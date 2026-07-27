@@ -1,0 +1,50 @@
+name: ceastar-pms
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    platform: linux/amd64
+    container_name: pms-postgres
+    environment:
+      POSTGRES_USER: pms
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pms-local-db-2026}
+      POSTGRES_DB: pms
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pms -d pms"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  pms:
+    image: ceastar-project-management:2026.07.23-amd64
+    platform: linux/amd64
+    container_name: pms
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://pms:${POSTGRES_PASSWORD:-pms-local-db-2026}@postgres:5432/pms?schema=public
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be configured in .env}
+      ASSISTANT_CONFIG_ENCRYPTION_KEY: ${JWT_SECRET:?JWT_SECRET must be configured in .env}
+      PROJECT_DOCUMENT_STORAGE_DIR: /app/.local-runtime/project-documents
+      SYSTEM_BACKUP_DIR: /app/.local-runtime/system-backups
+      PROJECT_MPP_EXPORT_SERVICE_URL: ${PROJECT_MPP_EXPORT_SERVICE_URL:-}
+      PROJECT_MPP_EXPORT_SERVICE_TOKEN: ${PROJECT_MPP_EXPORT_SERVICE_TOKEN:-}
+      SKIP_PRISMA_DB_PUSH: "true"
+      SKIP_PRISMA_SEED: "true"
+      NODE_ENV: production
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - document_storage:/app/.local-runtime/project-documents
+      - ./backups:/app/.local-runtime/system-backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  document_storage:

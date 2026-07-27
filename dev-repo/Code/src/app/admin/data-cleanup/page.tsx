@@ -5,11 +5,13 @@ import { AlertTriangle, RefreshCw, Trash2 } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { ADMIN_ROLE_NAME } from "@/lib/permissions";
 import { useAuth } from "@/contexts/auth-context";
+import { useCurrentProject } from "@/contexts/current-project-context";
+import { useConfirm } from "@/components/confirm-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { SystemBackupPanel } from "@/components/system-backup-panel";
 
 interface CleanupModule {
   id: string;
@@ -28,17 +30,27 @@ interface CleanupData {
   modules: CleanupModule[];
   projects: CleanupProject[];
   countsByProjectId: Record<string, Record<string, number>>;
+  recentAudits: Array<{
+    id: string;
+    createdAt: string;
+    actionType: string;
+    operator: string;
+    projectId: string;
+    projectName: string;
+    detail: string;
+  }>;
 }
 
 export default function DataCleanupPage() {
+  const confirm = useConfirm();
   const { user } = useAuth();
+  const { currentProjectId, clearCurrentProject, refresh: refreshCurrentProjects } = useCurrentProject();
   const isAdmin = user?.assignedRoleNames.includes(ADMIN_ROLE_NAME) ?? false;
   const [data, setData] = useState<CleanupData | null>(null);
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState(false);
   const [projectId, setProjectId] = useState("");
   const [moduleId, setModuleId] = useState("");
-  const [confirmText, setConfirmText] = useState("");
   const [message, setMessage] = useState("");
 
   const selectedProject = useMemo(
@@ -50,6 +62,7 @@ export default function DataCleanupPage() {
     [data?.modules, moduleId],
   );
   const selectedCount = projectId && moduleId ? data?.countsByProjectId[projectId]?.[moduleId] ?? 0 : 0;
+  const deletingProject = selectedModule?.id === "entire-project";
 
   const fetchData = async () => {
     if (!isAdmin) {
@@ -60,8 +73,8 @@ export default function DataCleanupPage() {
     try {
       const result = await api.get<CleanupData>("/api/admin/data-cleanup");
       setData(result);
-      setProjectId((prev) => prev || result.projects[0]?.id || "");
-      setModuleId((prev) => prev || result.modules[0]?.id || "");
+      setProjectId((prev) => result.projects.some((project) => project.id === prev) ? prev : result.projects[0]?.id || "");
+      setModuleId((prev) => result.modules.some((module) => module.id === prev) ? prev : result.modules[0]?.id || "");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "加载失败");
     } finally {
@@ -76,6 +89,12 @@ export default function DataCleanupPage() {
 
   const handleDelete = async () => {
     if (!selectedProject || !selectedModule) return;
+    const accepted = await confirm(
+      deletingProject
+        ? `确认删除整个项目「${selectedProject.name}」吗？项目主档及 ${selectedCount - 1} 条关联记录将被永久删除，此操作不可恢复。`
+        : `确认删除「${selectedProject.name}」的「${selectedModule.label}」数据吗？当前共 ${selectedCount} 条，此操作不可恢复。`,
+    );
+    if (!accepted) return;
     setDeleting(true);
     setMessage("");
     try {
@@ -85,15 +104,18 @@ export default function DataCleanupPage() {
           "Content-Type": "application/json",
           ...(api.getToken() ? { Authorization: `Bearer ${api.getToken()}` } : {}),
         },
-        body: JSON.stringify({ projectId, moduleId, confirmText }),
+        body: JSON.stringify({ projectId, moduleId, confirmText: deletingProject ? "删除项目" : "清空" }),
       });
       const body = await response.json();
       if (!response.ok || !body.success) {
         throw new Error(body.error || "清理失败");
       }
-      const result = body.data as { deletedCount: number; message: string };
+      const result = body.data as { deletedCount: number; projectDeleted?: boolean; message: string };
       setMessage(`${result.message}，删除 ${result.deletedCount} 条。`);
-      setConfirmText("");
+      if (result.projectDeleted) {
+        if (currentProjectId === projectId) clearCurrentProject();
+        await refreshCurrentProjects();
+      }
       await fetchData();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "清理失败");
@@ -105,20 +127,21 @@ export default function DataCleanupPage() {
   if (!isAdmin) {
     return (
       <Card className="border-destructive/30 bg-destructive/5">
-        <CardContent className="py-4 text-sm text-destructive">仅超级管理员可访问数据清理。</CardContent>
+        <CardContent className="py-4 text-sm text-destructive">仅超级管理员可访问系统数据管理。</CardContent>
       </Card>
     );
   }
 
   return (
     <div className="space-y-4">
+      <SystemBackupPanel />
       <Card>
         <CardHeader className="pb-2">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <CardTitle>模块数据删除</CardTitle>
+              <CardTitle>业务数据清理</CardTitle>
               <CardDescription className="text-xs">
-                仅超级管理员可用。清理操作会写入项目操作日志；账号、权限、项目主档和操作日志不会被清理。
+                仅超级管理员可用。模块清理写入项目日志；删除整个项目时，审计记录会保存在独立管理员日志中。
               </CardDescription>
             </div>
             <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => void fetchData()} disabled={loading || deleting}>
@@ -127,7 +150,7 @@ export default function DataCleanupPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid gap-3 md:grid-cols-[1fr_1fr_120px_120px]">
+          <div className="grid gap-3 md:grid-cols-[1fr_1fr_120px]">
             <div>
               <div className="mb-1 text-xs text-muted-foreground">项目</div>
               <Select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={loading || deleting}>
@@ -154,23 +177,19 @@ export default function DataCleanupPage() {
                 {selectedCount}
               </div>
             </div>
-            <div>
-              <div className="mb-1 text-xs text-muted-foreground">确认文本</div>
-              <Input
-                value={confirmText}
-                onChange={(event) => setConfirmText(event.target.value)}
-                disabled={deleting}
-                placeholder="输入清空"
-                className="h-9"
-              />
-            </div>
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/25 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+          <div className={deletingProject
+            ? "flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/45 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+            : "flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/25 bg-destructive/5 px-3 py-2 text-xs text-destructive"}
+          >
             <div className="flex min-w-0 items-start gap-2">
               <AlertTriangle className="mt-0.5 size-4 shrink-0" />
               <span>
-                将删除「{selectedProject?.name || "-"}」的「{selectedModule?.label || "-"}」数据。此操作不可恢复。
+                {deletingProject
+                  ? `将永久删除整个项目「${selectedProject?.name || "-"}」及其全部关联数据。`
+                  : `将删除「${selectedProject?.name || "-"}」的「${selectedModule?.label || "-"}」数据。`}
+                此操作不可恢复。
                 {selectedModule?.description ? ` ${selectedModule.description}` : ""}
               </span>
             </div>
@@ -179,9 +198,9 @@ export default function DataCleanupPage() {
               size="sm"
               className="h-8 text-xs"
               onClick={() => void handleDelete()}
-              disabled={deleting || loading || !projectId || !moduleId || confirmText !== "清空"}
+              disabled={deleting || loading || !projectId || !moduleId}
             >
-              <Trash2 className="size-3" /> {deleting ? "删除中..." : "删除模块数据"}
+              <Trash2 className="size-3" /> {deleting ? "删除中..." : deletingProject ? "删除整个项目" : "删除模块数据"}
             </Button>
           </div>
 
@@ -226,6 +245,27 @@ export default function DataCleanupPage() {
               )}
             </TableBody>
           </Table>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle>最近清理记录</CardTitle>
+          <CardDescription className="text-xs">独立管理员审计日志不会随项目删除而丢失。</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="divide-y divide-border rounded-md border border-border">
+            {data?.recentAudits.map((audit) => (
+              <div key={audit.id} className="grid gap-1 px-3 py-2.5 text-xs md:grid-cols-[160px_120px_minmax(0,1fr)]">
+                <span className="text-muted-foreground">{new Date(audit.createdAt).toLocaleString("zh-CN")}</span>
+                <span className="font-medium">{audit.operator || "系统"}</span>
+                <span className="min-w-0 break-words">{audit.detail}</span>
+              </div>
+            ))}
+            {!loading && data?.recentAudits.length === 0 && (
+              <div className="py-10 text-center text-sm text-muted-foreground">暂无清理记录</div>
+            )}
+          </div>
         </CardContent>
       </Card>
     </div>

@@ -5,6 +5,10 @@ export type WeeklyMatterCodeSource = {
   createdAt: Date | string;
 };
 
+export type ProjectWeeklyMatterCodeSource = WeeklyMatterCodeSource & {
+  projectId: string;
+};
+
 const MATTER_CODE_PREFIX = "Matter";
 const MATTER_CODE_PATTERN = /^Matter(\d+)$/;
 
@@ -66,6 +70,24 @@ export const renumberWeeklyMatterCodes = <T extends WeeklyMatterCodeSource>(item
   const codeById = new Map<string, string>();
   [...items].sort(bySortOrderThenCreatedAt).forEach((item, index) => {
     codeById.set(item.id, formatMatterCode(index + 1));
+  });
+
+  return items.map((item) => ({ ...item, matterCode: codeById.get(item.id)! }));
+};
+
+export const renumberWeeklyMatterCodesByProject = <T extends ProjectWeeklyMatterCodeSource>(items: T[]) => {
+  const itemsByProject = new Map<string, T[]>();
+  items.forEach((item) => {
+    const projectItems = itemsByProject.get(item.projectId) ?? [];
+    projectItems.push(item);
+    itemsByProject.set(item.projectId, projectItems);
+  });
+
+  const codeById = new Map<string, string>();
+  itemsByProject.forEach((projectItems) => {
+    renumberWeeklyMatterCodes(projectItems).forEach((item) => {
+      codeById.set(item.id, item.matterCode);
+    });
   });
 
   return items.map((item) => ({ ...item, matterCode: codeById.get(item.id)! }));

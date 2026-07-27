@@ -1,10 +1,14 @@
 import { randomUUID } from "crypto";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { dirname, extname, basename } from "node:path";
 
 import type { AssistantActionRun } from "@prisma/client";
 
 import type { AuthenticatedUser } from "@/lib/server-auth";
 import type { AssistantRuntimeConfig } from "@/lib/assistant-settings";
 import { prisma } from "@/lib/prisma";
+import { buildAssistantStoredName, getAssistantArtifactPath } from "@/lib/assistant-artifact-storage";
+import { nextRiskCode } from "@/lib/risk-register-codes";
 
 export type AssistantActionView = {
   id: string;
@@ -53,8 +57,11 @@ const parseProgressIntent = (message: string) => {
   return Number.isFinite(value) && value >= 0 && value <= 100 ? { taskCode: code, progress: value } : null;
 };
 
-const parseExportType = (message: string) => {
+type AssistantExportType = "scheduleAnalysis" | "gantt" | "weekly" | "risk" | "budget";
+
+const parseExportType = (message: string): AssistantExportType | null => {
   if (!/(导出|下载)/u.test(message)) return null;
+  if (/(差异|冲突|计划分析|影响链)/u.test(message)) return "scheduleAnalysis";
   if (/(任务|甘特|进度)/u.test(message)) return "gantt";
   if (/(事项|本周)/u.test(message)) return "weekly";
   if (/风险/u.test(message)) return "risk";
@@ -104,10 +111,88 @@ export const proposeAssistantAction = async (params: {
   projectId: string;
   user: AuthenticatedUser;
   runtime: AssistantRuntimeConfig;
+  history?: Array<{ role: "user" | "assistant"; content: string }>;
 }): Promise<AssistantActionView | null> => {
   if (!params.runtime.agentEnabled || !params.projectId) return null;
   if (!(await ensureProjectAccess(params.user, params.projectId))) return null;
   const enabled = new Set(params.runtime.agentEnabledToolIds);
+
+  if (enabled.has("document.revision.save") && /(保存|下载|生成).*(修订稿|修改稿|重写稿|文档)/u.test(params.message)) {
+    const latestAssistantContent = [...(params.history ?? [])].reverse().find((item) => item.role === "assistant")?.content.trim() || "";
+    const attachment = await prisma.assistantAttachment.findFirst({
+      where: { projectId: params.projectId, userId: params.user.userId, status: "READY" },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, originalName: true },
+    });
+    if (attachment && latestAssistantContent) {
+      return createProposal({
+        ...params,
+        toolId: "document.revision.save",
+        riskLevel: "LOW",
+        args: { attachmentId: attachment.id, content: latestAssistantContent, instruction: params.message },
+        title: "保存文档修订稿",
+        description: `将上一条助手回答保存为「${attachment.originalName}」的独立 Markdown 修订稿`,
+      });
+    }
+  }
+
+  if (enabled.has("schedule.analysis.export") && /(导出|下载).*(差异|冲突|计划分析|影响链)/u.test(params.message)) {
+    const run = await prisma.scheduleAnalysisRun.findFirst({
+      where: { projectId: params.projectId, status: "COMPLETED" },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, sourceFileName: true },
+    });
+    if (run) {
+      return createProposal({
+        ...params,
+        toolId: "schedule.analysis.export",
+        riskLevel: "LOW",
+        args: { analysisRunId: run.id },
+        title: "导出计划分析",
+        description: `导出「${run.sourceFileName || "最新计划"}」的差异、冲突和影响链报告`,
+      });
+    }
+  }
+
+  if (enabled.has("risk.create.from-analysis") && /(冲突|分析结论|问题).*(创建|新建|转为).*风险|风险.*(创建|新建|转为).*(冲突|分析)/u.test(params.message)) {
+    const run = await prisma.scheduleAnalysisRun.findFirst({ where: { projectId: params.projectId, status: "COMPLETED" }, orderBy: { createdAt: "desc" } });
+    const result = run ? parseJson(run.resultJson) : {};
+    const issue = Array.isArray(result.issues)
+      ? result.issues.find((item) => item && typeof item === "object" && (item as { severity?: unknown }).severity === "ERROR") || result.issues[0]
+      : null;
+    if (run && issue && typeof issue === "object") {
+      const value = issue as Record<string, unknown>;
+      const taskCodes = Array.isArray(value.taskCodes) ? value.taskCodes.map(String) : [];
+      return createProposal({
+        ...params,
+        toolId: "risk.create.from-analysis",
+        riskLevel: "MEDIUM",
+        args: { analysisRunId: run.id, issue: value },
+        title: "从计划分析创建风险",
+        description: `${taskCodes.join("、") || "计划"}：${String(value.message || "计划冲突")}`,
+      });
+    }
+  }
+
+  if (enabled.has("todo.create.batch") && /(建议|冲突|分析结论).*(创建|生成|转为).*待办|待办.*(创建|生成|转为).*(建议|冲突|分析)/u.test(params.message)) {
+    const run = await prisma.scheduleAnalysisRun.findFirst({ where: { projectId: params.projectId, status: "COMPLETED" }, orderBy: { createdAt: "desc" } });
+    const result = run ? parseJson(run.resultJson) : {};
+    const issues = Array.isArray(result.issues) ? result.issues.filter((item) => item && typeof item === "object").slice(0, 20) as Record<string, unknown>[] : [];
+    if (run && issues.length > 0) {
+      const items = issues.map((issue) => ({
+        title: `处理${Array.isArray(issue.taskCodes) && issue.taskCodes.length > 0 ? ` ${issue.taskCodes.map(String).join("、")}` : "计划"}：${String(issue.message || "计划冲突")}`.slice(0, 200),
+        detail: String(issue.suggestion || "请核对计划分析结论并制定处理方案"),
+      }));
+      return createProposal({
+        ...params,
+        toolId: "todo.create.batch",
+        riskLevel: "MEDIUM",
+        args: { analysisRunId: run.id, items },
+        title: "创建计划整改待办",
+        description: `从最新分析生成 ${items.length} 条本人整改待办`,
+      });
+    }
+  }
 
   if (enabled.has("todo.create") && /(创建|新增|新建).*(待办)|待办.*(创建|新增|新建)/u.test(params.message)) {
     const title = cleanTitle(params.message);
@@ -140,13 +225,14 @@ export const proposeAssistantAction = async (params: {
   }
 
   const exportType = parseExportType(params.message);
-  if (enabled.has("project.export") && exportType) {
-    const label = { gantt: "任务进度", weekly: "本周事项", risk: "风险登记册", budget: "项目预算" }[exportType];
+  const projectExportType = exportType && exportType !== "scheduleAnalysis" ? exportType : null;
+  if (enabled.has("project.export") && projectExportType) {
+    const label = { gantt: "任务进度", weekly: "项目事项", risk: "风险登记册", budget: "项目预算" }[projectExportType];
     return createProposal({
       ...params,
       toolId: "project.export",
       riskLevel: "LOW",
-      args: { exportType },
+      args: { exportType: projectExportType },
       title: `导出${label}`,
       description: `生成当前项目的${label} CSV 文件`,
     });
@@ -184,7 +270,7 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
         data: {
           projectId: action.projectId,
           title,
-          detail: "由项目智能助手创建",
+          detail: "由佳佳创建",
           targetRole: "MEMBER",
           targetPersonName: String(args.targetPersonName || user.displayName),
           type: "ASSISTANT",
@@ -241,6 +327,102 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
       where: { id: action.id },
       data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "导出文件已生成", downloadUrl: `/api/assistant/exports/${action.id}` }) },
     });
+  }
+
+  if (action.toolId === "schedule.analysis.export") {
+    const analysisRunId = String(args.analysisRunId || "");
+    const run = await prisma.scheduleAnalysisRun.findFirst({ where: { id: analysisRunId, projectId: action.projectId } });
+    if (!run) throw new Error("计划分析记录不存在");
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "分析报告已生成", downloadUrl: `/api/assistant/exports/${action.id}` }) },
+    });
+  }
+
+  if (action.toolId === "document.revision.save") {
+    const attachmentId = String(args.attachmentId || "");
+    const content = String(args.content || "").trim();
+    const instruction = String(args.instruction || "").trim();
+    if (!content) throw new Error("修订稿内容为空");
+    const attachment = await prisma.assistantAttachment.findFirst({
+      where: { id: attachmentId, projectId: action.projectId, userId: user.userId },
+    });
+    if (!attachment) throw new Error("来源附件不存在");
+    const revisionId = randomUUID();
+    const artifactId = randomUUID();
+    const originalBase = basename(attachment.originalName, extname(attachment.originalName)).slice(0, 120) || "文档";
+    const fileName = `${originalBase}-修订稿.md`;
+    const storedName = buildAssistantStoredName(artifactId, fileName);
+    const filePath = getAssistantArtifactPath(action.projectId, storedName);
+    const buffer = Buffer.from(content, "utf8");
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(filePath, buffer);
+    const artifact = await prisma.$transaction(async (tx) => {
+      await tx.documentRevision.create({
+        data: { id: revisionId, projectId: action.projectId, attachmentId, userId: user.userId, instruction, content, format: "md" },
+      });
+      const created = await tx.assistantArtifact.create({
+        data: { id: artifactId, projectId: action.projectId, userId: user.userId, attachmentId, revisionId, fileName, storedName, mimeType: "text/markdown; charset=utf-8", sizeBytes: buffer.length },
+      });
+      await tx.operationHistory.create({
+        data: { projectId: action.projectId, entityType: "DOCUMENT_REVISION", entityId: revisionId, actionType: "CREATE", operator: user.displayName, detail: `通过智能助手保存「${attachment.originalName}」的独立修订稿` },
+      });
+      return created;
+    }).catch(async (error) => {
+      await rm(filePath, { force: true }).catch(() => undefined);
+      throw error;
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "修订稿已保存", artifactId: artifact.id, downloadUrl: `/api/assistant/artifacts/${artifact.id}/download` }) },
+    });
+  }
+
+  if (action.toolId === "risk.create.from-analysis") {
+    const issue = args.issue && typeof args.issue === "object" ? args.issue as Record<string, unknown> : {};
+    const taskIds = Array.isArray(issue.taskIds) ? issue.taskIds.map(String) : [];
+    const linkedTask = taskIds.length > 0
+      ? await prisma.projectGanttTask.findFirst({ where: { id: { in: taskIds }, projectId: action.projectId }, select: { id: true, taskCode: true, taskName: true } })
+      : null;
+    const existing = await prisma.riskRegisterItem.findMany({ where: { projectId: action.projectId }, select: { id: true, riskCode: true, sortOrder: true, createdAt: true } });
+    const lastSortOrder = existing.reduce((max, item) => Math.max(max, item.sortOrder), 0);
+    const created = await prisma.$transaction(async (tx) => {
+      const risk = await tx.riskRegisterItem.create({
+        data: {
+          projectId: action.projectId,
+          sortOrder: lastSortOrder + 1,
+          riskCode: nextRiskCode(existing),
+          ganttTaskId: linkedTask?.id ?? null,
+          riskName: String(issue.message || "计划分析冲突").slice(0, 200),
+          linkedItemName: linkedTask ? `${linkedTask.taskCode} ${linkedTask.taskName}` : "",
+          category: "进度",
+          trigger: JSON.stringify(issue.facts ?? {}).slice(0, 500),
+          probability: "中",
+          impact: issue.severity === "ERROR" ? "高" : "中",
+          level: issue.severity === "ERROR" ? "高" : "中",
+          response: String(issue.suggestion || "核对计划并制定纠偏措施"),
+          owner: user.displayName,
+        },
+      });
+      await tx.operationHistory.create({ data: { projectId: action.projectId, entityType: "RISK_REGISTER_ITEM", entityId: risk.id, actionType: "CREATE", operator: user.displayName, detail: `通过智能助手从计划分析创建风险「${risk.riskName}」` } });
+      return risk;
+    });
+    return prisma.assistantActionRun.update({ where: { id: action.id }, data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "风险已创建", riskId: created.id, riskCode: created.riskCode }) } });
+  }
+
+  if (action.toolId === "todo.create.batch") {
+    const items = Array.isArray(args.items) ? args.items.filter((item) => item && typeof item === "object").slice(0, 50) as Record<string, unknown>[] : [];
+    if (items.length === 0) throw new Error("没有可创建的整改待办");
+    const created = await prisma.$transaction(async (tx) => {
+      const rows = [];
+      for (const item of items) {
+        const title = String(item.title || "处理计划分析问题").slice(0, 200);
+        rows.push(await tx.todoItem.create({ data: { projectId: action.projectId, title, detail: String(item.detail || "由佳佳从计划分析生成"), targetRole: "MEMBER", targetPersonName: user.displayName, type: "ASSISTANT" } }));
+      }
+      await tx.operationHistory.create({ data: { projectId: action.projectId, entityType: "ASSISTANT_ACTION", entityId: action.id, actionType: "CREATE", operator: user.displayName, detail: `通过智能助手从计划分析创建 ${rows.length} 条整改待办` } });
+      return rows;
+    });
+    return prisma.assistantActionRun.update({ where: { id: action.id }, data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: `已创建 ${created.length} 条整改待办`, todoIds: created.map((item) => item.id) }) } });
   }
 
   throw new Error("不支持的 Agent 工具");

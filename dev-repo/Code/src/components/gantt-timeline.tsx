@@ -4,14 +4,17 @@ import { useEffect, useMemo, useState, type DragEvent, type KeyboardEvent } from
 import { ChevronLeft, ChevronRight, CornerDownRight, GripVertical, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { GanttDateField } from "@/components/gantt-date-field";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import type { ProjectGanttTask } from "@/domain/models";
 import {
   addCalendarDays,
+  addDaysInclusive,
   buildGanttDependencyLinks,
   buildGanttRows,
   diffDays,
+  diffDaysInclusive,
   getGanttDateRange,
   parseGanttDate,
 } from "@/lib/gantt";
@@ -39,20 +42,21 @@ export type GanttTaskDraft = {
   taskCategory: string;
   taskName: string;
   startDate: string;
+  endDate: string;
   durationDays: number;
   actualStartDate: string;
   actualEndDate: string;
   progress: number;
-  predecessorTask: string;
+  predecessorTaskIds: string[];
 };
 
 const ROW_HEIGHT = 30;
 const HEADER_HEIGHT = 32;
 const BAR_HEIGHT = 10;
 const MIN_TIMELINE_WIDTH = 860;
-const LEFT_WIDTH_EXPANDED = 1072;
+const LEFT_WIDTH_EXPANDED = 1128;
 const LEFT_WIDTH_COLLAPSED = 360;
-const LEFT_COLUMNS_EXPANDED = "24px 112px 86px 180px 56px 94px 94px 94px 94px 76px 106px";
+const LEFT_COLUMNS_EXPANDED = "24px 112px 86px 180px 56px 108px 108px 108px 108px 76px 106px";
 const LEFT_COLUMNS_COLLAPSED = "24px 112px 200px";
 const ZOOM_LEVELS = [1, 3, 8, 20, 60];
 const ZOOM_LABELS = ["60天", "30天", "15天", "5天", "1天"];
@@ -105,22 +109,24 @@ const toTaskDraft = (task: ProjectGanttTask): GanttTaskDraft => ({
   taskCategory: task.taskCategory,
   taskName: task.taskName,
   startDate: task.startDate,
+  endDate: task.finishDate || addDaysInclusive(task.startDate, task.durationDays),
   durationDays: task.durationDays,
   actualStartDate: task.actualStartDate ?? "",
   actualEndDate: task.actualEndDate ?? "",
   progress: Math.min(100, Math.max(0, task.progress ?? 0)),
-  predecessorTask: task.predecessorTask,
+  predecessorTaskIds: task.predecessorTaskIds ?? [],
 });
 
 const taskDraftEquals = (task: ProjectGanttTask, draft: GanttTaskDraft) => (
   task.taskCategory === draft.taskCategory
     && task.taskName === draft.taskName
     && task.startDate === draft.startDate
+    && (task.finishDate || addDaysInclusive(task.startDate, task.durationDays)) === draft.endDate
     && task.durationDays === draft.durationDays
     && (task.actualStartDate ?? "") === draft.actualStartDate
     && (task.actualEndDate ?? "") === draft.actualEndDate
     && (task.progress ?? 0) === draft.progress
-    && task.predecessorTask === draft.predecessorTask
+    && JSON.stringify(task.predecessorTaskIds ?? []) === JSON.stringify(draft.predecessorTaskIds)
     && (task.parentId ?? null) === (draft.parentId ?? null)
 );
 
@@ -338,6 +344,7 @@ export const GanttTimeline = ({
           </div>
           {canCreate && (
             <Button
+              type="button"
               size="sm"
               variant="outline"
               className="h-7 text-xs"
@@ -352,6 +359,7 @@ export const GanttTimeline = ({
           )}
           {canDelete && (
             <Button
+              type="button"
               size="sm"
               variant="outline"
               className="h-7 text-xs"
@@ -654,6 +662,7 @@ const EmptyGanttTimeline = ({
           </div>
           {canCreate && (
             <Button
+              type="button"
               size="sm"
               variant="outline"
               className="h-7 text-xs"
@@ -806,6 +815,48 @@ const EditableTaskRow = ({
   const commitDraft = () => {
     if (!canEdit || taskDraftEquals(row, draft)) return;
     void onUpdateTask?.(row, draft);
+  };
+
+  const withPlannedStart = (current: GanttTaskDraft, value: string): GanttTaskDraft => ({
+    ...current,
+    startDate: value,
+    endDate: value ? addDaysInclusive(value, current.durationDays) : current.endDate,
+  });
+
+  const withPlannedEnd = (current: GanttTaskDraft, value: string): GanttTaskDraft => ({
+    ...current,
+    endDate: value,
+    durationDays: current.startDate && value
+      ? diffDaysInclusive(current.startDate, value)
+      : current.durationDays,
+  });
+
+  const withActualStart = (current: GanttTaskDraft, value: string): GanttTaskDraft => ({
+    ...current,
+    actualStartDate: value,
+  });
+
+  const withActualEnd = (current: GanttTaskDraft, value: string): GanttTaskDraft => ({
+    ...current,
+    actualEndDate: value,
+  });
+
+  const updateDateDraft = (
+    builder: (current: GanttTaskDraft, value: string) => GanttTaskDraft,
+    value: string,
+  ) => {
+    setDraft((current) => builder(current, value));
+  };
+
+  const commitDateDraft = (
+    builder: (current: GanttTaskDraft, value: string) => GanttTaskDraft,
+    value: string,
+  ) => {
+    const nextDraft = builder(draft, value);
+    setDraft(nextDraft);
+    if (canEdit && !taskDraftEquals(row, nextDraft)) {
+      void onUpdateTask?.(row, nextDraft);
+    }
   };
 
   useEffect(() => {
@@ -966,43 +1017,49 @@ const EditableTaskRow = ({
             onBlur={commitDraft}
             onChange={(event) => {
               const digits = event.target.value.replace(/\D/g, "");
-              updateDraft("durationDays", digits ? Number(digits) : 1);
+              const durationDays = digits ? Number(digits) : 1;
+              setDraft((current) => ({
+                ...current,
+                durationDays,
+                endDate: current.startDate ? addDaysInclusive(current.startDate, durationDays) : current.endDate,
+              }));
             }}
             onKeyDown={handleKeyDown}
             className={durationFieldClass}
             disabled={!canEdit || isSaving}
             aria-label="工期天数"
           />
-          <Input
-            type="date"
+          <GanttDateField
             value={draft.startDate}
-            onBlur={commitDraft}
-            onChange={(event) => updateDraft("startDate", event.target.value)}
-            onKeyDown={handleKeyDown}
-            className={inlineFieldClass}
+            onChange={(value) => updateDateDraft(withPlannedStart, value)}
+            onCommit={(value) => commitDateDraft(withPlannedStart, value)}
             disabled={!canEdit || isSaving}
-            aria-label="计划开始"
+            ariaLabel="计划开始"
+            required
           />
-          <span className="truncate px-2 text-muted-foreground">{row.endDate}</span>
-          <Input
-            type="date"
+          <GanttDateField
+            value={draft.endDate}
+            onChange={(value) => updateDateDraft(withPlannedEnd, value)}
+            onCommit={(value) => commitDateDraft(withPlannedEnd, value)}
+            disabled={!canEdit || isSaving}
+            ariaLabel="计划完成"
+            min={draft.startDate}
+            required
+          />
+          <GanttDateField
             value={draft.actualStartDate}
-            onBlur={commitDraft}
-            onChange={(event) => updateDraft("actualStartDate", event.target.value)}
-            onKeyDown={handleKeyDown}
-            className={inlineFieldClass}
+            onChange={(value) => updateDateDraft(withActualStart, value)}
+            onCommit={(value) => commitDateDraft(withActualStart, value)}
             disabled={!canEdit || isSaving}
-            aria-label="实际开始"
+            ariaLabel="实际开始"
           />
-          <Input
-            type="date"
+          <GanttDateField
             value={draft.actualEndDate}
-            onBlur={commitDraft}
-            onChange={(event) => updateDraft("actualEndDate", event.target.value)}
-            onKeyDown={handleKeyDown}
-            className={inlineFieldClass}
+            onChange={(value) => updateDateDraft(withActualEnd, value)}
+            onCommit={(value) => commitDateDraft(withActualEnd, value)}
             disabled={!canEdit || isSaving}
-            aria-label="实际完成"
+            ariaLabel="实际完成"
+            min={draft.actualStartDate || undefined}
           />
           <div className="flex min-w-0 items-center gap-1">
             <Input
@@ -1023,9 +1080,9 @@ const EditableTaskRow = ({
             <span className="text-[10px] text-muted-foreground">%</span>
           </div>
           <PredecessorSelect
-            value={draft.predecessorTask}
+            value={draft.predecessorTaskIds[0] ?? ""}
             onChange={(value) => {
-              const nextDraft = { ...draft, predecessorTask: value };
+              const nextDraft = { ...draft, predecessorTaskIds: value ? [value] : [] };
               setDraft(nextDraft);
               if (canEdit && !taskDraftEquals(row, nextDraft)) {
                 void onUpdateTask?.(row, nextDraft);
@@ -1059,8 +1116,8 @@ const PredecessorSelect = ({
   >
     <option value="">无</option>
     {options.map((task) => (
-      <option key={task.id} value={task.taskName}>
-        {task.taskName}
+      <option key={task.id} value={task.id}>
+        {task.taskCode} · {task.taskName || "未命名任务"}
       </option>
     ))}
   </Select>

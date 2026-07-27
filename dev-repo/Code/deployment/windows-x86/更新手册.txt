@@ -1,0 +1,80 @@
+﻿Ceastar项目管理系统 Windows x86 离线更新手册
+============================================
+
+更新版本：2026.07.24
+适用环境：已安装 Ceastar项目管理系统的 Windows 10/11 x86-64 电脑
+
+一、更新包内容
+
+1. update.bat / update.ps1：自动更新脚本。
+2. rollback.bat / rollback.ps1：应用版本回退脚本。
+3. images 文件夹：新版 linux/amd64 Docker 镜像。
+4. image-name.txt：新版镜像名称。
+5. image.sha256：镜像完整性校验值。
+6. 更新手册.docx / 更新手册.txt：本手册。
+
+二、更新前准备
+
+1. 确认 Docker Desktop 已启动并显示运行正常。
+2. 保证系统盘或 Docker 数据盘至少有 4 GB 可用空间。
+3. 将整个“Ceastar-PMS-更新包-20260724”文件夹复制到原部署目录中。
+
+正确示例：
+
+D:\PMS\Ceastar-PMS-内网完整部署-20260723\docker-compose.yml
+D:\PMS\Ceastar-PMS-内网完整部署-20260723\backup.ps1
+D:\PMS\Ceastar-PMS-内网完整部署-20260723\Ceastar-PMS-更新包-20260724\update.bat
+
+更新包文件夹必须与 docker-compose.yml 所在目录相邻，不能再多套一层目录。
+
+三、执行更新
+
+1. 关闭正在使用项目管理系统的浏览器页面，等待当前操作保存完成。
+2. 双击更新包中的 update.bat。
+3. 脚本会自动完成以下操作：
+   - 检查 Docker Desktop；
+   - 校验更新镜像完整性；
+   - 备份 PostgreSQL 数据库和上传文档；
+   - 保留当前应用镜像作为回退版本；
+   - 加载新版离线镜像；
+   - 执行增量数据库迁移；
+   - 仅重建 pms 应用容器；
+   - 检查 http://localhost:3000/login 是否恢复访问。
+4. 窗口显示“Ceastar PMS update completed successfully.”后，按任意键关闭。
+
+更新过程中 PostgreSQL 数据卷、上传文档卷、Ollama 模型和既有备份不会被删除。
+
+四、更新后检查
+
+1. 打开 http://localhost:3000 并正常登录。
+2. 打开项目进度管理，确认任务和甘特图数据仍然存在。
+3. 重新导入 MPP 文件，确认不再出现 path 参数为数字的错误。
+4. 打开“系统设置 > 系统数据管理”，确认备份记录可查看。
+5. 如需查看容器状态，在原部署目录打开 PowerShell，执行：
+
+docker compose ps
+docker compose logs --tail 100 pms
+
+pms 和 pms-postgres 应显示为运行状态，日志中不应持续出现错误。
+
+五、回退应用版本
+
+如果更新后系统无法正常使用，双击更新包中的 rollback.bat。
+
+回退脚本会先再次备份数据库和上传文档，然后恢复更新前保留的应用镜像并重建 pms 容器。回退不会删除更新后的数据库数据。
+
+六、重要警告
+
+1. 更新时不要运行 install.bat。install.bat 用于首次安装，强制运行可能覆盖现有数据库。
+2. 不要执行 docker compose down -v。
+3. 不要删除 ceastar-pms_pgdata 和 ceastar-pms_document_storage 数据卷。
+4. 不要只复制镜像 tar 文件，必须完整复制整个更新包。
+5. 更新成功后，建议将原部署目录下新生成的 backups 文件夹复制到其他磁盘保存。
+
+七、常见问题
+
+1. 提示 Docker Desktop is not running：启动 Docker Desktop，等待其显示运行正常后重新执行 update.bat。
+2. 提示 checksum does not match：更新镜像复制不完整，删除本次复制的更新包后重新复制。
+3. 提示 deployment directory was not found：将更新包文件夹直接放到 docker-compose.yml 所在目录中。
+4. 页面暂时无法访问：等待 1 至 3 分钟；仍无法访问时执行 docker compose logs --tail 200 pms 查看日志。
+5. Ollama 模型是否受影响：不会。更新脚本不修改 Windows 上的 Ollama 安装目录和模型目录。

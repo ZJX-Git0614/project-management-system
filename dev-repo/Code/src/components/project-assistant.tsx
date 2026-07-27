@@ -17,6 +17,7 @@ import {
   FileSearch,
   Maximize2,
   Minimize2,
+  Paperclip,
   Send,
   Sparkles,
   Square,
@@ -34,7 +35,7 @@ import { TODO_CHANGED_EVENT } from "@/lib/todo-events"
 import { cn } from "@/lib/utils"
 import { useSystemFeedback } from "@/components/system-feedback-provider"
 
-type AssistantSource = "DATABASE" | "MODEL" | "RAG" | "MODEL_RAG" | "AGENT"
+type AssistantSource = "DATABASE" | "MODEL" | "RAG" | "MODEL_RAG" | "AGENT" | "SYSTEM"
 
 type AssistantAction = {
   id: string
@@ -47,7 +48,18 @@ type AssistantAction = {
   result?: { message?: string; downloadUrl?: string }
 }
 
-type AssistantBlock = { type: "action-proposal" | "action-result"; action: AssistantAction }
+type AssistantAttachment = {
+  id: string
+  name: string
+  mimeType: string
+  sizeBytes: number
+  status?: string
+  diagnostics?: Array<{ code: string; severity: string; message: string }>
+}
+
+type AssistantBlock =
+  | { type: "action-proposal" | "action-result"; action: AssistantAction }
+  | { type: "attachment"; attachment: AssistantAttachment }
 
 type AssistantRuntime = {
   enabled: boolean
@@ -62,6 +74,9 @@ type AssistantRuntime = {
 }
 
 type AssistantTrace = {
+  intent?: string
+  steps?: string[]
+  evidence?: Array<{ source?: string; detail?: string }>
   provider?: string | null
   model?: string | null
   retrieved?: Array<{ title?: string; category?: string }>
@@ -88,7 +103,6 @@ type Point = { x: number; y: number }
 type ProjectAssistantProps = {
   currentProjectId: string | null
   currentProjectName?: string | null
-  todoCount: number
 }
 
 const LAUNCHER_SIZE = 58
@@ -101,6 +115,7 @@ const sourceLabel: Record<AssistantSource, string> = {
   RAG: "项目知识库",
   MODEL_RAG: "智能模型 + 项目知识库",
   AGENT: "Agent 工具",
+  SYSTEM: "助手能力",
 }
 
 const clampPosition = (position: Point): Point => ({
@@ -135,7 +150,9 @@ const AssistantTraceDetails = ({ trace }: { trace?: AssistantTrace }) => {
   if (!trace) return null
   const counts = trace.dataCounts
   const retrieved = Array.isArray(trace.retrieved) ? trace.retrieved : []
-  const hasDetails = Boolean(trace.provider || trace.model || counts || retrieved.length)
+  const steps = Array.isArray(trace.steps) ? trace.steps : []
+  const evidence = Array.isArray(trace.evidence) ? trace.evidence : []
+  const hasDetails = Boolean(trace.intent || trace.provider || trace.model || counts || retrieved.length || steps.length || evidence.length)
   if (!hasDetails) return null
 
   return (
@@ -146,6 +163,7 @@ const AssistantTraceDetails = ({ trace }: { trace?: AssistantTrace }) => {
         <ChevronDown className="ml-auto size-3 transition-transform duration-150 group-open:rotate-180" />
       </summary>
       <div className="space-y-1.5 border-t border-border/60 px-2 py-2 leading-4">
+        {trace.intent && <div>问题范围：{trace.intent}</div>}
         {(trace.provider || trace.model) && (
           <div>模型：{[trace.provider, trace.model].filter(Boolean).join(" / ")}</div>
         )}
@@ -163,6 +181,16 @@ const AssistantTraceDetails = ({ trace }: { trace?: AssistantTrace }) => {
             ))}
           </div>
         )}
+        {steps.length > 0 && (
+          <div className="space-y-0.5">
+            {steps.map((step, index) => <div key={`${step}-${index}`}>{index + 1}. {step}</div>)}
+          </div>
+        )}
+        {evidence.map((item, index) => (
+          <div key={`${item.source || "数据来源"}-${index}`}>
+            来源：{item.source || "数据来源"}{item.detail ? ` · ${item.detail}` : ""}
+          </div>
+        ))}
       </div>
     </details>
   )
@@ -170,7 +198,7 @@ const AssistantTraceDetails = ({ trace }: { trace?: AssistantTrace }) => {
 
 const DEFAULT_RUNTIME: AssistantRuntime = {
   enabled: true,
-  assistantName: "项目智能助手",
+  assistantName: "佳佳",
   welcomeMessage: "",
   personaPreset: "PROFESSIONAL",
   avatarPalette: "ICE",
@@ -194,19 +222,25 @@ const avatarShapeClass: Record<string, string> = {
   MINIMAL: "rounded-[42%]",
 }
 
-const welcomeMessage = (runtime: AssistantRuntime, projectName?: string | null): ChatMessage => ({
+const assistantWelcomeText = (runtime: AssistantRuntime) => (
+  runtime.welcomeMessage.trim()
+  || `你好，我是${runtime.assistantName}。我可以帮你查询项目数据，并在确认后执行已授权操作。`
+)
+
+const launcherWelcomeText = (runtime: AssistantRuntime) => (
+  assistantWelcomeText(runtime).replace(/\*\*/g, "").replace(/\s+/g, " ").trim()
+)
+
+const welcomeMessage = (runtime: AssistantRuntime): ChatMessage => ({
   id: "assistant-welcome",
   role: "assistant",
-  content: runtime.welcomeMessage || (projectName
-    ? `我是${runtime.assistantName}，已连接当前项目 **${projectName}**。可以查询项目数据，也可以在确认后执行已授权操作。`
-    : `我是${runtime.assistantName}。选择项目后可以查询完整项目数据，当前也可以查看项目组合概况。`),
+  content: assistantWelcomeText(runtime),
   source: "DATABASE",
 })
 
 export function ProjectAssistant({
   currentProjectId,
   currentProjectName,
-  todoCount,
 }: ProjectAssistantProps) {
   const { notify } = useSystemFeedback()
   const [open, setOpen] = useState(false)
@@ -215,14 +249,18 @@ export function ProjectAssistant({
   const [sending, setSending] = useState(false)
   const [loadingHistory, setLoadingHistory] = useState(false)
   const [modelConfigured, setModelConfigured] = useState(false)
+  const [uploadingAttachment, setUploadingAttachment] = useState(false)
+  const [attachments, setAttachments] = useState<AssistantAttachment[]>([])
+  const [saveAttachmentsToProject, setSaveAttachmentsToProject] = useState(false)
   const [runtime, setRuntime] = useState<AssistantRuntime>(DEFAULT_RUNTIME)
-  const [messages, setMessages] = useState<ChatMessage[]>([welcomeMessage(DEFAULT_RUNTIME, currentProjectName)])
+  const [messages, setMessages] = useState<ChatMessage[]>([welcomeMessage(DEFAULT_RUNTIME)])
   const [position, setPosition] = useState<Point | null>(null)
   const [dragging, setDragging] = useState(false)
   const messagesRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLElement>(null)
   const launcherRef = useRef<HTMLButtonElement>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const attachmentInputRef = useRef<HTMLInputElement>(null)
   const dragRef = useRef<{
     pointerId: number
     startX: number
@@ -262,10 +300,10 @@ export function ProjectAssistant({
         const result = await api.get<{ messages: ChatMessage[]; runtime: AssistantRuntime }>(`/api/assistant/chat${query}`)
         if (cancelled) return
         setRuntime(result.runtime)
-        setMessages(result.messages.length > 0 ? result.messages : [welcomeMessage(result.runtime, currentProjectName)])
+        setMessages(result.messages.length > 0 ? result.messages : [welcomeMessage(result.runtime)])
         setModelConfigured(result.runtime.modelConfigured)
       } catch {
-        if (!cancelled) setMessages([welcomeMessage(DEFAULT_RUNTIME, currentProjectName)])
+        if (!cancelled) setMessages([welcomeMessage(DEFAULT_RUNTIME)])
       } finally {
         if (!cancelled) setLoadingHistory(false)
       }
@@ -389,6 +427,7 @@ export function ProjectAssistant({
       role: "user",
       content: message,
       createdAt: new Date().toISOString(),
+      blocks: attachments.map((attachment) => ({ type: "attachment", attachment })),
     }])
     setInput("")
     setSending(true)
@@ -411,6 +450,7 @@ export function ProjectAssistant({
             .filter((item) => item.id !== "assistant-welcome")
             .slice(-8)
             .map((item) => ({ role: item.role, content: item.content })),
+          attachmentIds: attachments.map((attachment) => attachment.id),
         }),
       })
       const payload = await response.json().catch(() => ({})) as {
@@ -432,6 +472,7 @@ export function ProjectAssistant({
           createdAt: new Date().toISOString(),
         },
       ])
+      setAttachments([])
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return
       setMessages((current) => [...current, {
@@ -446,6 +487,33 @@ export function ProjectAssistant({
     }
   }
 
+  const uploadAttachment = async (file?: File) => {
+    if (!file || !currentProjectId || uploadingAttachment) return
+    setUploadingAttachment(true)
+    try {
+      const formData = new FormData()
+      formData.append("projectId", currentProjectId)
+      formData.append("scope", saveAttachmentsToProject ? "PROJECT" : "CHAT")
+      formData.append("file", file)
+      const token = api.getToken()
+      const response = await fetch("/api/assistant/attachments", {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: formData,
+      })
+      const payload = await response.json().catch(() => ({})) as { error?: string; data?: AssistantAttachment }
+      if (!response.ok || !payload.data) throw new Error(payload.error || "附件上传失败")
+      setAttachments((current) => [...current.filter((item) => item.id !== payload.data!.id), payload.data!].slice(-5))
+      const errors = payload.data.diagnostics?.filter((item) => item.severity === "ERROR") ?? []
+      notify(errors[0]?.message || `已解析 ${payload.data.name}`, errors.length > 0 ? "warning" : "success")
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "附件上传失败", "error")
+    } finally {
+      setUploadingAttachment(false)
+      if (attachmentInputRef.current) attachmentInputRef.current.value = ""
+    }
+  }
+
   const stopMessage = () => {
     abortRef.current?.abort()
     abortRef.current = null
@@ -455,7 +523,7 @@ export function ProjectAssistant({
   const updateActionBlock = (action: AssistantAction) => {
     setMessages((current) => current.map((message) => ({
       ...message,
-      blocks: message.blocks?.map((block) => block.action.id === action.id
+      blocks: message.blocks?.map((block) => block.type !== "attachment" && block.action.id === action.id
         ? { ...block, type: action.status === "PROPOSED" ? "action-proposal" : "action-result", action }
         : block),
     })))
@@ -467,7 +535,7 @@ export function ProjectAssistant({
       updateActionBlock(result.action)
       const message = result.action.result?.message || (command === "cancel" ? "操作已取消" : "操作已执行")
       notify(message, command === "cancel" ? "info" : "success")
-      if (result.action.toolId === "todo.create" && result.action.status === "SUCCEEDED") {
+      if (["todo.create", "todo.create.batch"].includes(result.action.toolId) && result.action.status === "SUCCEEDED") {
         window.dispatchEvent(new Event(TODO_CHANGED_EVENT))
       }
       if (result.action.result?.downloadUrl) {
@@ -505,7 +573,7 @@ export function ProjectAssistant({
           }}
           aria-hidden="true"
         >
-          {currentProjectName ? `${runtime.assistantName}已连接 ${currentProjectName}` : `${runtime.assistantName}可查询项目组合数据`}
+          <span className="line-clamp-2 leading-5">{launcherWelcomeText(runtime)}</span>
         </div>
       )}
 
@@ -513,7 +581,7 @@ export function ProjectAssistant({
         <button
           ref={launcherRef}
           type="button"
-          aria-label="打开或移动项目智能助手"
+          aria-label={`打开或移动${runtime.assistantName}`}
           title={runtime.assistantName}
           data-thinking={sending ? "true" : "false"}
           className={cn(
@@ -534,11 +602,6 @@ export function ProjectAssistant({
         >
           <Bot className="size-7" strokeWidth={1.8} />
           <span className="absolute right-1 top-1 size-2 rounded-full border border-white/80 bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,.8)]" />
-          {todoCount > 0 && (
-            <span className="absolute -right-1 -top-1 flex min-w-4 items-center justify-center rounded-full bg-rose-500 px-1 text-[9px] font-bold leading-4 text-white">
-              {todoCount > 99 ? "99+" : todoCount}
-            </span>
-          )}
         </button>
       )}
 
@@ -547,13 +610,13 @@ export function ProjectAssistant({
           ref={panelRef}
           aria-label={runtime.assistantName}
           className={cn(
-            "app-assistant-panel fixed z-[79] flex overflow-hidden rounded-lg border border-border bg-card/98 text-card-foreground shadow-[var(--app-shadow-dialog)] backdrop-blur-xl",
+            "app-assistant-panel fixed z-[79] flex min-h-0 overflow-hidden rounded-lg border border-border bg-card/98 text-card-foreground shadow-[var(--app-shadow-dialog)] backdrop-blur-xl",
             fullScreen
               ? "inset-3 top-14"
               : "bottom-3 right-3 top-14 w-[min(420px,calc(100vw-24px))]",
           )}
         >
-          <div className="grid min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)_auto]">
+          <div className="grid h-full min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)_auto]">
             <header className="flex h-14 items-center gap-3 border-b border-border px-3">
               <div className={cn("flex size-9 shrink-0 items-center justify-center border shadow-md", avatarPaletteClass[runtime.avatarPalette] || avatarPaletteClass.ICE, avatarShapeClass[runtime.avatarStyle] || avatarShapeClass.ROUNDED)}>
                 <Bot className={cn("size-5", sending && "animate-pulse")} />
@@ -583,7 +646,7 @@ export function ProjectAssistant({
               </Button>
             </header>
 
-            <div ref={messagesRef} className="min-h-0 overflow-y-auto px-3 py-4">
+            <div ref={messagesRef} className="min-h-0 overflow-y-auto overscroll-contain px-3 py-4">
               <div className={cn("mx-auto space-y-4", fullScreen ? "max-w-5xl" : "max-w-none")}>
                 {loadingHistory && (
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -613,7 +676,13 @@ export function ProjectAssistant({
                         <AssistantMessageContent content={message.content} />
                       </div>
                       {message.blocks?.map((block) => (
-                        <div key={block.action.id} className="mt-2 rounded-md border border-primary/25 bg-primary/[0.06] p-3 shadow-[var(--app-shadow-soft)]">
+                        block.type === "attachment" ? (
+                          <div key={block.attachment.id} className="mt-2 flex items-center gap-2 rounded-md border border-border bg-background/45 px-2.5 py-2 text-[11px]">
+                            <FileSearch className="size-3.5 shrink-0 text-primary" />
+                            <span className="min-w-0 flex-1 truncate">{block.attachment.name}</span>
+                            <span className="shrink-0 text-muted-foreground">{Math.max(1, Math.ceil(block.attachment.sizeBytes / 1024))} KB</span>
+                          </div>
+                        ) : <div key={block.action.id} className="mt-2 rounded-md border border-primary/25 bg-primary/[0.06] p-3 shadow-[var(--app-shadow-soft)]">
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
                               <div className="text-xs font-semibold">{block.action.title}</div>
@@ -651,15 +720,40 @@ export function ProjectAssistant({
                       <Bot className="size-4 animate-pulse" />
                     </div>
                     <div className="rounded-md border border-border bg-background/55 px-3 py-2.5 text-xs text-muted-foreground">
-                      正在读取项目数据库并组织回答...
+                      正在理解问题并组织回答...
                     </div>
                   </div>
                 )}
               </div>
             </div>
 
-            <footer className="border-t border-border bg-background/25 p-3">
+            <footer className="min-w-0 shrink-0 border-t border-border bg-background/25 px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
               <div className={cn("mx-auto", fullScreen ? "max-w-5xl" : "max-w-none")}>
+                {attachments.length > 0 && (
+                  <div className="mb-2 flex flex-wrap gap-1.5">
+                    {attachments.map((attachment) => (
+                      <div key={attachment.id} className="flex max-w-full items-center gap-1.5 rounded-md border border-border bg-background/55 px-2 py-1 text-[11px]">
+                        <FileSearch className="size-3 shrink-0 text-primary" />
+                        <span className="max-w-56 truncate">{attachment.name}</span>
+                        <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} title="移除附件">
+                          <X className="size-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {currentProjectId && (
+                  <label className="mb-2 flex w-fit cursor-pointer items-center gap-2 text-[11px] text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={saveAttachmentsToProject}
+                      onChange={(event) => setSaveAttachmentsToProject(event.target.checked)}
+                      disabled={sending || uploadingAttachment}
+                      className="size-3.5 accent-primary"
+                    />
+                    同时保存到项目文档
+                  </label>
+                )}
                 <div className="mb-2 flex gap-1.5 overflow-x-auto pb-1">
                   {quickPrompts.map((prompt) => (
                     <button
@@ -674,12 +768,29 @@ export function ProjectAssistant({
                   ))}
                 </div>
                 <div className="flex items-end gap-2">
+                  <input
+                    ref={attachmentInputRef}
+                    type="file"
+                    accept=".docx,.xlsx,.csv,.pdf,.txt,.md,.mpp,.xml"
+                    className="hidden"
+                    onChange={(event) => void uploadAttachment(event.target.files?.[0])}
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="size-9 shrink-0"
+                    onClick={() => attachmentInputRef.current?.click()}
+                    disabled={!currentProjectId || sending || uploadingAttachment || attachments.length >= 5}
+                    title={currentProjectId ? "添加文档或进度文件" : "请先选择项目"}
+                  >
+                    {uploadingAttachment ? <Sparkles className="animate-pulse" /> : <Paperclip />}
+                  </Button>
                   <Textarea
                     value={input}
                     onChange={(event) => setInput(event.target.value)}
                     onKeyDown={handleComposerKeyDown}
                     placeholder="输入项目问题，Enter 发送，Shift+Enter 换行"
-                    className="min-h-[70px] resize-none text-xs"
+                    className="min-h-[62px] max-h-32 resize-none text-xs"
                     maxLength={1000}
                     disabled={sending}
                   />

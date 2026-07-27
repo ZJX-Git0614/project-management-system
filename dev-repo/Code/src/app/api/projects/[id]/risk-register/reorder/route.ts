@@ -2,6 +2,7 @@ import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { getUserFromRequest } from "@/lib/auth"
 import { ok, err, unauthorized, notFound } from "@/lib/api-utils"
+import { renumberRiskCodes } from "@/lib/risk-register-codes"
 
 export async function POST(
   req: NextRequest,
@@ -41,6 +42,17 @@ export async function POST(
         })
       ))
     )
+
+    const orderedItems = await tx.riskRegisterItem.findMany({
+      where: { projectId: id, id: { in: riskIds } },
+      select: { id: true, riskCode: true, sortOrder: true, createdAt: true },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+    })
+    const renumbered = renumberRiskCodes(orderedItems)
+    await Promise.all(renumbered.map((item) => tx.riskRegisterItem.update({
+      where: { id: item.id },
+      data: { riskCode: item.riskCode },
+    })))
 
     await tx.operationHistory.create({
       data: {
