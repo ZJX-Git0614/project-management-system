@@ -54,5 +54,30 @@ describe("earned value", () => {
       actualWorkHours: 48,
     });
     expect(summary).toMatchObject({ pv: 500, ev: 400, ac: 500, bac: 1000 });
+    expect(summary).toMatchObject({
+      workBasisHours: 80,
+      plannedWorkHours: 40,
+      earnedWorkHours: 32,
+      actualWorkHours: 48,
+      plannedProgress: 0.5,
+      actualProgress: 0.4,
+      scheduleVarianceHours: -8,
+      schedulePerformanceIndex: 0.8,
+    });
+  });
+
+  it("uses planned duration as the work basis when estimated hours are not maintained", () => {
+    const { rows, summary } = calculateEarnedValue([
+      { ...task, estimatedWorkHours: 0, actualWorkHours: 12 },
+    ], "2026-07-05");
+
+    expect(rows[0]).toMatchObject({
+      estimatedWorkHours: 0,
+      workBasisHours: 80,
+      plannedWorkHours: 40,
+      earnedWorkHours: 32,
+    });
+    expect(summary.scheduleVarianceHours).toBe(-8);
+    expect(summary.schedulePerformanceIndex).toBeCloseTo(0.8);
   });
 });

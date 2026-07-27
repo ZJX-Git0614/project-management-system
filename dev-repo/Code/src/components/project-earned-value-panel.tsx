@@ -37,6 +37,8 @@ const numberFormatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 
 
 const money = (value: number | null) => value === null ? "--" : currencyFormatter.format(value);
 const ratio = (value: number | null) => value === null ? "--" : numberFormatter.format(value);
+const percent = (value: number | null) => value === null ? "--" : `${numberFormatter.format(value * 100)}%`;
+const hours = (value: number | null) => value === null ? "--" : `${numberFormatter.format(value)} h`;
 const tone = (value: number | null, inverse = false) => {
   if (value === null || Math.abs(value) < 1e-9) return "text-foreground";
   const favorable = inverse ? value < 0 : value > 0;
@@ -120,16 +122,26 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
 
   if (loading) return <div className="text-sm text-muted-foreground">加载中...</div>;
 
-  const primaryMetrics = [
+  const progressDelta = analysis.summary.actualProgress - analysis.summary.plannedProgress;
+  const scheduleMetrics = [
+    { label: "计划进度", value: percent(analysis.summary.plannedProgress), formula: "按检查日期与计划工期计算", className: "text-foreground" },
+    { label: "当前进度", value: percent(analysis.summary.actualProgress), formula: "按任务当前进度加权", className: "text-foreground" },
+    { label: "进度偏差", value: `${progressDelta >= 0 ? "+" : ""}${percent(progressDelta)}`, formula: "当前进度 - 计划进度", className: tone(progressDelta) },
+    { label: "计划完成工时", value: hours(analysis.summary.plannedWorkHours), formula: "计划总工时 × 计划进度", className: "text-foreground" },
+    { label: "已挣工时", value: hours(analysis.summary.earnedWorkHours), formula: "计划总工时 × 当前进度", className: "text-foreground" },
+    { label: "实际投入工时", value: hours(analysis.summary.actualWorkHours), formula: "任务实际工时合计", className: "text-foreground" },
+    { label: "工时进度偏差", value: hours(analysis.summary.scheduleVarianceHours), formula: "已挣工时 - 计划完成工时", className: tone(analysis.summary.scheduleVarianceHours) },
+    { label: "工时进度指数", value: ratio(analysis.summary.schedulePerformanceIndex), formula: "已挣工时 / 计划完成工时", className: tone(analysis.summary.schedulePerformanceIndex === null ? null : analysis.summary.schedulePerformanceIndex - 1) },
+  ];
+  const costMetrics = [
     { label: "计划价值 PV", value: analysis.summary.pv, formula: "BAC × 检查日应完成比例" },
     { label: "挣值 EV", value: analysis.summary.ev, formula: "BAC × 当前完成比例" },
     { label: "实际成本 AC", value: analysis.summary.ac, formula: "实际工时 × 预算小时成本，或实际成本" },
     { label: "完工预算 BAC", value: analysis.summary.bac, formula: "项目预算与任务关联/分摊" },
   ];
-  const indicators = [
-    { label: "进度偏差 SV", value: money(analysis.summary.sv), formula: "EV - PV", className: tone(analysis.summary.sv) },
+  const costIndicators = [
+    { label: "预算化进度指数 SPI", value: ratio(analysis.summary.spi), formula: "EV / PV", className: tone(analysis.summary.spi === null ? null : analysis.summary.spi - 1) },
     { label: "成本偏差 CV", value: money(analysis.summary.cv), formula: "EV - AC", className: tone(analysis.summary.cv) },
-    { label: "进度绩效 SPI", value: ratio(analysis.summary.spi), formula: "EV / PV", className: tone(analysis.summary.spi === null ? null : analysis.summary.spi - 1) },
     { label: "成本绩效 CPI", value: ratio(analysis.summary.cpi), formula: "EV / AC", className: tone(analysis.summary.cpi === null ? null : analysis.summary.cpi - 1) },
     { label: "剩余成本 ETC", value: money(forecast.etc), formula: forecastMode === "typical" ? "(BAC - EV) / CPI" : "BAC - EV", className: "text-foreground" },
     { label: "完工估算 EAC", value: money(forecast.eac), formula: "AC + ETC", className: "text-foreground" },
@@ -179,14 +191,33 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
         </div>
       </section>
 
-      <section className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-        {primaryMetrics.map((metric) => (
+      <section className="space-y-2">
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-xs font-semibold">时间与工时进度绩效</h3>
+          <span className="text-[11px] text-muted-foreground">预计工时未填写时，按计划工期 × 8 小时计算</span>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+          {scheduleMetrics.map((metric) => (
+            <div key={metric.label} className="rounded-md border border-border bg-card px-3 py-2.5">
+              <div className="text-xs text-muted-foreground">{metric.label}</div>
+              <div className={cn("mt-1 text-lg font-semibold tabular-nums", metric.className)}>{metric.value}</div>
+              <div className="mt-1 text-[11px] text-muted-foreground/70">{metric.formula}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="space-y-2 border-t border-border pt-3">
+        <h3 className="text-xs font-semibold">挣值与成本绩效</h3>
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        {costMetrics.map((metric) => (
           <div key={metric.label} className="rounded-md border border-border bg-card px-3 py-2.5">
             <div className="text-xs text-muted-foreground">{metric.label}</div>
             <div className="mt-1 text-lg font-semibold tabular-nums">{money(metric.value)}</div>
             <div className="mt-1 text-[11px] text-muted-foreground/70">{metric.formula}</div>
           </div>
         ))}
+        </div>
       </section>
 
       <section className="grid gap-2 rounded-md border border-border bg-muted/15 px-3 py-2 text-[11px] text-muted-foreground md:grid-cols-3">
@@ -208,7 +239,7 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
           ))}
         </div>
         <div className="grid grid-cols-2 gap-x-5 gap-y-2 md:grid-cols-3">
-          {indicators.map((item) => (
+          {costIndicators.map((item) => (
             <div key={item.label} className="min-w-0 border-l border-border pl-2.5">
               <div className="truncate text-[11px] text-muted-foreground">{item.label}</div>
               <div className={cn("mt-0.5 text-sm font-semibold tabular-nums", item.className)}>{item.value}</div>
@@ -234,8 +265,8 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
                 <th className="w-36 px-3 text-right font-medium">实际成本 AC</th>
                 <th className="w-32 px-3 text-right font-medium">PV</th>
                 <th className="w-32 px-3 text-right font-medium">EV</th>
-                <th className="w-32 px-3 text-right font-medium">SV</th>
-                <th className="w-32 px-3 text-right font-medium">CV</th>
+                <th className="w-32 px-3 text-right font-medium">工时偏差</th>
+                <th className="w-32 px-3 text-right font-medium">成本偏差 CV</th>
               </tr>
             </thead>
             <tbody>
@@ -306,7 +337,7 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
                   </td>
                   <td className="px-3 text-right tabular-nums">{money(row.pv)}</td>
                   <td className="px-3 text-right tabular-nums">{money(row.ev)}</td>
-                  <td className={cn("px-3 text-right tabular-nums", tone(row.sv))}>{money(row.sv)}</td>
+                  <td className={cn("px-3 text-right tabular-nums", tone(row.workVarianceHours))}>{hours(row.workVarianceHours)}</td>
                   <td className={cn("px-3 text-right tabular-nums", tone(row.cv))}>{money(row.cv)}</td>
                 </tr>
               ))}

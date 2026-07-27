@@ -3,11 +3,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronRight,
+  CloudUpload,
   Download,
   FileText,
+  Files,
   Folder,
   FolderOpen,
   FolderTree,
+  HardDriveUpload,
   LoaderCircle,
   Trash2,
   Upload,
@@ -150,6 +153,12 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
     if (!open) resetUpload();
   };
 
+  const openUpload = (provider: "LOCAL" | "CLOUD" | "BOTH") => {
+    resetUpload();
+    setStorageProvider(provider);
+    setUploadOpen(true);
+  };
+
   const handleFileSelection = (fileList: FileList | null) => {
     if (!fileList) return;
     const incomingFiles = Array.from(fileList);
@@ -260,16 +269,29 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
               </CardDescription>
             </div>
           </div>
-          <Button
-            size="sm"
-            className="h-8 !border-primary/45 !bg-primary/10 !px-3 !text-primary hover:!bg-primary/20"
-            disabled={isReadOnly || !canUpload}
-            onClick={() => setUploadOpen(true)}
-            title={isReadOnly ? "已完成或已作废项目不能上传文件" : canUpload ? "上传文件" : "无上传权限"}
-          >
-            <Upload />
-            上传文件
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 px-3"
+              disabled={isReadOnly || !canUpload}
+              onClick={() => openUpload("LOCAL")}
+              title={isReadOnly ? "已完成或已作废项目不能上传文件" : canUpload ? "上传到服务器本地" : "无上传权限"}
+            >
+              <HardDriveUpload />
+              上传到本地
+            </Button>
+            <Button
+              size="sm"
+              className="h-8 !border-primary/45 !bg-primary/10 !px-3 !text-primary hover:!bg-primary/20"
+              disabled={isReadOnly || !canUpload}
+              onClick={() => openUpload("CLOUD")}
+              title={isReadOnly ? "已完成或已作废项目不能上传文件" : canUpload ? "上传到公司云盘" : "无上传权限"}
+            >
+              <CloudUpload />
+              上传到公司云盘
+            </Button>
+          </div>
         </div>
       </CardHeader>
       <CardContent>
@@ -488,39 +510,56 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
               </Select>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-foreground">存储位置</label>
+              <div className="grid grid-cols-3 overflow-hidden rounded-md border border-border bg-muted/20 p-0.5">
+                {([
+                  { value: "LOCAL", label: "服务器本地", icon: HardDriveUpload },
+                  { value: "CLOUD", label: "公司云盘", icon: CloudUpload },
+                  { value: "BOTH", label: "本地与云盘", icon: Files },
+                ] as const).map((option) => {
+                  const Icon = option.icon;
+                  const selected = storageProvider === option.value;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      aria-pressed={selected}
+                      disabled={uploading}
+                      onClick={() => {
+                        setStorageProvider(option.value);
+                        setUploadError("");
+                      }}
+                      className={cn(
+                        "flex h-9 min-w-0 items-center justify-center gap-1.5 rounded px-2 text-xs transition-colors",
+                        selected
+                          ? "bg-primary text-primary-foreground shadow-sm"
+                          : "text-muted-foreground hover:bg-background/70 hover:text-foreground",
+                      )}
+                    >
+                      <Icon className="size-3.5 shrink-0" />
+                      <span className="truncate">{option.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {storageProvider !== "LOCAL" && (
               <div className="space-y-1.5">
-                <label className="text-xs font-medium text-foreground">存储位置</label>
-                <Select
-                  className="!w-full"
-                  value={storageProvider}
+                <label className="text-xs font-medium text-foreground">公司云盘目录</label>
+                <input
+                  value={cloudDirectory}
                   onChange={(event) => {
-                    setStorageProvider(event.target.value as "LOCAL" | "CLOUD" | "BOTH");
+                    setCloudDirectory(event.target.value);
                     setUploadError("");
                   }}
+                  className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm outline-none transition-colors focus:border-primary"
+                  placeholder="Ceastar-PMS/documents"
                   disabled={uploading}
-                >
-                  <option value="LOCAL">服务器本地</option>
-                  <option value="CLOUD">公司云盘</option>
-                  <option value="BOTH">本地与公司云盘</option>
-                </Select>
+                />
               </div>
-              {storageProvider !== "LOCAL" && (
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-foreground">公司云盘目录</label>
-                  <input
-                    value={cloudDirectory}
-                    onChange={(event) => {
-                      setCloudDirectory(event.target.value);
-                      setUploadError("");
-                    }}
-                    className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm outline-none transition-colors focus:border-primary"
-                    placeholder="Ceastar-PMS/documents"
-                    disabled={uploading}
-                  />
-                </div>
-              )}
-            </div>
+            )}
 
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-foreground">选择文件（支持多选）</label>

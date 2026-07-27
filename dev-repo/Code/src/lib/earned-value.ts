@@ -23,6 +23,7 @@ export interface EarnedValueTaskInput {
 
 export interface EarnedValueTaskResult extends EarnedValueTaskInput {
   plannedProgress: number;
+  workBasisHours: number;
   pv: number;
   ev: number;
   sv: number;
@@ -48,6 +49,14 @@ export interface EarnedValueSummary {
   spi: number | null;
   cpi: number | null;
   bac: number;
+  workBasisHours: number;
+  plannedWorkHours: number;
+  earnedWorkHours: number;
+  actualWorkHours: number;
+  plannedProgress: number;
+  actualProgress: number;
+  scheduleVarianceHours: number;
+  schedulePerformanceIndex: number | null;
   typical: EarnedValueForecast;
   atypical: EarnedValueForecast;
   tcpiBac: number | null;
@@ -92,14 +101,16 @@ export const calculateEarnedValue = (tasks: EarnedValueTaskInput[], statusDate: 
     const pv = bac * plannedProgress;
     const estimatedWorkHours = finiteNonNegative(task.estimatedWorkHours);
     const actualWorkHours = finiteNonNegative(task.actualWorkHours);
-    const plannedWorkHours = estimatedWorkHours * plannedProgress;
-    const earnedWorkHours = estimatedWorkHours * Math.min(100, Math.max(0, task.progress)) / 100;
+    const workBasisHours = estimatedWorkHours || Math.max(0, task.durationDays) * 8;
+    const plannedWorkHours = workBasisHours * plannedProgress;
+    const earnedWorkHours = workBasisHours * Math.min(100, Math.max(0, task.progress)) / 100;
     return {
       ...task,
       budgetAtCompletion: bac,
       actualCost: ac,
       estimatedWorkHours,
       actualWorkHours,
+      workBasisHours,
       plannedProgress,
       pv,
       ev,
@@ -116,9 +127,24 @@ export const calculateEarnedValue = (tasks: EarnedValueTaskInput[], statusDate: 
     ev: sum.ev + row.ev,
     ac: sum.ac + finiteNonNegative(row.actualCost),
     bac: sum.bac + finiteNonNegative(row.budgetAtCompletion),
-  }), { pv: 0, ev: 0, ac: 0, bac: 0 });
+    workBasisHours: sum.workBasisHours + row.workBasisHours,
+    plannedWorkHours: sum.plannedWorkHours + row.plannedWorkHours,
+    earnedWorkHours: sum.earnedWorkHours + row.earnedWorkHours,
+    actualWorkHours: sum.actualWorkHours + finiteNonNegative(row.actualWorkHours),
+  }), {
+    pv: 0,
+    ev: 0,
+    ac: 0,
+    bac: 0,
+    workBasisHours: 0,
+    plannedWorkHours: 0,
+    earnedWorkHours: 0,
+    actualWorkHours: 0,
+  });
   const spi = safeRatio(totals.ev, totals.pv);
   const cpi = safeRatio(totals.ev, totals.ac);
+  const plannedProgress = safeRatio(totals.plannedWorkHours, totals.workBasisHours) ?? 0;
+  const actualProgress = safeRatio(totals.earnedWorkHours, totals.workBasisHours) ?? 0;
   const atypicalEtc = totals.bac - totals.ev;
   const typicalEtc = cpi === null || Math.abs(cpi) < 1e-9 ? null : (totals.bac - totals.ev) / cpi;
 
@@ -129,6 +155,10 @@ export const calculateEarnedValue = (tasks: EarnedValueTaskInput[], statusDate: 
     spi,
     cpi,
     bac: totals.bac,
+    plannedProgress,
+    actualProgress,
+    scheduleVarianceHours: totals.earnedWorkHours - totals.plannedWorkHours,
+    schedulePerformanceIndex: safeRatio(totals.earnedWorkHours, totals.plannedWorkHours),
     typical: buildForecast(totals.bac, totals.ev, totals.ac, typicalEtc),
     atypical: buildForecast(totals.bac, totals.ev, totals.ac, atypicalEtc),
     tcpiBac: safeRatio(totals.bac - totals.ev, totals.bac - totals.ac),

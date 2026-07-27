@@ -64,9 +64,13 @@ export async function GET(req: NextRequest) {
       type: todo.type,
       project: todo.project,
     })),
-    backupAlerts: backupAlerts.map((alert) => ({
-      ...alert,
+    notifications: backupAlerts.map((alert) => ({
+      id: alert.id,
       createdAt: alert.createdAt.toISOString(),
+      category: "系统数据管理",
+      title: alert.status === "FAILED" ? "数据库备份失败" : "公司云盘同步失败",
+      detail: alert.errorMessage || "备份未完整完成，请在系统数据管理中检查记录。",
+      severity: alert.status === "FAILED" ? "ERROR" : "WARNING",
     })),
   });
 }

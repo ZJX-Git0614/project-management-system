@@ -181,8 +181,8 @@ export function AssistantMessageContent({ content }: { content: string }) {
       paragraph.push(next)
       index += 1
     }
-    blocks.push(<p key={`paragraph-${index}`} className="whitespace-pre-wrap">{renderInline(paragraph.join("\n"))}</p>)
+    blocks.push(<p key={`paragraph-${index}`} className="w-full whitespace-pre-wrap break-all [overflow-wrap:anywhere]">{renderInline(paragraph.join("\n"))}</p>)
   }
 
-  return <div className="min-w-0 max-w-full space-y-2 break-words">{blocks}</div>
+  return <div className="w-full min-w-0 max-w-full space-y-2 break-words [overflow-wrap:anywhere]">{blocks}</div>
 }

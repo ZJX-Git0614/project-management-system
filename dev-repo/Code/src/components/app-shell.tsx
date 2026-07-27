@@ -520,9 +520,9 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
           <div className="app-feedback-toast fixed right-4 top-14 z-[115] flex w-[min(420px,calc(100vw-2rem))] items-start gap-3 rounded-md border border-amber-500/35 bg-amber-950/95 px-3 py-3 text-amber-50 shadow-[var(--app-shadow-popover)] backdrop-blur-md">
             <div className="flex min-w-0 items-center gap-2">
               <AlertTriangle className="size-4 shrink-0 text-amber-300" />
-              <span className="text-sm leading-5">有 {todoCounts.notificationCount} 条系统告警待查看，请及时处理备份或云盘同步问题。</span>
+              <span className="text-sm leading-5">有 {todoCounts.notificationCount} 条未读系统通知，请及时查看。</span>
             </div>
-            <Link href="/todos" className="ml-auto shrink-0 rounded-md border border-amber-300/35 px-2 py-1 text-xs font-medium text-amber-50 transition-colors hover:bg-white/10">查看</Link>
+            <Link href="/todos#notifications" className="ml-auto shrink-0 rounded-md border border-amber-300/35 px-2 py-1 text-xs font-medium text-amber-50 transition-colors hover:bg-white/10">查看</Link>
           </div>
         )}
 
