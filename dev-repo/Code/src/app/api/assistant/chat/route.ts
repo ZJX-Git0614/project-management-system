@@ -10,7 +10,9 @@ import {
 } from "@/lib/project-assistant";
 import {
   callProjectAssistantModel,
+  planProjectAssistantActionWithModel,
   planProjectAssistantQueryWithModel,
+  shouldPlanProjectAssistantAction,
 } from "@/lib/project-assistant-model";
 import {
   buildProjectAssistantAnswerTrace,
@@ -178,7 +180,13 @@ export async function POST(req: NextRequest) {
   let ragResult: Awaited<ReturnType<typeof queryRagLite>> = null;
   let retrievedChunks: Array<{ content: string; metadata?: Record<string, unknown> }> = [];
 
-  const action = await proposeAssistantAction({ message, projectId, user, runtime, history });
+  let action = await proposeAssistantAction({ message, projectId, user, runtime, history });
+  if (!action && shouldPlanProjectAssistantAction(message)) {
+    const actionPlan = await planProjectAssistantActionWithModel({ message, history, runtime, signal: req.signal });
+    if (actionPlan) {
+      action = await proposeAssistantAction({ message: actionPlan.command, projectId, user, runtime, history, expectedToolId: actionPlan.toolId });
+    }
+  }
   if (req.signal.aborted) return err("本次回答已终止", 499);
   const ruleIntent = detectProjectAssistantQueryIntent(message);
   const modelIntent = !action && shouldPlanProjectAssistantQuery(ruleIntent, message)

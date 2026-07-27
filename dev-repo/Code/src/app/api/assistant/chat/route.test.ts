@@ -18,7 +18,9 @@ const mocks = vi.hoisted(() => {
     buildProjectAssistantContext: vi.fn(),
     buildDatabaseAssistantAnswer: vi.fn(),
     callProjectAssistantModel: vi.fn(),
+    planProjectAssistantActionWithModel: vi.fn(),
     planProjectAssistantQueryWithModel: vi.fn(),
+    shouldPlanProjectAssistantAction: vi.fn(),
     queryRagLite: vi.fn(),
     prisma,
   }
@@ -38,7 +40,9 @@ vi.mock("@/lib/project-assistant", () => ({
 }))
 vi.mock("@/lib/project-assistant-model", () => ({
   callProjectAssistantModel: mocks.callProjectAssistantModel,
+  planProjectAssistantActionWithModel: mocks.planProjectAssistantActionWithModel,
   planProjectAssistantQueryWithModel: mocks.planProjectAssistantQueryWithModel,
+  shouldPlanProjectAssistantAction: mocks.shouldPlanProjectAssistantAction,
 }))
 vi.mock("@/lib/raglite-client", () => ({ queryRagLite: mocks.queryRagLite }))
 vi.mock("@/lib/prisma", () => ({ prisma: mocks.prisma }))
@@ -90,7 +94,9 @@ describe("POST /api/assistant/chat", () => {
       embeddingProvider: null,
     })
     mocks.proposeAssistantAction.mockResolvedValue(null)
+    mocks.planProjectAssistantActionWithModel.mockResolvedValue(null)
     mocks.planProjectAssistantQueryWithModel.mockResolvedValue(null)
+    mocks.shouldPlanProjectAssistantAction.mockReturnValue(false)
     mocks.buildProjectAssistantContext.mockResolvedValue(context)
     mocks.callProjectAssistantModel.mockResolvedValue(null)
     mocks.queryRagLite.mockResolvedValue(null)
@@ -122,5 +128,34 @@ describe("POST /api/assistant/chat", () => {
     expect(mocks.callProjectAssistantModel).toHaveBeenCalledWith(expect.objectContaining({
       intent: expect.objectContaining({ identityOnly: true, domains: ["IDENTITY"] }),
     }))
+  })
+
+  it("binds a model-normalized command to the exact white-listed agent tool", async () => {
+    mocks.shouldPlanProjectAssistantAction.mockReturnValue(true)
+    mocks.planProjectAssistantActionWithModel.mockResolvedValue({
+      toolId: "weekly.status.update",
+      command: "将 Matter007 更新为进行中，当前进度 35%",
+    })
+    mocks.proposeAssistantAction
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: "action-1",
+        toolId: "weekly.status.update",
+        title: "更新项目事项",
+        description: "Matter007 更新为进行中",
+        riskLevel: "MEDIUM",
+        status: "PROPOSED",
+        expiresAt: "2026-07-28T00:00:00.000Z",
+      })
+
+    const { POST } = await import("./route")
+    const response = await POST(request("把第七个事项推进到百分之三十五并设为处理中"))
+
+    expect(response.status).toBe(200)
+    expect(mocks.proposeAssistantAction).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      message: "将 Matter007 更新为进行中，当前进度 35%",
+      expectedToolId: "weekly.status.update",
+    }))
+    expect(mocks.callProjectAssistantModel).not.toHaveBeenCalled()
   })
 })

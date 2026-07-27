@@ -46,7 +46,7 @@ type AssistantAction = {
   riskLevel: string
   status: string
   expiresAt: string
-  result?: { message?: string; downloadUrl?: string }
+  result?: { message?: string; downloadUrl?: string; navigateUrl?: string; navigateLabel?: string }
 }
 
 type AssistantAttachment = {
@@ -435,7 +435,7 @@ export function ProjectAssistant({
 
   const sendMessage = async (rawMessage?: string) => {
     const message = (rawMessage ?? input).trim()
-    if (!message || sending) return
+    if (!message || sending || abortRef.current) return
     const tempUserId = `pending-${Date.now()}`
     setMessages((current) => [...current, {
       id: tempUserId,
@@ -500,7 +500,7 @@ export function ProjectAssistant({
       setSuggestions(Array.isArray(result.suggestions) ? result.suggestions : [])
       setAttachments([])
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return
+      if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return
       setMessages((current) => [...current, {
         id: `error-${Date.now()}`,
         role: "assistant",
@@ -508,9 +508,11 @@ export function ProjectAssistant({
         createdAt: new Date().toISOString(),
       }])
     } finally {
-      if (abortRef.current === controller) abortRef.current = null
-      setSending(false)
-      setThinkingStartedAt(null)
+      if (abortRef.current === controller) {
+        abortRef.current = null
+        setSending(false)
+        setThinkingStartedAt(null)
+      }
     }
   }
 
@@ -552,10 +554,14 @@ export function ProjectAssistant({
   }
 
   const stopMessage = () => {
-    abortRef.current?.abort()
+    const controller = abortRef.current
+    if (!controller) return
+    controller.abort()
     abortRef.current = null
     setSending(false)
     setThinkingStartedAt(null)
+    setThinkingElapsedMs(0)
+    notify("已停止本次处理", "info")
   }
 
   const updateActionBlock = (action: AssistantAction) => {
@@ -573,7 +579,7 @@ export function ProjectAssistant({
       updateActionBlock(result.action)
       const message = result.action.result?.message || (command === "cancel" ? "操作已取消" : "操作已执行")
       notify(message, command === "cancel" ? "info" : "success")
-      if (["todo.create", "todo.create.batch"].includes(result.action.toolId) && result.action.status === "SUCCEEDED") {
+      if (["todo.create", "todo.create.batch", "todo.complete"].includes(result.action.toolId) && result.action.status === "SUCCEEDED") {
         window.dispatchEvent(new Event(TODO_CHANGED_EVENT))
       }
       if (result.action.result?.downloadUrl) {
@@ -685,7 +691,7 @@ export function ProjectAssistant({
             </header>
 
             <div ref={messagesRef} className="min-h-0 w-full min-w-0 overflow-x-hidden overflow-y-auto overscroll-contain px-3 py-4">
-              <div className={cn("mx-auto w-full min-w-0 space-y-4", fullScreen ? "max-w-5xl" : "max-w-none")}>
+              <div className={cn("mx-auto w-full min-w-0 space-y-4", fullScreen ? "max-w-[1440px]" : "max-w-none")}>
                 {loadingHistory && (
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     <Sparkles className="size-3.5 animate-pulse text-primary" /> 正在加载会话记录...
@@ -740,8 +746,19 @@ export function ProjectAssistant({
                               <Button size="sm" onClick={() => void handleAction(block.action, "confirm")}><Check className="size-3.5" />确认执行</Button>
                             </div>
                           ) : (
-                            <div className={cn("mt-2 text-[11px] font-medium", block.action.status === "SUCCEEDED" ? "text-emerald-400" : "text-muted-foreground")}>
-                              {block.action.result?.message || ({ CANCELLED: "已取消", EXPIRED: "已过期", FAILED: "执行失败" }[block.action.status] || block.action.status)}
+                            <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                              <span className={cn("text-[11px] font-medium", block.action.status === "SUCCEEDED" ? "text-emerald-400" : "text-muted-foreground")}>
+                                {block.action.result?.message || ({ CANCELLED: "已取消", EXPIRED: "已过期", FAILED: "执行失败" }[block.action.status] || block.action.status)}
+                              </span>
+                              {block.action.status === "SUCCEEDED" && block.action.result?.navigateUrl && (
+                                <button
+                                  type="button"
+                                  className="rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:border-primary/35 hover:bg-primary/[0.08] hover:text-foreground"
+                                  onClick={() => window.location.assign(block.action.result!.navigateUrl!)}
+                                >
+                                  {block.action.result.navigateLabel || "查看结果"}
+                                </button>
+                              )}
                             </div>
                           )}
                         </div>
@@ -806,7 +823,7 @@ export function ProjectAssistant({
             </div>
 
             <footer className="w-full min-w-0 shrink-0 overflow-x-hidden border-t border-border bg-background/25 px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-              <div className={cn("mx-auto w-full min-w-0", fullScreen ? "max-w-5xl" : "max-w-none")}>
+              <div className={cn("mx-auto w-full min-w-0", fullScreen ? "max-w-[1440px]" : "max-w-none")}>
                 <div className="rounded-md border border-border bg-card/70 p-2 shadow-[var(--app-shadow-soft)] transition-colors focus-within:border-primary/45 focus-within:bg-card">
                   <input
                     ref={attachmentInputRef}
@@ -850,7 +867,7 @@ export function ProjectAssistant({
                       {uploadingAttachment ? "解析中" : "附件"}
                     </Button>
                     {sending ? (
-                      <Button variant="outline" size="icon" className="size-8 shrink-0" onClick={stopMessage} title="停止回答">
+                      <Button variant="destructive" size="icon" className="size-8 shrink-0" onClick={stopMessage} title="停止回答" aria-label="停止回答">
                         <Square className="size-3.5 fill-current" />
                       </Button>
                     ) : (

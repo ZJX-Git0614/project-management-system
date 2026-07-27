@@ -6,7 +6,7 @@ import {
   normalizeAssistantPersonaPreset,
 } from "@/lib/assistant-persona";
 import { decryptAssistantSecret, encryptAssistantSecret } from "@/lib/assistant-secrets";
-import { DEFAULT_ASSISTANT_SYSTEM_PROMPT, defaultAssistantSettingsData } from "@/lib/assistant-settings";
+import { ASSISTANT_TOOL_CATALOG, DEFAULT_ASSISTANT_SYSTEM_PROMPT, defaultAssistantSettingsData } from "@/lib/assistant-settings";
 
 describe("assistant settings foundations", () => {
   const originalSecret = process.env.ASSISTANT_CONFIG_ENCRYPTION_KEY;
@@ -33,5 +33,15 @@ describe("assistant settings foundations", () => {
   it("uses 佳佳 as the assistant identity", () => {
     expect(defaultAssistantSettingsData().assistantName).toBe("佳佳");
     expect(DEFAULT_ASSISTANT_SYSTEM_PROMPT).toContain("智能助手佳佳");
+  });
+
+  it("exposes the operational agent tools in the administrator settings", () => {
+    const toolIds = ASSISTANT_TOOL_CATALOG.map((tool) => tool.id);
+    expect(toolIds).toEqual(expect.arrayContaining([
+      "todo.complete",
+      "weekly.status.update",
+      "risk.create",
+      "risk.status.update",
+    ]));
   });
 });

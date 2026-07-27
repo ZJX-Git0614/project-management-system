@@ -10,7 +10,9 @@ import type { AssistantRuntimeConfig } from "@/lib/assistant-settings"
 import type { ProjectAssistantContext } from "@/lib/project-assistant"
 import {
   callProjectAssistantModel,
+  planProjectAssistantActionWithModel,
   planProjectAssistantQueryWithModel,
+  shouldPlanProjectAssistantAction,
 } from "@/lib/project-assistant-model"
 import { detectProjectAssistantQueryIntent } from "@/lib/project-assistant-query"
 
@@ -122,5 +124,28 @@ describe("project assistant model routing", () => {
     expect(request.temperature).toBe(0)
     expect(request.messages[0].content).toContain("白名单业务域")
     expect(request.messages[0].content).toContain("不得生成 SQL")
+  })
+
+  it("uses the model only to normalize explicit white-listed agent actions", async () => {
+    callAssistantProviderModel.mockResolvedValue('{"toolId":"weekly.status.update","command":"将 Matter007 更新为进行中，当前进度 35%"}')
+
+    const plan = await planProjectAssistantActionWithModel({
+      message: "把第七个事项推进到百分之三十五并设为处理中",
+      history: [],
+      runtime: {
+        ...runtime,
+        agentEnabledToolIds: ["weekly.status.update"],
+      },
+    })
+
+    expect(plan).toEqual({
+      toolId: "weekly.status.update",
+      command: "将 Matter007 更新为进行中，当前进度 35%",
+    })
+    expect(shouldPlanProjectAssistantAction("有哪些延期事项")).toBe(false)
+    expect(shouldPlanProjectAssistantAction("更新 Matter007 的进度")).toBe(true)
+    const request = callAssistantProviderModel.mock.calls[0][0]
+    expect(request.messages[0].content).toContain("白名单工具")
+    expect(request.messages[0].content).toContain("不得生成数据库 ID")
   })
 })

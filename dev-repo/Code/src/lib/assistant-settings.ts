@@ -67,7 +67,11 @@ export type AssistantRuntimeConfig = {
 
 export const ASSISTANT_TOOL_CATALOG = [
   { id: "todo.create", label: "创建项目待办", description: "确认后为当前项目创建待办事项", riskLevel: "MEDIUM" },
+  { id: "todo.complete", label: "完成项目待办", description: "按待办标题定位并确认完成", riskLevel: "MEDIUM" },
   { id: "gantt.progress.update", label: "更新任务进度", description: "确认后更新当前项目任务进度", riskLevel: "MEDIUM" },
+  { id: "weekly.status.update", label: "更新事项状态", description: "按事项 ID 更新状态或当前进度", riskLevel: "MEDIUM" },
+  { id: "risk.create", label: "登记项目风险", description: "根据明确的风险名称创建风险登记", riskLevel: "MEDIUM" },
+  { id: "risk.status.update", label: "更新风险状态", description: "按风险 ID 更新跟踪状态", riskLevel: "MEDIUM" },
   { id: "project.export", label: "导出项目数据", description: "导出任务、事项、风险或预算 CSV", riskLevel: "LOW" },
   { id: "schedule.analysis.export", label: "导出计划分析", description: "导出最新计划差异、冲突和影响链", riskLevel: "LOW" },
   { id: "document.revision.save", label: "保存文档修订稿", description: "将助手生成的文档内容保存为独立修订稿", riskLevel: "LOW" },
@@ -76,6 +80,16 @@ export const ASSISTANT_TOOL_CATALOG = [
 ] as const;
 
 const DEFAULT_TOOL_IDS = ASSISTANT_TOOL_CATALOG.map((item) => item.id);
+const LEGACY_DEFAULT_TOOL_IDS = [
+  "todo.create",
+  "gantt.progress.update",
+  "project.export",
+  "schedule.analysis.export",
+  "document.revision.save",
+  "risk.create.from-analysis",
+  "todo.create.batch",
+] as const;
+const NEW_DEFAULT_TOOL_IDS = ["todo.complete", "weekly.status.update", "risk.create", "risk.status.update"] as const;
 
 const parseToolIds = (value: string) => {
   try {
@@ -86,6 +100,12 @@ const parseToolIds = (value: string) => {
   } catch {
     return [];
   }
+};
+
+const includeNewDefaultTools = (toolIds: string[]) => {
+  const configured = new Set(toolIds);
+  if (!LEGACY_DEFAULT_TOOL_IDS.every((toolId) => configured.has(toolId))) return toolIds;
+  return Array.from(new Set([...toolIds, ...NEW_DEFAULT_TOOL_IDS]));
 };
 
 export const defaultAssistantSettingsData = () => ({
@@ -180,7 +200,7 @@ export const loadAssistantRuntimeConfig = async (): Promise<AssistantRuntimeConf
     vectorSearchQueryAdapter: settings.vectorSearchQueryAdapter,
     rerankerEnabled: settings.rerankerEnabled,
     agentEnabled: settings.agentEnabled,
-    agentEnabledToolIds: parseToolIds(settings.agentEnabledToolIds),
+    agentEnabledToolIds: includeNewDefaultTools(parseToolIds(settings.agentEnabledToolIds)),
     agentMaxExportRows: settings.agentMaxExportRows,
     agentActionExpiryMinutes: settings.agentActionExpiryMinutes,
     ragliteBaseUrl: (settings.ragliteBaseUrl || process.env.RAGLITE_SERVICE_URL || "").replace(/\/$/, ""),
@@ -227,7 +247,7 @@ export const serializeAssistantSettings = (settings: AssistantSettings) => ({
   vectorSearchQueryAdapter: settings.vectorSearchQueryAdapter,
   rerankerEnabled: settings.rerankerEnabled,
   agentEnabled: settings.agentEnabled,
-  agentEnabledToolIds: parseToolIds(settings.agentEnabledToolIds),
+  agentEnabledToolIds: includeNewDefaultTools(parseToolIds(settings.agentEnabledToolIds)),
   agentMaxExportRows: settings.agentMaxExportRows,
   agentActionExpiryMinutes: settings.agentActionExpiryMinutes,
   ragliteBaseUrl: settings.ragliteBaseUrl,

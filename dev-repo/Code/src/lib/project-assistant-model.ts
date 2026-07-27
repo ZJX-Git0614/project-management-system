@@ -1,5 +1,6 @@
 import { callAssistantProviderModel } from "@/lib/assistant-provider-client"
 import {
+  ASSISTANT_TOOL_CATALOG,
   assistantModelSystemPrompt,
   type AssistantRuntimeConfig,
 } from "@/lib/assistant-settings"
@@ -66,6 +67,71 @@ export const planProjectAssistantQueryWithModel = async (params: {
       ],
     })
     return parsePlannerResponse(response)
+  } catch {
+    return null
+  }
+}
+
+const parseActionPlannerResponse = (content: string, enabledToolIds: Set<string>) => {
+  const json = content.match(/\{[\s\S]*\}/)?.[0]
+  if (!json) return null
+  try {
+    const parsed = JSON.parse(json) as { toolId?: unknown; command?: unknown }
+    const toolId = typeof parsed.toolId === "string" ? parsed.toolId.trim() : ""
+    const command = typeof parsed.command === "string" ? parsed.command.trim() : ""
+    if (!enabledToolIds.has(toolId) || !command || command.length > 500) return null
+    return { toolId, command }
+  } catch {
+    return null
+  }
+}
+
+export const shouldPlanProjectAssistantAction = (message: string) =>
+  /(创建|新增|新建|登记|更新|修改|调整|推进|设置|设为|改为|完成|关闭|办结|导出|下载|保存|转为)/u.test(message)
+
+export const planProjectAssistantActionWithModel = async (params: {
+  message: string
+  history: AssistantMessageInput[]
+  runtime: AssistantRuntimeConfig
+  signal?: AbortSignal
+}) => {
+  if (!params.runtime.agentEnabled || !params.runtime.llmProvider || !shouldPlanProjectAssistantAction(params.message)) return null
+  const enabledToolIds = new Set(params.runtime.agentEnabledToolIds)
+  const catalog = ASSISTANT_TOOL_CATALOG
+    .filter((tool) => enabledToolIds.has(tool.id))
+    .map((tool) => `${tool.id}: ${tool.description}`)
+    .join("\n")
+  if (!catalog) return null
+  const recentHistory = params.history
+    .slice(-4)
+    .map((item) => `${item.role}: ${item.content.slice(0, 500)}`)
+    .join("\n")
+  try {
+    const response = await callAssistantProviderModel({
+      provider: params.runtime.llmProvider,
+      temperature: 0,
+      maxTokens: 240,
+      signal: params.signal,
+      timeoutMs: 15_000,
+      messages: [
+        {
+          role: "system",
+          content: [
+            "你是 Ceastar PMS Agent 操作规划器，只把用户明确要求执行的操作规范化，不回答问题。",
+            "用户只是查询、讨论、分析或表达假设时必须返回 null，不得擅自生成写操作。",
+            "只能选择以下已启用白名单工具：",
+            catalog,
+            "返回 JSON：{\"toolId\":\"白名单工具ID\",\"command\":\"保留用户事实的简洁规范化命令\"}，无法确定时返回 null。",
+            "不得生成数据库 ID、SQL、接口、虚构名称、虚构进度或用户没有提供的业务字段。",
+          ].join("\n"),
+        },
+        {
+          role: "user",
+          content: `最近对话：\n${recentHistory || "无"}\n\n当前请求：${params.message}`,
+        },
+      ],
+    })
+    return parseActionPlannerResponse(response, enabledToolIds)
   } catch {
     return null
   }

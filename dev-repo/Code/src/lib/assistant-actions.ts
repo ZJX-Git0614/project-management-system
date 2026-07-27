@@ -57,6 +57,69 @@ const parseProgressIntent = (message: string) => {
   return Number.isFinite(value) && value >= 0 && value <= 100 ? { taskCode: code, progress: value } : null;
 };
 
+const weeklyStatusByLabel: Record<string, string> = {
+  "待开始": "PENDING",
+  "未开始": "PENDING",
+  "进行中": "IN_PROGRESS",
+  "已完成": "DONE",
+  "完成": "DONE",
+  "已取消": "CANCELED",
+  "取消": "CANCELED",
+};
+
+const weeklyStatusLabel: Record<string, string> = {
+  PENDING: "待开始",
+  IN_PROGRESS: "进行中",
+  DONE: "已完成",
+  CANCELED: "已取消",
+};
+
+export const parseWeeklyItemUpdateIntent = (message: string) => {
+  const matterCode = message.match(/Matter\d+/i)?.[0];
+  if (!matterCode) return null;
+  const statusLabel = message.match(/(?:状态\s*(?:改为|更新为|设置为|设为)?|改为|更新为|设置为|设为)\s*(待开始|未开始|进行中|已完成|完成(?!度)|已取消|取消)/u)?.[1];
+  const progressText = message.match(/(?:进度|完成度)\s*(?:改为|更新为|设置为|到)?\s*(\d{1,3})\s*%?/u)?.[1];
+  const progress = progressText === undefined ? undefined : Number(progressText);
+  if (!statusLabel && progress === undefined) return null;
+  if (progress !== undefined && (!Number.isFinite(progress) || progress < 0 || progress > 100)) return null;
+  return {
+    matterCode,
+    status: statusLabel ? weeklyStatusByLabel[statusLabel] : undefined,
+    progress,
+  };
+};
+
+export const parseTodoCompletionTarget = (message: string) => {
+  if (!/(完成|关闭|办结).*(待办)|待办.*(完成|关闭|办结)/u.test(message)) return null;
+  const target = message
+    .replace(/^(请|帮我|麻烦)?\s*(?:把|将)?\s*(完成|关闭|办结)\s*(?:项目)?待办\s*[:：]?/u, "")
+    .replace(/^(请|帮我|麻烦)?\s*(?:把|将)?\s*(?:项目)?待办\s*/u, "")
+    .replace(/\s*(?:标记为|设置为|改为|更新为)?\s*(?:已完成|完成|关闭|办结)\s*$/u, "")
+    .replace(/[“”"'：:]/g, "")
+    .trim();
+  return target || null;
+};
+
+const riskStatuses = ["识别中", "跟踪中", "处理中", "已关闭"] as const;
+
+export const parseRiskStatusUpdateIntent = (message: string) => {
+  const riskCode = message.match(/Risk\d+/i)?.[0];
+  const status = riskStatuses.find((candidate) => message.includes(candidate));
+  return riskCode && status ? { riskCode, status } : null;
+};
+
+export const parseRiskCreationName = (message: string) => {
+  if (!/(创建|新增|新建|登记).{0,8}风险|风险.{0,8}(创建|新增|新建|登记)/u.test(message)) return null;
+  if (/(分析结论|计划分析|冲突).*(转为|创建|新增|登记).*风险/u.test(message)) return null;
+  const name = message
+    .replace(/^(请|帮我|麻烦)?\s*(?:创建|新增|新建|登记)\s*(?:一个|一条)?\s*(?:项目)?风险\s*[:：]?/u, "")
+    .replace(/^(请|帮我|麻烦)?\s*(?:把|将)?\s*风险\s*/u, "")
+    .replace(/\s*(?:创建|新增|新建|登记)\s*$/u, "")
+    .replace(/[“”"']/g, "")
+    .trim();
+  return name && name.length <= 200 ? name : null;
+};
+
 type AssistantExportType = "scheduleAnalysis" | "gantt" | "weekly" | "risk" | "budget";
 
 const parseExportType = (message: string): AssistantExportType | null => {
@@ -112,12 +175,14 @@ export const proposeAssistantAction = async (params: {
   user: AuthenticatedUser;
   runtime: AssistantRuntimeConfig;
   history?: Array<{ role: "user" | "assistant"; content: string }>;
+  expectedToolId?: string;
 }): Promise<AssistantActionView | null> => {
   if (!params.runtime.agentEnabled || !params.projectId) return null;
   if (!(await ensureProjectAccess(params.user, params.projectId))) return null;
   const enabled = new Set(params.runtime.agentEnabledToolIds);
+  const canUse = (toolId: string) => enabled.has(toolId) && (!params.expectedToolId || params.expectedToolId === toolId);
 
-  if (enabled.has("document.revision.save") && /(保存|下载|生成).*(修订稿|修改稿|重写稿|文档)/u.test(params.message)) {
+  if (canUse("document.revision.save") && /(保存|下载|生成).*(修订稿|修改稿|重写稿|文档)/u.test(params.message)) {
     const latestAssistantContent = [...(params.history ?? [])].reverse().find((item) => item.role === "assistant")?.content.trim() || "";
     const attachment = await prisma.assistantAttachment.findFirst({
       where: { projectId: params.projectId, userId: params.user.userId, status: "READY" },
@@ -136,7 +201,7 @@ export const proposeAssistantAction = async (params: {
     }
   }
 
-  if (enabled.has("schedule.analysis.export") && /(导出|下载).*(差异|冲突|计划分析|影响链)/u.test(params.message)) {
+  if (canUse("schedule.analysis.export") && /(导出|下载).*(差异|冲突|计划分析|影响链)/u.test(params.message)) {
     const run = await prisma.scheduleAnalysisRun.findFirst({
       where: { projectId: params.projectId, status: "COMPLETED" },
       orderBy: { createdAt: "desc" },
@@ -154,7 +219,7 @@ export const proposeAssistantAction = async (params: {
     }
   }
 
-  if (enabled.has("risk.create.from-analysis") && /(冲突|分析结论|问题).*(创建|新建|转为).*风险|风险.*(创建|新建|转为).*(冲突|分析)/u.test(params.message)) {
+  if (canUse("risk.create.from-analysis") && /(冲突|分析结论|问题).*(创建|新建|转为).*风险|风险.*(创建|新建|转为).*(冲突|分析)/u.test(params.message)) {
     const run = await prisma.scheduleAnalysisRun.findFirst({ where: { projectId: params.projectId, status: "COMPLETED" }, orderBy: { createdAt: "desc" } });
     const result = run ? parseJson(run.resultJson) : {};
     const issue = Array.isArray(result.issues)
@@ -174,7 +239,7 @@ export const proposeAssistantAction = async (params: {
     }
   }
 
-  if (enabled.has("todo.create.batch") && /(建议|冲突|分析结论).*(创建|生成|转为).*待办|待办.*(创建|生成|转为).*(建议|冲突|分析)/u.test(params.message)) {
+  if (canUse("todo.create.batch") && /(建议|冲突|分析结论).*(创建|生成|转为).*待办|待办.*(创建|生成|转为).*(建议|冲突|分析)/u.test(params.message)) {
     const run = await prisma.scheduleAnalysisRun.findFirst({ where: { projectId: params.projectId, status: "COMPLETED" }, orderBy: { createdAt: "desc" } });
     const result = run ? parseJson(run.resultJson) : {};
     const issues = Array.isArray(result.issues) ? result.issues.filter((item) => item && typeof item === "object").slice(0, 20) as Record<string, unknown>[] : [];
@@ -194,7 +259,31 @@ export const proposeAssistantAction = async (params: {
     }
   }
 
-  if (enabled.has("todo.create") && /(创建|新增|新建).*(待办)|待办.*(创建|新增|新建)/u.test(params.message)) {
+  const todoCompletionTarget = parseTodoCompletionTarget(params.message);
+  if (canUse("todo.complete") && todoCompletionTarget) {
+    const matches = await prisma.todoItem.findMany({
+      where: {
+        projectId: params.projectId,
+        status: "OPEN",
+        title: { contains: todoCompletionTarget, mode: "insensitive" },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 2,
+      select: { id: true, title: true },
+    });
+    if (matches.length === 1) {
+      return createProposal({
+        ...params,
+        toolId: "todo.complete",
+        riskLevel: "MEDIUM",
+        args: { todoId: matches[0].id },
+        title: "完成项目待办",
+        description: `将待办「${matches[0].title}」标记为已完成`,
+      });
+    }
+  }
+
+  if (canUse("todo.create") && /(创建|新增|新建).*(待办)|待办.*(创建|新增|新建)/u.test(params.message)) {
     const title = cleanTitle(params.message);
     if (!title || title.length > 200) return null;
     return createProposal({
@@ -208,7 +297,7 @@ export const proposeAssistantAction = async (params: {
   }
 
   const progressIntent = parseProgressIntent(params.message);
-  if (enabled.has("gantt.progress.update") && progressIntent) {
+  if (canUse("gantt.progress.update") && progressIntent) {
     const task = await prisma.projectGanttTask.findFirst({
       where: { projectId: params.projectId, taskCode: { equals: progressIntent.taskCode, mode: "insensitive" } },
       select: { id: true, taskCode: true, taskName: true, progress: true },
@@ -224,9 +313,59 @@ export const proposeAssistantAction = async (params: {
     });
   }
 
+  const weeklyIntent = parseWeeklyItemUpdateIntent(params.message);
+  if (canUse("weekly.status.update") && weeklyIntent) {
+    const item = await prisma.weeklyItem.findFirst({
+      where: { projectId: params.projectId, matterCode: { equals: weeklyIntent.matterCode, mode: "insensitive" } },
+      select: { id: true, matterCode: true, title: true, status: true, progress: true },
+    });
+    if (item) {
+      const nextStatus = weeklyIntent.status ?? item.status;
+      const nextProgress = weeklyIntent.progress ?? (nextStatus === "DONE" ? 100 : item.progress);
+      return createProposal({
+        ...params,
+        toolId: "weekly.status.update",
+        riskLevel: "MEDIUM",
+        args: { weeklyItemId: item.id, status: nextStatus, progress: nextProgress },
+        title: "更新项目事项",
+        description: `${item.matterCode} ${item.title}：${weeklyStatusLabel[item.status] || item.status} / ${item.progress}% → ${weeklyStatusLabel[nextStatus] || nextStatus} / ${nextProgress}%`,
+      });
+    }
+  }
+
+  const riskStatusIntent = parseRiskStatusUpdateIntent(params.message);
+  if (canUse("risk.status.update") && riskStatusIntent) {
+    const risk = await prisma.riskRegisterItem.findFirst({
+      where: { projectId: params.projectId, riskCode: { equals: riskStatusIntent.riskCode, mode: "insensitive" } },
+      select: { id: true, riskCode: true, riskName: true, status: true },
+    });
+    if (risk) {
+      return createProposal({
+        ...params,
+        toolId: "risk.status.update",
+        riskLevel: "MEDIUM",
+        args: { riskId: risk.id, status: riskStatusIntent.status },
+        title: "更新风险状态",
+        description: `${risk.riskCode} ${risk.riskName}：${risk.status} → ${riskStatusIntent.status}`,
+      });
+    }
+  }
+
+  const riskName = parseRiskCreationName(params.message);
+  if (canUse("risk.create") && riskName) {
+    return createProposal({
+      ...params,
+      toolId: "risk.create",
+      riskLevel: "MEDIUM",
+      args: { riskName },
+      title: "登记项目风险",
+      description: `创建风险「${riskName}」，其余字段保持系统默认并可在风险登记册继续完善`,
+    });
+  }
+
   const exportType = parseExportType(params.message);
   const projectExportType = exportType && exportType !== "scheduleAnalysis" ? exportType : null;
-  if (enabled.has("project.export") && projectExportType) {
+  if (canUse("project.export") && projectExportType) {
     const label = { gantt: "任务进度", weekly: "项目事项", risk: "风险登记册", budget: "项目预算" }[projectExportType];
     return createProposal({
       ...params,
@@ -290,7 +429,31 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     });
     return prisma.assistantActionRun.update({
       where: { id: action.id },
-      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "待办已创建", todoId: todo.id, title: todo.title }) },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "待办已创建", todoId: todo.id, title: todo.title, navigateUrl: "/todos", navigateLabel: "查看待办中心" }) },
+    });
+  }
+
+  if (action.toolId === "todo.complete") {
+    const todoId = String(args.todoId || "");
+    const current = await prisma.todoItem.findFirst({ where: { id: todoId, projectId: action.projectId, status: "OPEN" } });
+    if (!current) throw new Error("待办不存在或已处理");
+    const updated = await prisma.$transaction(async (tx) => {
+      const todo = await tx.todoItem.update({ where: { id: todoId }, data: { status: "DONE" } });
+      await tx.operationHistory.create({
+        data: {
+          projectId: action.projectId,
+          entityType: "TODO_ITEM",
+          entityId: todo.id,
+          actionType: "UPDATE",
+          operator: user.displayName,
+          detail: `通过智能助手完成待办「${todo.title}」`,
+        },
+      });
+      return todo;
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "待办已完成", todoId: updated.id, navigateUrl: "/todos", navigateLabel: "查看待办中心" }) },
     });
   }
 
@@ -318,7 +481,35 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     });
     return prisma.assistantActionRun.update({
       where: { id: action.id },
-      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "任务进度已更新", taskId: updated.id, progress: updated.progress }) },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "任务进度已更新", taskId: updated.id, progress: updated.progress, navigateUrl: `/projects/${action.projectId}?nav=gantt`, navigateLabel: "查看项目进度" }) },
+    });
+  }
+
+  if (action.toolId === "weekly.status.update") {
+    const weeklyItemId = String(args.weeklyItemId || "");
+    const status = String(args.status || "");
+    const progress = Number(args.progress);
+    if (!Object.hasOwn(weeklyStatusLabel, status)) throw new Error("事项状态无效");
+    if (!Number.isFinite(progress) || progress < 0 || progress > 100) throw new Error("事项进度应为 0-100 的数字");
+    const current = await prisma.weeklyItem.findFirst({ where: { id: weeklyItemId, projectId: action.projectId } });
+    if (!current) throw new Error("事项不存在");
+    const updated = await prisma.$transaction(async (tx) => {
+      const item = await tx.weeklyItem.update({ where: { id: weeklyItemId }, data: { status, progress } });
+      await tx.operationHistory.create({
+        data: {
+          projectId: action.projectId,
+          entityType: "WEEKLY_ITEM",
+          entityId: item.id,
+          actionType: "UPDATE",
+          operator: user.displayName,
+          detail: `通过智能助手将 ${item.matterCode} ${item.title} 从 ${weeklyStatusLabel[current.status] || current.status} / ${current.progress}% 更新为 ${weeklyStatusLabel[status]} / ${progress}%`,
+        },
+      });
+      return item;
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "事项状态已更新", weeklyItemId: updated.id, navigateUrl: "/weekly-items", navigateLabel: "查看项目事项" }) },
     });
   }
 
@@ -408,6 +599,68 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
       return risk;
     });
     return prisma.assistantActionRun.update({ where: { id: action.id }, data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "风险已创建", riskId: created.id, riskCode: created.riskCode }) } });
+  }
+
+  if (action.toolId === "risk.create") {
+    const riskName = String(args.riskName || "").trim();
+    if (!riskName || riskName.length > 200) throw new Error("风险名称不能为空且不能超过 200 个字");
+    const existing = await prisma.riskRegisterItem.findMany({
+      where: { projectId: action.projectId },
+      select: { id: true, riskCode: true, sortOrder: true, createdAt: true },
+    });
+    const lastSortOrder = existing.reduce((max, item) => Math.max(max, item.sortOrder), 0);
+    const created = await prisma.$transaction(async (tx) => {
+      const risk = await tx.riskRegisterItem.create({
+        data: {
+          projectId: action.projectId,
+          sortOrder: lastSortOrder + 1,
+          riskCode: nextRiskCode(existing),
+          riskName,
+          owner: user.displayName,
+        },
+      });
+      await tx.operationHistory.create({
+        data: {
+          projectId: action.projectId,
+          entityType: "RISK_REGISTER_ITEM",
+          entityId: risk.id,
+          actionType: "CREATE",
+          operator: user.displayName,
+          detail: `通过智能助手登记风险「${risk.riskName}」`,
+        },
+      });
+      return risk;
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "风险已登记", riskId: created.id, riskCode: created.riskCode, navigateUrl: "/risk-register", navigateLabel: "查看风险登记册" }) },
+    });
+  }
+
+  if (action.toolId === "risk.status.update") {
+    const riskId = String(args.riskId || "");
+    const status = String(args.status || "");
+    if (!riskStatuses.includes(status as (typeof riskStatuses)[number])) throw new Error("风险状态无效");
+    const current = await prisma.riskRegisterItem.findFirst({ where: { id: riskId, projectId: action.projectId } });
+    if (!current) throw new Error("风险不存在");
+    const updated = await prisma.$transaction(async (tx) => {
+      const risk = await tx.riskRegisterItem.update({ where: { id: riskId }, data: { status } });
+      await tx.operationHistory.create({
+        data: {
+          projectId: action.projectId,
+          entityType: "RISK_REGISTER_ITEM",
+          entityId: risk.id,
+          actionType: "UPDATE",
+          operator: user.displayName,
+          detail: `通过智能助手将 ${risk.riskCode} ${risk.riskName} 状态从 ${current.status} 更新为 ${status}`,
+        },
+      });
+      return risk;
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "风险状态已更新", riskId: updated.id, navigateUrl: "/risk-register", navigateLabel: "查看风险登记册" }) },
+    });
   }
 
   if (action.toolId === "todo.create.batch") {
