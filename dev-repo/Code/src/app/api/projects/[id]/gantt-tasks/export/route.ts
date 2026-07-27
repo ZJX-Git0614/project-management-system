@@ -5,6 +5,7 @@ import { getUserFromRequest } from "@/lib/auth";
 import { err, notFound, ok, unauthorized } from "@/lib/api-utils";
 import {
   buildGanttExcel,
+  buildGanttExcelTemplate,
   buildProjectXml,
   convertProjectXmlToMpp,
   ganttTransferCapabilities,
@@ -38,6 +39,14 @@ export async function GET(
   const tasks = (await getOrderedGanttTasks(id)).map(serializeGanttTask);
   const scheduleMetadata = await prisma.projectScheduleImportMetadata.findUnique({ where: { projectId: id } });
   const baseName = safeFileName(project.code || project.name);
+
+  if (format === "template") {
+    return downloadResponse(
+      buildGanttExcelTemplate(),
+      "Ceastar-PMS-项目进度导入模板.xlsx",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+  }
 
   if (format === "xlsx") {
     return downloadResponse(

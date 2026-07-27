@@ -36,7 +36,7 @@ function Wait-ForApplication {
 }
 
 $deploymentDirectory = Find-DeploymentDirectory
-$stateFile = Join-Path $deploymentDirectory ".ceastar-update-20260727-2.state"
+$stateFile = Join-Path $deploymentDirectory ".ceastar-update-20260727-3.state"
 if (-not (Test-Path $stateFile)) {
   throw "Update state was not found. Rollback is unavailable."
 }

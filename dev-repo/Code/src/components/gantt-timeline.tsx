@@ -46,6 +46,8 @@ export type GanttTaskDraft = {
   durationDays: number;
   actualStartDate: string;
   actualEndDate: string;
+  estimatedWorkHours: number;
+  actualWorkHours: number;
   progress: number;
   predecessorTaskIds: string[];
 };
@@ -54,9 +56,9 @@ const ROW_HEIGHT = 30;
 const HEADER_HEIGHT = 32;
 const BAR_HEIGHT = 10;
 const MIN_TIMELINE_WIDTH = 860;
-const LEFT_WIDTH_EXPANDED = 1128;
+const LEFT_WIDTH_EXPANDED = 1296;
 const LEFT_WIDTH_COLLAPSED = 360;
-const LEFT_COLUMNS_EXPANDED = "24px 112px 86px 180px 56px 108px 108px 108px 108px 76px 106px";
+const LEFT_COLUMNS_EXPANDED = "24px 112px 86px 180px 56px 108px 108px 108px 108px 82px 82px 76px 106px";
 const LEFT_COLUMNS_COLLAPSED = "24px 112px 200px";
 const ZOOM_LEVELS = [1, 3, 8, 20, 60];
 const ZOOM_LABELS = ["60天", "30天", "15天", "5天", "1天"];
@@ -113,6 +115,8 @@ const toTaskDraft = (task: ProjectGanttTask): GanttTaskDraft => ({
   durationDays: task.durationDays,
   actualStartDate: task.actualStartDate ?? "",
   actualEndDate: task.actualEndDate ?? "",
+  estimatedWorkHours: Math.max(0, task.estimatedWorkHours ?? 0),
+  actualWorkHours: Math.max(0, task.actualWorkHours ?? 0),
   progress: Math.min(100, Math.max(0, task.progress ?? 0)),
   predecessorTaskIds: task.predecessorTaskIds ?? [],
 });
@@ -125,6 +129,8 @@ const taskDraftEquals = (task: ProjectGanttTask, draft: GanttTaskDraft) => (
     && task.durationDays === draft.durationDays
     && (task.actualStartDate ?? "") === draft.actualStartDate
     && (task.actualEndDate ?? "") === draft.actualEndDate
+    && (task.estimatedWorkHours ?? 0) === draft.estimatedWorkHours
+    && (task.actualWorkHours ?? 0) === draft.actualWorkHours
     && (task.progress ?? 0) === draft.progress
     && JSON.stringify(task.predecessorTaskIds ?? []) === JSON.stringify(draft.predecessorTaskIds)
     && (task.parentId ?? null) === (draft.parentId ?? null)
@@ -748,6 +754,8 @@ const TaskGridHeader = ({ collapsed }: { collapsed: boolean }) => (
         <span>计划完成</span>
         <span>实际开始</span>
         <span>实际完成</span>
+        <span>预计工时</span>
+        <span>实际工时</span>
         <span>当前进度</span>
         <span>紧前任务</span>
       </>
@@ -1060,6 +1068,32 @@ const EditableTaskRow = ({
             disabled={!canEdit || isSaving}
             ariaLabel="实际完成"
             min={draft.actualStartDate || undefined}
+          />
+          <Input
+            type="number"
+            min={0}
+            step="0.5"
+            value={draft.estimatedWorkHours}
+            onBlur={commitDraft}
+            onChange={(event) => updateDraft("estimatedWorkHours", Math.max(0, Number(event.target.value) || 0))}
+            onKeyDown={handleKeyDown}
+            className={durationFieldClass}
+            disabled={!canEdit || isSaving}
+            aria-label="预计工时"
+            title="单位：小时"
+          />
+          <Input
+            type="number"
+            min={0}
+            step="0.5"
+            value={draft.actualWorkHours}
+            onBlur={commitDraft}
+            onChange={(event) => updateDraft("actualWorkHours", Math.max(0, Number(event.target.value) || 0))}
+            onKeyDown={handleKeyDown}
+            className={durationFieldClass}
+            disabled={!canEdit || isSaving}
+            aria-label="实际工时"
+            title="单位：小时"
           />
           <div className="flex min-w-0 items-center gap-1">
             <Input

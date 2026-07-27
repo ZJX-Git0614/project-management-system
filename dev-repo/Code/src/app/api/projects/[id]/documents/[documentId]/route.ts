@@ -2,8 +2,10 @@ import { rm } from "node:fs/promises";
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getUserFromRequest } from "@/lib/auth";
-import { ensureMutableProject, notFound, ok, unauthorized } from "@/lib/api-utils";
+import { ensureMutableProject, err, notFound, ok, unauthorized } from "@/lib/api-utils";
 import { getProjectDocumentPath } from "@/lib/project-document-storage";
+import { getSystemBackupSettings, getSystemWebDavConfig } from "@/lib/system-backup";
+import { deleteFileFromWebDav } from "@/lib/webdav-backup";
 
 export const runtime = "nodejs";
 
@@ -22,6 +24,15 @@ export async function DELETE(
     where: { id: documentId, projectId: id },
   });
   if (!document) return notFound("文件");
+
+  if (document.cloudPath) {
+    try {
+      const settings = await getSystemBackupSettings();
+      await deleteFileFromWebDav(getSystemWebDavConfig(settings), document.cloudPath);
+    } catch (error) {
+      return err(error instanceof Error ? error.message : "公司云盘文件删除失败", 502);
+    }
+  }
 
   await prisma.$transaction(async (tx) => {
     await tx.projectDocumentFile.delete({ where: { id: document.id } });

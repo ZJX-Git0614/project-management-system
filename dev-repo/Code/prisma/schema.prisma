@@ -68,6 +68,8 @@ model ProjectGanttTask {
   durationFormat     Int      @default(7)
   actualStartDate    String   @default("")
   actualEndDate      String   @default("")
+  estimatedWorkHours Float    @default(0)
+  actualWorkHours    Float    @default(0)
   progress           Int      @default(0)
   predecessorTask    String   @default("")
   taskMode           String   @default("AUTO")
@@ -83,10 +85,12 @@ model ProjectGanttTask {
   baselineCost       Float    @default(0)
   budgetAtCompletion Float    @default(0)
   actualCost         Float    @default(0)
+  budgetItemId       String?
   baselines          Json     @default("[]")
   sortOrder          Int      @default(0)
 
   project                 Project                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  budgetItem              ProjectBudgetItem?       @relation(fields: [budgetItemId], references: [id], onDelete: SetNull)
   parent                  ProjectGanttTask?        @relation("GanttTaskChildren", fields: [parentId], references: [id], onDelete: Cascade)
   children                ProjectGanttTask[]       @relation("GanttTaskChildren")
   weeklyItems             WeeklyItem[]
@@ -95,6 +99,7 @@ model ProjectGanttTask {
   successorDependencies   ProjectGanttDependency[] @relation("GanttDependencyPredecessor")
 
   @@index([projectId, externalUid])
+  @@index([projectId, budgetItemId])
 }
 
 model ProjectGanttDependency {
@@ -211,8 +216,9 @@ model ProjectBudgetItem {
   // 备注
   remark               String   @default("")
 
-  category ProjectBudgetCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
-  project  Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  category   ProjectBudgetCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  project    Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  ganttTasks ProjectGanttTask[]
 }
 
 // 项目预算设置（合同 + 利润率目标，每项目一条；公摊/审价/风险已迁入 RATE 分类）
@@ -367,6 +373,8 @@ model SystemBackupRecord {
   cloudPath               String    @default("")
   operator                String    @default("")
   errorMessage            String    @default("") @db.Text
+  notificationReadAt      DateTime?
+  notificationReadBy      String    @default("")
 
   @@index([createdAt])
   @@index([status, createdAt])
@@ -402,16 +410,18 @@ model RiskRegisterItem {
 }
 
 model ProjectDocumentFile {
-  id           String   @id @default(cuid())
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  projectId    String
-  directoryKey String
-  originalName String
-  storedName   String   @unique
-  mimeType     String   @default("application/octet-stream")
-  sizeBytes    Int
-  uploadedBy   String
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  projectId       String
+  directoryKey    String
+  originalName    String
+  storedName      String   @unique
+  mimeType        String   @default("application/octet-stream")
+  sizeBytes       Int
+  uploadedBy      String
+  storageProvider String   @default("LOCAL")
+  cloudPath       String   @default("") @db.Text
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 

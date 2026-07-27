@@ -164,7 +164,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     }
   };
 
-  const handleExport = async (format: "xlsx" | "xml" | "mpp") => {
+  const handleExport = async (format: "template" | "xlsx" | "xml" | "mpp") => {
     setExportingFormat(format);
     try {
       const response = await fetch(`/api/projects/${projectId}/gantt-tasks/export?format=${format}`, {
@@ -204,6 +204,8 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
         durationDays: 1,
         actualStartDate: "",
         actualEndDate: "",
+        estimatedWorkHours: 0,
+        actualWorkHours: 0,
         progress: 0,
         predecessorTaskIds: [],
       });
@@ -222,6 +224,10 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     }
     if (draft.progress < 0 || draft.progress > 100) {
       alert("当前进度必须在 0-100 之间");
+      return;
+    }
+    if (draft.estimatedWorkHours < 0 || draft.actualWorkHours < 0) {
+      alert("预计工时和实际工时不能小于 0");
       return;
     }
     setSavingTaskId(task.id);
@@ -339,6 +345,17 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                     title="支持 MPP、Project XML 和 Excel，导入时追加到现有任务"
                   >
                     <Download className="size-3.5" /> {importing ? "导入中..." : "导入"}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 px-2 text-xs text-muted-foreground"
+                    disabled={Boolean(exportingFormat)}
+                    onClick={() => void handleExport("template")}
+                    title="下载符合系统字段的 Excel 导入模板"
+                  >
+                    <Download className="size-3.5" /> 下载模板
                   </Button>
                 </>
               )}

@@ -10,6 +10,8 @@ import { analyzeSchedule, matchScheduleTasks } from "@/lib/schedule-analysis";
 import { buildImportedScheduleSnapshot, getCurrentScheduleSnapshot } from "@/lib/schedule-snapshot";
 
 const MAX_IMPORT_BYTES = 50 * 1024 * 1024;
+const PREVIEW_TRANSACTION_OPTIONS = { maxWait: 10_000, timeout: 30_000 } as const;
+const APPLY_TRANSACTION_OPTIONS = { maxWait: 30_000, timeout: 300_000 } as const;
 
 export async function POST(
   req: NextRequest,
@@ -92,7 +94,7 @@ export async function POST(
           },
         });
         return { snapshotId: snapshot.id, analysisRunId: run.id };
-      });
+      }, PREVIEW_TRANSACTION_OPTIONS);
       return ok({ mode: "PREVIEW", fileName: file.name, ...persisted, analysis, currentPlanModified: false });
     }
 
@@ -135,6 +137,8 @@ export async function POST(
             durationFormat: task.durationFormat,
             actualStartDate: task.actualStartDate,
             actualEndDate: task.actualEndDate,
+            estimatedWorkHours: task.estimatedWorkHours,
+            actualWorkHours: task.actualWorkHours,
             progress: task.progress,
             predecessorTask: task.predecessorExternalIds
               .map((externalId) => taskNameByExternalId.get(externalId) ?? "")
@@ -219,7 +223,7 @@ export async function POST(
         },
       });
       return { createdCount, updatedCount };
-    });
+    }, APPLY_TRANSACTION_OPTIONS);
     await renumberProjectGanttTaskCodes(id);
 
     return ok({ importedCount: importedTasks.length, fileName: file.name, mode, ...applyResult, analysis, currentPlanModified: true });

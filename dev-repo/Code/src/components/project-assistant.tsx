@@ -648,9 +648,9 @@ export function ProjectAssistant({
           ref={panelRef}
           aria-label={runtime.assistantName}
           className={cn(
-            "app-assistant-panel fixed z-[79] flex min-h-0 overflow-hidden rounded-lg border border-border bg-card/98 text-card-foreground shadow-[var(--app-shadow-dialog)] backdrop-blur-xl",
+            "app-assistant-panel fixed z-[79] box-border flex min-h-0 max-w-[calc(100vw-24px)] overflow-hidden rounded-lg border border-border bg-card/98 text-card-foreground shadow-[var(--app-shadow-dialog)] backdrop-blur-xl",
             fullScreen
-              ? "inset-3 top-14"
+              ? "bottom-3 left-3 right-4 top-14"
               : "bottom-3 right-3 top-14 w-[min(420px,calc(100vw-24px))]",
           )}
         >
@@ -684,7 +684,7 @@ export function ProjectAssistant({
               </Button>
             </header>
 
-            <div ref={messagesRef} className="min-h-0 overflow-y-auto overscroll-contain px-3 py-4">
+            <div ref={messagesRef} className="min-h-0 overflow-x-hidden overflow-y-auto overscroll-contain px-3 py-4 pr-4">
               <div className={cn("mx-auto space-y-4", fullScreen ? "max-w-5xl" : "max-w-none")}>
                 {loadingHistory && (
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -694,7 +694,7 @@ export function ProjectAssistant({
                 {messages.map((message, index) => (
                   <div
                     key={message.id || `${message.role}-${index}`}
-                    className={cn("flex gap-2.5", message.role === "user" && "flex-row-reverse")}
+                    className={cn("flex min-w-0 max-w-full gap-2.5", message.role === "user" && "flex-row-reverse")}
                   >
                     <div className={cn(
                       "flex size-7 shrink-0 items-center justify-center border",
@@ -704,9 +704,13 @@ export function ProjectAssistant({
                     )}>
                       {message.role === "assistant" ? <Bot className="size-4" /> : <UserRound className="size-4" />}
                     </div>
-                    <div className={cn("min-w-0 max-w-[88%]", fullScreen && "max-w-[75%]")}>
+                    <div className={cn(
+                      "min-w-0 max-w-[88%]",
+                      fullScreen && "max-w-[calc(100%-38px)]",
+                      fullScreen && message.role === "assistant" && "flex-1",
+                    )}>
                       <div className={cn(
-                        "rounded-md border px-3 py-2.5 text-xs leading-5",
+                        "max-w-full overflow-hidden rounded-md border px-3 py-2.5 text-xs leading-5",
                         message.role === "assistant"
                           ? "border-border bg-background/55 text-foreground"
                           : "border-primary/35 bg-primary/15 text-foreground",
@@ -799,7 +803,7 @@ export function ProjectAssistant({
               </div>
             </div>
 
-            <footer className="min-w-0 shrink-0 border-t border-border bg-background/25 px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+            <footer className="min-w-0 shrink-0 overflow-x-hidden border-t border-border bg-background/25 px-3 pt-3 pr-4 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
               <div className={cn("mx-auto", fullScreen ? "max-w-5xl" : "max-w-none")}>
                 <div className="rounded-md border border-border bg-card/70 p-2 shadow-[var(--app-shadow-soft)] transition-colors focus-within:border-primary/45 focus-within:bg-card">
                   <input

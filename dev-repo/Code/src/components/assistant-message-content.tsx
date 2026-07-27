@@ -102,7 +102,7 @@ export function AssistantMessageContent({ content }: { content: string }) {
         index += 1
       }
       blocks.push(
-        <Table key={`table-${tableIndex}`} className="min-w-max text-xs" aria-label="智能助手回答表格">
+        <Table key={`table-${tableIndex}`} className="max-w-full min-w-max text-xs" aria-label="智能助手回答表格">
             <TableHeader>
               <TableRow>
                 {headers.map((header, cellIndex) => (
@@ -184,5 +184,5 @@ export function AssistantMessageContent({ content }: { content: string }) {
     blocks.push(<p key={`paragraph-${index}`} className="whitespace-pre-wrap">{renderInline(paragraph.join("\n"))}</p>)
   }
 
-  return <div className="space-y-2 break-words">{blocks}</div>
+  return <div className="min-w-0 max-w-full space-y-2 break-words">{blocks}</div>
 }

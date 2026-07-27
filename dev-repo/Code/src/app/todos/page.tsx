@@ -4,8 +4,10 @@ import { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, ClipboardList, DatabaseBackup } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { api } from "@/lib/api-client";
+import { TODO_CHANGED_EVENT } from "@/lib/todo-events";
 
 interface TodoData {
   projectTodos: Array<{
@@ -31,12 +33,26 @@ const formatDateTime = (value: string) => new Date(value).toLocaleString("zh-CN"
 export default function TodosPage() {
   const [data, setData] = useState<TodoData | null>(null);
   const [error, setError] = useState("");
+  const [markingRead, setMarkingRead] = useState(false);
 
   useEffect(() => {
     api.get<TodoData>("/api/todos")
       .then(setData)
       .catch((reason) => setError(reason instanceof Error ? reason.message : "待办加载失败"));
   }, []);
+
+  const markNotificationsRead = async () => {
+    setMarkingRead(true);
+    try {
+      await api.put("/api/todos/notifications/read", {});
+      setData((current) => current ? { ...current, backupAlerts: [] } : current);
+      window.dispatchEvent(new Event(TODO_CHANGED_EVENT));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "通知已读失败");
+    } finally {
+      setMarkingRead(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -49,7 +65,14 @@ export default function TodosPage() {
           {error && <div className="rounded-md border border-destructive/30 bg-destructive/[0.06] px-3 py-2 text-xs text-destructive">{error}</div>}
 
           <section className="space-y-2">
-            <h2 className="text-xs font-semibold">备份告警</h2>
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-xs font-semibold">备份告警</h2>
+              {(data?.backupAlerts.length ?? 0) > 0 && (
+                <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-[11px]" disabled={markingRead} onClick={() => void markNotificationsRead()}>
+                  <CheckCircle2 className="size-3.5" /> {markingRead ? "处理中..." : "全部已读"}
+                </Button>
+              )}
+            </div>
             <div className="overflow-hidden rounded-md border border-border">
               {data?.backupAlerts.map((alert) => (
                 <div key={alert.id} className="grid gap-2 border-b border-border px-3 py-3 text-xs last:border-b-0 md:grid-cols-[160px_110px_minmax(0,1fr)]">

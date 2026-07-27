@@ -1,13 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Cloud, CloudUpload, DatabaseBackup, Download, Save, ShieldCheck } from "lucide-react";
+import { ChevronLeft, Cloud, CloudUpload, DatabaseBackup, Download, FolderOpen, Save, ShieldCheck } from "lucide-react";
 
 import { useConfirm } from "@/components/confirm-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 
@@ -54,6 +55,13 @@ interface BackupDraft extends BackupSettings {
   cloudPassword: string;
 }
 
+interface BackupDirectoryData {
+  currentPath: string;
+  parentPath: string | null;
+  roots: string[];
+  directories: Array<{ name: string; path: string }>;
+}
+
 const formatDateTime = (value?: string | null) => value ? new Date(value).toLocaleString("zh-CN") : "-";
 const formatBytes = (value: number) => {
   if (value < 1024) return `${value} B`;
@@ -85,6 +93,9 @@ export function SystemBackupPanel() {
   const [message, setMessage] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(5);
+  const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
+  const [directoryData, setDirectoryData] = useState<BackupDirectoryData | null>(null);
+  const [directoryLoading, setDirectoryLoading] = useState(false);
 
   const fetchData = useCallback(async (targetPage: number, targetPageSize: number, silent = false) => {
     if (!silent) setLoading(true);
@@ -171,6 +182,24 @@ export function SystemBackupPanel() {
     }
   };
 
+  const loadDirectories = async (targetPath = "") => {
+    setDirectoryLoading(true);
+    setMessage("");
+    try {
+      const query = targetPath ? `?path=${encodeURIComponent(targetPath)}` : "";
+      setDirectoryData(await api.get<BackupDirectoryData>(`/api/admin/system-data/backups/directories${query}`));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "服务器目录读取失败");
+    } finally {
+      setDirectoryLoading(false);
+    }
+  };
+
+  const openDirectoryPicker = async () => {
+    setDirectoryPickerOpen(true);
+    await loadDirectories(draft?.localDirectory || "");
+  };
+
   const downloadBackup = async (record: BackupRecord, type: "database" | "documents") => {
     try {
       const blob = await api.download(`/api/admin/system-data/backups/${record.id}/download?type=${type}`);
@@ -244,7 +273,12 @@ export function SystemBackupPanel() {
             </div>
 
             <Field label="服务器本地备份目录">
-              <Input value={draft.localDirectory} onChange={(event) => setDraft({ ...draft, localDirectory: event.target.value })} />
+              <div className="flex gap-2">
+                <Input className="min-w-0 flex-1" value={draft.localDirectory} onChange={(event) => setDraft({ ...draft, localDirectory: event.target.value })} />
+                <Button type="button" variant="outline" size="sm" className="h-9 shrink-0 px-3 text-xs" onClick={() => void openDirectoryPicker()}>
+                  <FolderOpen className="size-3.5" /> 选择目录
+                </Button>
+              </div>
             </Field>
 
             <div className="space-y-3 border-t border-border pt-4">
@@ -359,6 +393,45 @@ export function SystemBackupPanel() {
           </div>
         )}
       </CardContent>
+      <Dialog open={directoryPickerOpen} onOpenChange={setDirectoryPickerOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>选择服务器备份目录</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 rounded-md border border-border bg-muted/20 px-2 py-1.5 text-xs">
+              <Button type="button" variant="ghost" size="icon" className="size-7" disabled={!directoryData?.parentPath || directoryLoading} onClick={() => directoryData?.parentPath && void loadDirectories(directoryData.parentPath)} title="上级目录">
+                <ChevronLeft className="size-3.5" />
+              </Button>
+              <span className="min-w-0 flex-1 truncate font-mono">{directoryData?.currentPath || "加载中..."}</span>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {directoryData?.roots.map((root) => (
+                <Button key={root} type="button" variant="ghost" size="sm" className="h-7 max-w-full px-2 text-[11px]" onClick={() => void loadDirectories(root)}>
+                  <FolderOpen className="size-3" /><span className="truncate">{root}</span>
+                </Button>
+              ))}
+            </div>
+            <div className="max-h-72 overflow-y-auto rounded-md border border-border">
+              {directoryData?.directories.map((directory) => (
+                <button key={directory.path} type="button" className="flex h-9 w-full items-center gap-2 border-b border-border px-3 text-left text-xs last:border-b-0 hover:bg-primary/[0.07]" onDoubleClick={() => void loadDirectories(directory.path)} onClick={() => void loadDirectories(directory.path)}>
+                  <FolderOpen className="size-3.5 shrink-0 text-amber-500" />
+                  <span className="truncate">{directory.name}</span>
+                </button>
+              ))}
+              {!directoryLoading && directoryData?.directories.length === 0 && <div className="flex h-20 items-center justify-center text-xs text-muted-foreground">当前目录没有子目录</div>}
+            </div>
+            <div className="text-[11px] leading-5 text-muted-foreground">Windows Docker 上需先将宿主机目录挂载到容器，然后在此选择容器内路径。</div>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setDirectoryPickerOpen(false)}>取消</Button>
+            <Button type="button" disabled={!directoryData?.currentPath} onClick={() => {
+              if (draft && directoryData?.currentPath) setDraft({ ...draft, localDirectory: directoryData.currentPath });
+              setDirectoryPickerOpen(false);
+            }}>选择当前目录</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }

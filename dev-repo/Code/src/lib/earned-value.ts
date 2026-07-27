@@ -14,6 +14,11 @@ export interface EarnedValueTaskInput {
   baselineFinishDate?: string;
   budgetAtCompletion?: number;
   actualCost?: number;
+  estimatedWorkHours?: number;
+  actualWorkHours?: number;
+  budgetItemId?: string | null;
+  budgetSource?: string;
+  includeInTotals?: boolean;
 }
 
 export interface EarnedValueTaskResult extends EarnedValueTaskInput {
@@ -22,6 +27,9 @@ export interface EarnedValueTaskResult extends EarnedValueTaskInput {
   ev: number;
   sv: number;
   cv: number;
+  plannedWorkHours: number;
+  earnedWorkHours: number;
+  workVarianceHours: number;
 }
 
 export interface EarnedValueForecast {
@@ -82,19 +90,28 @@ export const calculateEarnedValue = (tasks: EarnedValueTaskInput[], statusDate: 
     const plannedProgress = getTaskPlannedProgress(task, statusDate);
     const ev = bac * Math.min(100, Math.max(0, task.progress)) / 100;
     const pv = bac * plannedProgress;
+    const estimatedWorkHours = finiteNonNegative(task.estimatedWorkHours);
+    const actualWorkHours = finiteNonNegative(task.actualWorkHours);
+    const plannedWorkHours = estimatedWorkHours * plannedProgress;
+    const earnedWorkHours = estimatedWorkHours * Math.min(100, Math.max(0, task.progress)) / 100;
     return {
       ...task,
       budgetAtCompletion: bac,
       actualCost: ac,
+      estimatedWorkHours,
+      actualWorkHours,
       plannedProgress,
       pv,
       ev,
       sv: ev - pv,
       cv: ev - ac,
+      plannedWorkHours,
+      earnedWorkHours,
+      workVarianceHours: earnedWorkHours - plannedWorkHours,
     };
   });
 
-  const totals = rows.reduce((sum, row) => ({
+  const totals = rows.filter((row) => row.includeInTotals !== false).reduce((sum, row) => ({
     pv: sum.pv + row.pv,
     ev: sum.ev + row.ev,
     ac: sum.ac + finiteNonNegative(row.actualCost),

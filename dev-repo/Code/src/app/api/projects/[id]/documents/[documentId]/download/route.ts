@@ -4,6 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { getUserFromRequest } from "@/lib/auth";
 import { err, notFound, unauthorized } from "@/lib/api-utils";
 import { getProjectDocumentPath } from "@/lib/project-document-storage";
+import { getSystemBackupSettings, getSystemWebDavConfig } from "@/lib/system-backup";
+import { downloadFileFromWebDav } from "@/lib/webdav-backup";
 
 export const runtime = "nodejs";
 
@@ -20,7 +22,18 @@ export async function GET(
   });
   if (!document) return notFound("文件");
 
-  const file = await readFile(getProjectDocumentPath(id, document.storedName)).catch(() => null);
+  let file = document.storageProvider !== "CLOUD"
+    ? await readFile(getProjectDocumentPath(id, document.storedName)).catch(() => null)
+    : null;
+
+  if (!file && document.cloudPath) {
+    try {
+      const settings = await getSystemBackupSettings();
+      file = await downloadFileFromWebDav(getSystemWebDavConfig(settings), document.cloudPath);
+    } catch (error) {
+      return err(error instanceof Error ? error.message : "从公司云盘读取文件失败", 502);
+    }
+  }
   if (!file) return err("文件内容不存在，请联系管理员", 404);
 
   const encodedName = encodeURIComponent(document.originalName).replace(/'/g, "%27");

@@ -31,6 +31,8 @@ export interface ProjectGanttTask extends BaseEntity {
   durationFormat?: number;
   actualStartDate: string;
   actualEndDate: string;
+  estimatedWorkHours?: number;
+  actualWorkHours?: number;
   progress: number;
   predecessorTask: string;
   predecessorTaskIds?: string[];
@@ -48,6 +50,7 @@ export interface ProjectGanttTask extends BaseEntity {
   baselineCost?: number;
   budgetAtCompletion?: number;
   actualCost?: number;
+  budgetItemId?: string | null;
   baselines?: unknown;
   sortOrder: number;
   project?: Pick<Project, "id" | "name" | "code" | "status">;
@@ -142,6 +145,8 @@ export interface ProjectDocumentFile extends BaseEntity {
   mimeType: string;
   sizeBytes: number;
   uploadedBy: string;
+  storageProvider?: "LOCAL" | "CLOUD" | "BOTH";
+  cloudPath?: string;
 }
 
 export interface WeeklyItem extends BaseEntity {

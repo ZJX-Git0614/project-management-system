@@ -9,13 +9,15 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { ProjectStatus } from "@/domain/enums";
 import { api } from "@/lib/api-client";
-import { calculateEarnedValue, type EarnedValueTaskInput } from "@/lib/earned-value";
+import { calculateEarnedValue, type EarnedValueTaskInput, type EarnedValueTaskResult } from "@/lib/earned-value";
 import { usePermission } from "@/lib/use-permission";
 import { cn } from "@/lib/utils";
 
 interface EarnedValueApiResponse {
   statusDate: string;
-  rows: EarnedValueTaskInput[];
+  rows: EarnedValueTaskResult[];
+  budgetItems: Array<{ id: string; title: string; categoryName: string; kind: string; plannedCost: number; hourlyCost: number }>;
+  budgetSummary: { projectBudget: number; linkedBudgetItems: number; blendedHourlyCost: number };
 }
 
 interface ProjectEarnedValuePanelProps {
@@ -43,6 +45,8 @@ const tone = (value: number | null, inverse = false) => {
 
 export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEarnedValuePanelProps) => {
   const [tasks, setTasks] = useState<EarnedValueTaskInput[]>([]);
+  const [budgetItems, setBudgetItems] = useState<EarnedValueApiResponse["budgetItems"]>([]);
+  const [budgetSummary, setBudgetSummary] = useState<EarnedValueApiResponse["budgetSummary"]>({ projectBudget: 0, linkedBudgetItems: 0, blendedHourlyCost: 0 });
   const [statusDate, setStatusDate] = useState(new Date().toISOString().slice(0, 10));
   const [forecastMode, setForecastMode] = useState<ForecastMode>("typical");
   const [loading, setLoading] = useState(true);
@@ -59,6 +63,8 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
       );
       setStatusDate(response.statusDate);
       setTasks(response.rows);
+      setBudgetItems(response.budgetItems);
+      setBudgetSummary(response.budgetSummary);
     } catch (error) {
       alert(error instanceof Error ? error.message : "加载挣值分析失败");
     } finally {
@@ -83,6 +89,14 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
       : task));
   };
 
+  const updateTaskField = <K extends "budgetItemId" | "estimatedWorkHours" | "actualWorkHours">(
+    taskId: string,
+    key: K,
+    value: EarnedValueTaskInput[K],
+  ) => {
+    setTasks((current) => current.map((task) => task.id === taskId ? { ...task, [key]: value } : task));
+  };
+
   const save = async () => {
     setSaving(true);
     try {
@@ -91,6 +105,9 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
           taskId: task.id,
           budgetAtCompletion: task.budgetAtCompletion ?? 0,
           actualCost: task.actualCost ?? 0,
+          budgetItemId: task.budgetItemId ?? null,
+          estimatedWorkHours: task.estimatedWorkHours ?? 0,
+          actualWorkHours: task.actualWorkHours ?? 0,
         })),
       });
       await fetchData(statusDate);
@@ -104,10 +121,10 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
   if (loading) return <div className="text-sm text-muted-foreground">加载中...</div>;
 
   const primaryMetrics = [
-    { label: "计划价值 PV", value: analysis.summary.pv, formula: "计划工作量 × 计划单价" },
-    { label: "挣值 EV", value: analysis.summary.ev, formula: "实际工作量 × 计划单价" },
-    { label: "实际成本 AC", value: analysis.summary.ac, formula: "实际工作量 × 实际单价" },
-    { label: "完工预算 BAC", value: analysis.summary.bac, formula: "完工时 PV" },
+    { label: "计划价值 PV", value: analysis.summary.pv, formula: "BAC × 检查日应完成比例" },
+    { label: "挣值 EV", value: analysis.summary.ev, formula: "BAC × 当前完成比例" },
+    { label: "实际成本 AC", value: analysis.summary.ac, formula: "实际工时 × 预算小时成本，或实际成本" },
+    { label: "完工预算 BAC", value: analysis.summary.bac, formula: "项目预算与任务关联/分摊" },
   ];
   const indicators = [
     { label: "进度偏差 SV", value: money(analysis.summary.sv), formula: "EV - PV", className: tone(analysis.summary.sv) },
@@ -172,6 +189,12 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
         ))}
       </section>
 
+      <section className="grid gap-2 rounded-md border border-border bg-muted/15 px-3 py-2 text-[11px] text-muted-foreground md:grid-cols-3">
+        <span>项目预算：<strong className="ml-1 text-foreground">{money(budgetSummary.projectBudget)}</strong></span>
+        <span>已关联预算条目：<strong className="ml-1 text-foreground">{budgetSummary.linkedBudgetItems}</strong></span>
+        <span>人力综合小时成本：<strong className="ml-1 text-foreground">{money(budgetSummary.blendedHourlyCost)}</strong></span>
+      </section>
+
       <section className="grid gap-4 border-y border-border py-3 lg:grid-cols-[minmax(260px,0.7fr)_minmax(560px,1.3fr)]">
         <div className="space-y-3">
           {[{ label: "PV", value: analysis.summary.pv, color: "bg-sky-500" }, { label: "EV", value: analysis.summary.ev, color: "bg-emerald-500" }, { label: "AC", value: analysis.summary.ac, color: "bg-amber-500" }].map((item) => (
@@ -197,13 +220,16 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
 
       <section className="overflow-hidden rounded-md border border-border">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1180px] table-fixed text-xs">
+          <table className="w-full min-w-[1660px] table-fixed text-xs">
             <thead className="bg-muted text-muted-foreground">
               <tr className="h-9 border-b border-border">
                 <th className="w-24 px-3 text-left font-medium">任务ID</th>
                 <th className="w-60 px-3 text-left font-medium">任务名称</th>
                 <th className="w-28 px-3 text-right font-medium">计划进度</th>
                 <th className="w-24 px-3 text-right font-medium">当前进度</th>
+                <th className="w-64 px-3 text-left font-medium">预算条目</th>
+                <th className="w-28 px-3 text-right font-medium">预计工时</th>
+                <th className="w-28 px-3 text-right font-medium">实际工时</th>
                 <th className="w-36 px-3 text-right font-medium">完工预算 BAC</th>
                 <th className="w-36 px-3 text-right font-medium">实际成本 AC</th>
                 <th className="w-32 px-3 text-right font-medium">PV</th>
@@ -219,6 +245,41 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
                   <td className="truncate px-3 font-medium" title={row.taskName}>{row.taskName || "未命名任务"}</td>
                   <td className="px-3 text-right tabular-nums">{numberFormatter.format(row.plannedProgress * 100)}%</td>
                   <td className="px-3 text-right tabular-nums">{row.progress}%</td>
+                  <td className="px-2">
+                    <Select
+                      value={row.budgetItemId ?? ""}
+                      disabled={!canEdit || saving || row.includeInTotals === false}
+                      onChange={(event) => updateTaskField(row.id, "budgetItemId", event.target.value || null)}
+                      className="h-7 w-full border-transparent bg-transparent text-xs shadow-none hover:border-border focus:bg-background"
+                    >
+                      <option value="">按项目预算自动分摊</option>
+                      {budgetItems.map((item) => (
+                        <option key={item.id} value={item.id}>{item.categoryName} / {item.title} · {money(item.plannedCost)}</option>
+                      ))}
+                    </Select>
+                  </td>
+                  <td className="px-2">
+                    <Input
+                      type="number"
+                      min={0}
+                      step="0.5"
+                      value={row.estimatedWorkHours ?? 0}
+                      disabled={!canEdit || saving}
+                      onChange={(event) => updateTaskField(row.id, "estimatedWorkHours", Math.max(0, Number(event.target.value) || 0))}
+                      className="h-7 border-transparent bg-transparent px-2 text-right text-xs tabular-nums shadow-none hover:border-border focus-visible:bg-background"
+                    />
+                  </td>
+                  <td className="px-2">
+                    <Input
+                      type="number"
+                      min={0}
+                      step="0.5"
+                      value={row.actualWorkHours ?? 0}
+                      disabled={!canEdit || saving}
+                      onChange={(event) => updateTaskField(row.id, "actualWorkHours", Math.max(0, Number(event.target.value) || 0))}
+                      className="h-7 border-transparent bg-transparent px-2 text-right text-xs tabular-nums shadow-none hover:border-border focus-visible:bg-background"
+                    />
+                  </td>
                   <td className="px-2">
                     <Input
                       type="number"
@@ -250,7 +311,7 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
                 </tr>
               ))}
               {analysis.rows.length === 0 && (
-                <tr><td colSpan={10} className="h-24 text-center text-muted-foreground">暂无项目任务</td></tr>
+                <tr><td colSpan={13} className="h-24 text-center text-muted-foreground">暂无项目任务</td></tr>
               )}
             </tbody>
           </table>

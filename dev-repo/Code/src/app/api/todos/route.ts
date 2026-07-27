@@ -39,7 +39,7 @@ export async function GET(req: NextRequest) {
     }),
     isAdmin
       ? prisma.systemBackupRecord.findMany({
-          where: { status: { in: ["FAILED", "PARTIAL"] } },
+          where: { status: { in: ["FAILED", "PARTIAL"] }, notificationReadAt: null },
           orderBy: { createdAt: "desc" },
           take: 30,
           select: {
@@ -49,6 +49,7 @@ export async function GET(req: NextRequest) {
             status: true,
             cloudStatus: true,
             errorMessage: true,
+            notificationReadAt: true,
           },
         })
       : Promise.resolve([]),

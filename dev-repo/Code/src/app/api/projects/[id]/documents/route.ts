@@ -11,6 +11,8 @@ import {
   getProjectDocumentPath,
   MAX_PROJECT_DOCUMENT_SIZE_BYTES,
 } from "@/lib/project-document-storage";
+import { getSystemBackupSettings, getSystemWebDavConfig } from "@/lib/system-backup";
+import { deleteFileFromWebDav, uploadBufferToWebDav } from "@/lib/webdav-backup";
 
 export const runtime = "nodejs";
 
@@ -24,6 +26,8 @@ function serializeDocument(document: {
   uploadedBy: string;
   createdAt: Date;
   updatedAt: Date;
+  storageProvider: string;
+  cloudPath: string;
 }) {
   return {
     ...document,
@@ -66,20 +70,44 @@ export async function POST(
   if (!formData) return err("无法读取上传内容");
 
   const directoryKey = String(formData.get("directoryKey") ?? "").trim();
+  const storageProvider = String(formData.get("storageProvider") ?? "LOCAL").trim().toUpperCase();
+  const cloudDirectory = String(formData.get("cloudDirectory") ?? "Ceastar-PMS/documents").trim();
   const file = formData.get("file");
 
   if (!isProjectDocumentFolderName(directoryKey)) return err("请选择有效的文档文件夹");
   if (!(file instanceof File) || !file.name.trim()) return err("请选择要上传的文件");
   if (file.size === 0) return err("不能上传空文件");
   if (file.size > MAX_PROJECT_DOCUMENT_SIZE_BYTES) return err("单个文件不能超过 20 MB");
+  if (!["LOCAL", "CLOUD", "BOTH"].includes(storageProvider)) return err("文档存储位置不正确");
+  if (["CLOUD", "BOTH"].includes(storageProvider) && !cloudDirectory) return err("请填写公司云盘文档目录");
 
   const documentId = randomUUID();
   const originalName = file.name.trim();
   const storedName = buildStoredDocumentName(documentId, originalName);
   const filePath = getProjectDocumentPath(id, storedName);
+  const content = Buffer.from(await file.arrayBuffer());
+  let cloudPath = "";
 
-  await mkdir(dirname(filePath), { recursive: true });
-  await writeFile(filePath, Buffer.from(await file.arrayBuffer()));
+  if (["LOCAL", "BOTH"].includes(storageProvider)) {
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(filePath, content);
+  }
+
+  if (["CLOUD", "BOTH"].includes(storageProvider)) {
+    try {
+      const settings = await getSystemBackupSettings();
+      if (!settings.cloudEnabled) throw new Error("请先在系统数据管理中启用并保存公司云盘配置");
+      cloudPath = await uploadBufferToWebDav(
+        getSystemWebDavConfig(settings, cloudDirectory),
+        [id, directoryKey, storedName],
+        content,
+        file.type || "application/octet-stream",
+      );
+    } catch (error) {
+      await rm(filePath, { force: true }).catch(() => undefined);
+      return err(error instanceof Error ? error.message : "文档上传公司云盘失败");
+    }
+  }
 
   try {
     const document = await prisma.$transaction(async (tx) => {
@@ -93,6 +121,8 @@ export async function POST(
           mimeType: file.type || "application/octet-stream",
           sizeBytes: file.size,
           uploadedBy: user.displayName,
+          storageProvider,
+          cloudPath,
         },
       });
 
@@ -103,7 +133,7 @@ export async function POST(
           entityId: created.id,
           actionType: "CREATE",
           operator: user.displayName,
-          detail: `上传文件「${originalName}」至「${directoryKey}」`,
+          detail: `上传文件「${originalName}」至「${directoryKey}」，存储位置：${storageProvider}`,
         },
       });
 
@@ -113,6 +143,12 @@ export async function POST(
     return ok(serializeDocument(document), 201);
   } catch (error) {
     await rm(filePath, { force: true }).catch(() => undefined);
+    if (cloudPath) {
+      const settings = await getSystemBackupSettings().catch(() => null);
+      if (settings) {
+        await deleteFileFromWebDav(getSystemWebDavConfig(settings), cloudPath).catch(() => undefined);
+      }
+    }
     throw error;
   }
 }

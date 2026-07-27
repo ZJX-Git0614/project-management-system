@@ -8,6 +8,7 @@ import {
   createSystemBackup,
   CLOUD_BACKUP_LIMIT_BYTES,
   DEFAULT_SYSTEM_BACKUP_ROOT,
+  ensureWritableBackupDirectory,
   getSystemBackupSettings,
   getLocalBackupUsageBytes,
   LOCAL_BACKUP_LIMIT_BYTES,
@@ -78,12 +79,18 @@ export async function PUT(req: NextRequest) {
   if (cloudBaseUrl && !/^https?:\/\//i.test(cloudBaseUrl)) return err("WebDAV 地址必须以 http:// 或 https:// 开头");
 
   const current = await getSystemBackupSettings();
+  let normalizedLocalDirectory = localDirectory;
+  try {
+    normalizedLocalDirectory = await ensureWritableBackupDirectory(localDirectory, current);
+  } catch (error) {
+    return err(error instanceof Error ? error.message : "本地备份目录不可写");
+  }
   const settings = await prisma.systemBackupSettings.update({
     where: { id: "default" },
     data: {
       automaticBackupEnabled: body.automaticBackupEnabled !== false,
       intervalHours: SYSTEM_BACKUP_INTERVAL_HOURS,
-      localDirectory,
+      localDirectory: normalizedLocalDirectory,
       cloudEnabled,
       cloudProvider: "WEBDAV",
       cloudBaseUrl,

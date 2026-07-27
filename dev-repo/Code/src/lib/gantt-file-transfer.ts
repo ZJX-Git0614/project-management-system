@@ -21,6 +21,8 @@ export interface ImportedGanttTask {
   durationFormat: number;
   actualStartDate: string;
   actualEndDate: string;
+  estimatedWorkHours: number;
+  actualWorkHours: number;
   progress: number;
   predecessorExternalIds: string[];
   predecessorDependencies: ImportedGanttDependency[];
@@ -268,6 +270,8 @@ export const parseProjectXmlBundle = (xml: string): GanttImportBundle => {
       durationFormat: Math.round(numberValue(rawTask.DurationFormat, 7)),
       actualStartDate: dateOnly(rawTask.ActualStart),
       actualEndDate: dateOnly(rawTask.ActualFinish),
+      estimatedWorkHours: parseIsoDurationMinutes(rawTask.Work) / 60,
+      actualWorkHours: parseIsoDurationMinutes(rawTask.ActualWork) / 60,
       progress: normalizeProgress(rawTask.PercentComplete),
       predecessorExternalIds: predecessorDependencies.map((dependency) => dependency.predecessorExternalId),
       predecessorDependencies,
@@ -356,6 +360,8 @@ export const parseGanttExcel = (buffer: Buffer, fallbackStartDate = ""): Importe
       durationFormat: Math.round(numberValue(excelValue(row, "工期格式", "Duration Format"), 7)),
       actualStartDate: dateOnly(excelValue(row, "实际开始", "Actual Start")),
       actualEndDate: dateOnly(excelValue(row, "实际完成", "Actual Finish")),
+      estimatedWorkHours: Math.max(0, numberValue(excelValue(row, "预计工时(小时)", "预计工时", "Planned Work Hours", "Work Hours"))),
+      actualWorkHours: Math.max(0, numberValue(excelValue(row, "实际工时(小时)", "实际工时", "Actual Work Hours"))),
       progress: normalizeProgress(excelValue(row, "当前进度(%)", "当前进度", "Progress")),
       predecessorExternalIds: predecessorValue.split(/[,，;；\s]+/).filter(Boolean),
       predecessorDependencies: predecessorValue.split(/[,，;；\s]+/).filter(Boolean).map((predecessorExternalId) => ({
@@ -437,6 +443,8 @@ export const buildGanttExcel = (tasks: ProjectGanttTask[]) => {
     WBS: task.wbsCode || task.taskCode.replace(/^Task/, ""),
     实际开始: task.actualStartDate,
     实际完成: task.actualEndDate,
+    "预计工时(小时)": task.estimatedWorkHours ?? 0,
+    "实际工时(小时)": task.actualWorkHours ?? 0,
     "当前进度(%)": task.progress,
     紧前任务ID: task.predecessorTaskIds?.map((id) => taskById.get(id)?.taskCode).filter(Boolean).join(",") || task.predecessorTask,
     基线开始: task.baselineStartDate ?? "",
@@ -449,10 +457,25 @@ export const buildGanttExcel = (tasks: ProjectGanttTask[]) => {
   worksheet["!cols"] = [
     { wch: 14 }, { wch: 14 }, { wch: 18 }, { wch: 32 }, { wch: 14 }, { wch: 14 },
     { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 14 },
-    { wch: 14 }, { wch: 24 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 16 },
+    { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 24 },
+    { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 16 },
   ];
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "项目进度");
+  return Buffer.from(XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }));
+};
+
+export const buildGanttExcelTemplate = () => {
+  const headers = [
+    "任务ID", "父任务ID", "任务类别", "任务名称", "计划开始", "计划完成", "工期(天)",
+    "预计工时(小时)", "实际开始", "实际完成", "实际工时(小时)", "当前进度(%)", "紧前任务ID",
+    "任务模式", "里程碑", "WBS", "基线开始", "基线完成", "基线成本", "完工预算(BAC)", "实际成本(AC)",
+  ];
+  const worksheet = XLSX.utils.aoa_to_sheet([headers]);
+  worksheet["!cols"] = headers.map((header) => ({ wch: Math.max(12, Math.min(24, header.length * 2 + 2)) }));
+  worksheet["!freeze"] = { xSplit: 0, ySplit: 1 };
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "项目进度导入模板");
   return Buffer.from(XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }));
 };
 
@@ -546,7 +569,8 @@ export const buildProjectXml = (
       Finish: isoDateTime(finishDate),
       Duration: durationMinutesToIso(durationMinutes),
       DurationFormat: task.durationFormat ?? 7,
-      Work: durationMinutesToIso(durationMinutes),
+      Work: durationMinutesToIso(Math.round((task.estimatedWorkHours ?? 0) * 60) || durationMinutes),
+      ActualWork: durationMinutesToIso(Math.round((task.actualWorkHours ?? 0) * 60)),
       ResumeValid: 0,
       EffortDriven: 0,
       Recurring: 0,

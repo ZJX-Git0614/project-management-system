@@ -1,5 +1,4 @@
-import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { XMLParser } from "fast-xml-parser";
 
 export interface WebDavBackupConfig {
@@ -13,11 +12,27 @@ const authorizationHeader = (config: WebDavBackupConfig) => (
   `Basic ${Buffer.from(`${config.username}:${config.password}`, "utf8").toString("base64")}`
 );
 
-const pathSegments = (directory: string) => directory.split(/[\\/]+/).map((part) => part.trim()).filter(Boolean);
+const validatePathSegments = (segments: string[]) => {
+  if (segments.some((segment) => segment === "." || segment === "..")) {
+    throw new Error("云盘目录不能包含 . 或 .. 路径段");
+  }
+  return segments;
+};
+
+const pathSegments = (directory: string) => validatePathSegments(
+  directory.split(/[\\/]+/).map((part) => part.trim()).filter(Boolean),
+);
 
 const appendUrlPath = (baseUrl: string, segments: string[]) => {
   const normalized = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
-  return new URL(segments.map(encodeURIComponent).join("/"), normalized).toString();
+  return new URL(validatePathSegments(segments).map(encodeURIComponent).join("/"), normalized).toString();
+};
+
+const remoteUrlWithinBase = (baseUrl: string, remoteUrl: string) => {
+  const base = new URL(baseUrl);
+  const remote = new URL(remoteUrl, base);
+  if (remote.origin !== base.origin) throw new Error("云盘文件地址与当前 WebDAV 服务不一致");
+  return remote.toString();
 };
 
 const asArray = <T>(value: T | T[] | undefined | null): T[] => {
@@ -53,29 +68,96 @@ const request = async (config: WebDavBackupConfig, url: string, init: RequestIni
   return response;
 };
 
-export const testWebDavConnection = async (config: WebDavBackupConfig) => {
+const resolvedBaseUrlCache = new Map<string, { baseUrl: string; expiresAt: number }>();
+
+const candidateBaseUrls = (baseUrl: string) => {
+  const normalized = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+  const parsed = new URL(normalized);
+  if (parsed.pathname !== "/") return [normalized];
+  return [...new Set([normalized, new URL("webdav/", normalized).toString(), new URL("dav/", normalized).toString()])];
+};
+
+const responseErrorDetail = (response: Response, url: string) => {
+  const allow = response.headers.get("allow");
+  return `HTTP ${response.status}${allow ? `，服务器允许方法：${allow}` : ""}，地址：${url}`;
+};
+
+const resolveWebDavConfig = async (config: WebDavBackupConfig) => {
   if (!config.baseUrl || !config.username || !config.password) {
     throw new Error("请填写云盘 WebDAV 地址、账号和密码或应用密码");
   }
-  const response = await request(config, config.baseUrl, {
-    method: "PROPFIND",
-    headers: { Depth: "0" },
-  });
-  if (![200, 207, 301, 302, 405].includes(response.status)) {
-    throw new Error(`云盘认证失败，WebDAV 返回 ${response.status}`);
+  const cacheKey = `${config.baseUrl}|${config.username}`;
+  const cached = resolvedBaseUrlCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return { ...config, baseUrl: cached.baseUrl };
+
+  let lastResponse: { response: Response; url: string } | null = null;
+  for (const baseUrl of candidateBaseUrls(config.baseUrl)) {
+    const response = await request(config, baseUrl, {
+      method: "PROPFIND",
+      headers: { Depth: "0", "Content-Type": "application/xml; charset=utf-8" },
+      body: `<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><resourcetype/></prop></propfind>`,
+    });
+    if ([200, 207].includes(response.status)) {
+      resolvedBaseUrlCache.set(cacheKey, { baseUrl, expiresAt: Date.now() + 5 * 60_000 });
+      return { ...config, baseUrl };
+    }
+    if ([401, 403].includes(response.status)) throw new Error(`云盘认证失败，${responseErrorDetail(response, baseUrl)}`);
+    lastResponse = { response, url: baseUrl };
   }
+  if (lastResponse) {
+    throw new Error(`当前地址未提供可写 WebDAV 服务，${responseErrorDetail(lastResponse.response, lastResponse.url)}。请确认已启用 WebDAV Server，且反向代理允许 PROPFIND、MKCOL、PUT 和 DELETE。`);
+  }
+  throw new Error("无法连接 WebDAV 服务");
+};
+
+export const testWebDavConnection = async (config: WebDavBackupConfig) => {
+  const resolved = await resolveWebDavConfig(config);
+  const probeDirectory = `.ceastar-write-test-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const directoryUrl = await ensureWebDavDirectory(
+    { ...resolved, directory: config.directory },
+    [probeDirectory],
+  );
+  const fileUrl = appendUrlPath(directoryUrl, ["probe.txt"]);
+  let operationError: unknown = null;
+  try {
+    const uploadResponse = await request(resolved, fileUrl, {
+      method: "PUT",
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Content-Length": "2" },
+      body: new Uint8Array(Buffer.from("ok")),
+    });
+    if (![200, 201, 204].includes(uploadResponse.status)) {
+      throw new Error(`云盘写入测试失败，${responseErrorDetail(uploadResponse, fileUrl)}${uploadResponse.status === 405 ? "。当前地址或反向代理不允许 WebDAV PUT 上传" : ""}`);
+    }
+    const deleteFileResponse = await request(resolved, fileUrl, { method: "DELETE" });
+    if (![200, 204, 404].includes(deleteFileResponse.status)) {
+      throw new Error(`云盘清理测试文件失败，${responseErrorDetail(deleteFileResponse, fileUrl)}`);
+    }
+  } catch (error) {
+    operationError = error;
+    throw error;
+  } finally {
+    const deleteDirectoryResponse = await request(resolved, directoryUrl, { method: "DELETE" }).catch(() => null);
+    if (!operationError && deleteDirectoryResponse && ![200, 204, 404].includes(deleteDirectoryResponse.status)) {
+      throw new Error(`云盘清理测试目录失败，${responseErrorDetail(deleteDirectoryResponse, directoryUrl)}`);
+    }
+  }
+  return { baseUrl: resolved.baseUrl, writable: true };
 };
 
 export const ensureWebDavDirectory = async (config: WebDavBackupConfig, extraSegments: string[] = []) => {
-  const segments = [...pathSegments(config.directory), ...extraSegments];
+  const resolvedConfig = await resolveWebDavConfig(config);
+  const segments = [...pathSegments(resolvedConfig.directory), ...extraSegments];
   for (let index = 0; index < segments.length; index += 1) {
-    const url = appendUrlPath(config.baseUrl, segments.slice(0, index + 1));
-    const response = await request(config, url, { method: "MKCOL" });
-    if (![201, 204, 301, 302, 405].includes(response.status)) {
-      throw new Error(`无法创建云盘备份目录，WebDAV 返回 ${response.status}`);
+    const url = appendUrlPath(resolvedConfig.baseUrl, segments.slice(0, index + 1));
+    const response = await request(resolvedConfig, url, { method: "MKCOL" });
+    if ([201, 204].includes(response.status)) continue;
+    if (response.status === 405) {
+      const exists = await request(resolvedConfig, url, { method: "PROPFIND", headers: { Depth: "0" } });
+      if ([200, 207].includes(exists.status)) continue;
     }
+    throw new Error(`无法创建云盘备份目录，${responseErrorDetail(response, url)}`);
   }
-  return appendUrlPath(config.baseUrl, segments);
+  return appendUrlPath(resolvedConfig.baseUrl, segments);
 };
 
 export const uploadFileToWebDav = async (
@@ -83,21 +165,60 @@ export const uploadFileToWebDav = async (
   remoteSegments: string[],
   localFilePath: string,
 ) => {
+  const resolvedConfig = await resolveWebDavConfig(config);
   const file = await stat(localFilePath);
-  const url = appendUrlPath(config.baseUrl, [...pathSegments(config.directory), ...remoteSegments]);
-  const response = await request(config, url, {
+  const content = await readFile(localFilePath);
+  const url = appendUrlPath(resolvedConfig.baseUrl, [...pathSegments(resolvedConfig.directory), ...remoteSegments]);
+  const response = await request(resolvedConfig, url, {
     method: "PUT",
     headers: {
       "Content-Type": "application/octet-stream",
       "Content-Length": String(file.size),
     },
-    body: createReadStream(localFilePath) as unknown as BodyInit,
-    duplex: "half",
+    body: new Uint8Array(content),
   });
   if (![200, 201, 204].includes(response.status)) {
-    throw new Error(`云盘上传失败，WebDAV 返回 ${response.status}`);
+    throw new Error(`云盘上传失败，${responseErrorDetail(response, url)}${response.status === 405 ? "。当前地址或反向代理不允许 WebDAV PUT 上传" : ""}`);
   }
   return url;
+};
+
+export const uploadBufferToWebDav = async (
+  config: WebDavBackupConfig,
+  remoteSegments: string[],
+  content: Buffer,
+  contentType = "application/octet-stream",
+) => {
+  const resolvedConfig = await resolveWebDavConfig(config);
+  const parentSegments = remoteSegments.slice(0, -1);
+  await ensureWebDavDirectory({ ...resolvedConfig, directory: config.directory }, parentSegments);
+  const url = appendUrlPath(resolvedConfig.baseUrl, [...pathSegments(resolvedConfig.directory), ...remoteSegments]);
+  const response = await request(resolvedConfig, url, {
+    method: "PUT",
+    headers: { "Content-Type": contentType, "Content-Length": String(content.length) },
+    body: new Uint8Array(content),
+  });
+  if (![200, 201, 204].includes(response.status)) {
+    throw new Error(`云盘上传失败，${responseErrorDetail(response, url)}`);
+  }
+  return url;
+};
+
+export const downloadFileFromWebDav = async (config: WebDavBackupConfig, remoteUrl: string) => {
+  const resolvedConfig = await resolveWebDavConfig(config);
+  const safeRemoteUrl = remoteUrlWithinBase(resolvedConfig.baseUrl, remoteUrl);
+  const response = await request(resolvedConfig, safeRemoteUrl, { method: "GET" });
+  if (!response.ok) throw new Error(`云盘文件下载失败，${responseErrorDetail(response, safeRemoteUrl)}`);
+  return Buffer.from(await response.arrayBuffer());
+};
+
+export const deleteFileFromWebDav = async (config: WebDavBackupConfig, remoteUrl: string) => {
+  const resolvedConfig = await resolveWebDavConfig(config);
+  const safeRemoteUrl = remoteUrlWithinBase(resolvedConfig.baseUrl, remoteUrl);
+  const response = await request(resolvedConfig, safeRemoteUrl, { method: "DELETE" });
+  if (![200, 204, 404].includes(response.status)) {
+    throw new Error(`云盘文件删除失败，${responseErrorDetail(response, safeRemoteUrl)}`);
+  }
 };
 
 export interface WebDavBackupDirectory {
@@ -107,8 +228,9 @@ export interface WebDavBackupDirectory {
 }
 
 const listWebDavEntries = async (config: WebDavBackupConfig, extraSegments: string[]) => {
-  const url = appendUrlPath(config.baseUrl, [...pathSegments(config.directory), ...extraSegments]);
-  const response = await request(config, url, {
+  const resolvedConfig = await resolveWebDavConfig(config);
+  const url = appendUrlPath(resolvedConfig.baseUrl, [...pathSegments(resolvedConfig.directory), ...extraSegments]);
+  const response = await request(resolvedConfig, url, {
     method: "PROPFIND",
     headers: { Depth: "1", "Content-Type": "application/xml; charset=utf-8" },
     body: `<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><resourcetype/><getcontentlength/><getlastmodified/></prop></propfind>`,
@@ -121,12 +243,12 @@ const listWebDavEntries = async (config: WebDavBackupConfig, extraSegments: stri
   const parsed = new XMLParser({ ignoreAttributes: false, removeNSPrefix: true, trimValues: true }).parse(xml) as {
     multistatus?: { response?: unknown | unknown[] };
   };
-  const targetPath = normalizedPathname(url, config.baseUrl);
+  const targetPath = normalizedPathname(url, resolvedConfig.baseUrl);
   return asArray(parsed.multistatus?.response).flatMap((item) => {
     if (!item || typeof item !== "object") return [];
     const responseItem = item as { href?: unknown; propstat?: unknown | unknown[] };
     const href = textValue(responseItem.href);
-    const itemPath = normalizedPathname(href, config.baseUrl);
+    const itemPath = normalizedPathname(href, resolvedConfig.baseUrl);
     if (!href || itemPath === targetPath) return [];
     const propstat = asArray(responseItem.propstat).find((entry) => {
       if (!entry || typeof entry !== "object") return false;
@@ -159,8 +281,9 @@ export const listWebDavBackupDirectories = async (config: WebDavBackupConfig): P
 };
 
 export const deleteWebDavBackupDirectory = async (config: WebDavBackupConfig, directoryName: string) => {
-  const url = appendUrlPath(config.baseUrl, [...pathSegments(config.directory), directoryName]);
-  const response = await request(config, url, { method: "DELETE" });
+  const resolvedConfig = await resolveWebDavConfig(config);
+  const url = appendUrlPath(resolvedConfig.baseUrl, [...pathSegments(resolvedConfig.directory), directoryName]);
+  const response = await request(resolvedConfig, url, { method: "DELETE" });
   if (![200, 204, 404].includes(response.status)) {
     throw new Error(`无法清理云盘旧备份，WebDAV 返回 ${response.status}`);
   }

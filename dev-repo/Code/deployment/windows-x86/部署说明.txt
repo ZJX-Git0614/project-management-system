@@ -26,6 +26,11 @@
 系统默认每 6 小时自动备份一次。页面创建的本地备份保存在部署目录下的 backups 文件夹，
 也可以在页面中配置支持 WebDAV 的公司云盘账号与目录进行同步。
 
+如需将本地备份放到其他磁盘，在部署目录的 .env 文件中增加：
+PMS_BACKUP_HOST_DIR=D:/Ceastar-PMS-Backups
+随后执行 docker compose up -d --no-deps --force-recreate pms，并在“系统数据管理”中选择
+/data/system-backups。浏览器选择的是容器内目录，Windows 实际文件会写入上述 D 盘目录。
+
 停止服务不会删除数据库或上传文档。Docker Desktop 可以随 Windows 自动启动，
 容器也配置了自动重启，通常不需要每天手动启动。
 

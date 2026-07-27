@@ -19,7 +19,7 @@ services:
     restart: unless-stopped
 
   pms:
-    image: ceastar-project-management:2026.07.27.2-amd64
+    image: ceastar-project-management:2026.07.27.3-amd64
     platform: linux/amd64
     container_name: pms
     ports:
@@ -30,6 +30,7 @@ services:
       ASSISTANT_CONFIG_ENCRYPTION_KEY: ${JWT_SECRET:?JWT_SECRET must be configured in .env}
       PROJECT_DOCUMENT_STORAGE_DIR: /app/.local-runtime/project-documents
       SYSTEM_BACKUP_DIR: /app/.local-runtime/system-backups
+      SYSTEM_BACKUP_ALLOWED_ROOTS: /app/.local-runtime/system-backups,/data/system-backups
       PROJECT_MPP_EXPORT_SERVICE_URL: ${PROJECT_MPP_EXPORT_SERVICE_URL:-}
       PROJECT_MPP_EXPORT_SERVICE_TOKEN: ${PROJECT_MPP_EXPORT_SERVICE_TOKEN:-}
       SKIP_PRISMA_DB_PUSH: "true"
@@ -40,6 +41,7 @@ services:
     volumes:
       - document_storage:/app/.local-runtime/project-documents
       - ./backups:/app/.local-runtime/system-backups
+      - ${PMS_BACKUP_HOST_DIR:-./backups}:/data/system-backups
     depends_on:
       postgres:
         condition: service_healthy

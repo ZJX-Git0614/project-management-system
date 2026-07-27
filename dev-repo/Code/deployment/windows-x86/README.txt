@@ -33,6 +33,9 @@ Data protection
 - Never run: docker compose down -v
 - Never delete the ceastar-pms_pgdata or ceastar-pms_document_storage volumes.
 - Run backup.ps1 regularly and copy the backups directory to another disk.
+- To store automatic backups on another Windows drive, add for example
+  PMS_BACKUP_HOST_DIR=D:/Ceastar-PMS-Backups to .env, recreate the pms container,
+  then select /data/system-backups in System Data Management.
 - install.ps1 is intended for first installation. Running install.ps1 -Force replaces
   the target database with the database included in this package.
 

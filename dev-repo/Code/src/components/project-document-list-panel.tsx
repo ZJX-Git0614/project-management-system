@@ -67,6 +67,8 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
   const [uploadOpen, setUploadOpen] = useState(false);
   const [selectedFolder, setSelectedFolder] = useState("");
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [storageProvider, setStorageProvider] = useState<"LOCAL" | "CLOUD" | "BOTH">("LOCAL");
+  const [cloudDirectory, setCloudDirectory] = useState("Ceastar-PMS/documents");
   const [uploading, setUploading] = useState(false);
   const [uploadedCount, setUploadedCount] = useState(0);
   const [uploadError, setUploadError] = useState("");
@@ -135,6 +137,8 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
   const resetUpload = () => {
     setSelectedFolder("");
     setSelectedFiles([]);
+    setStorageProvider("LOCAL");
+    setCloudDirectory("Ceastar-PMS/documents");
     setUploadError("");
     setUploadedCount(0);
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -173,6 +177,10 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
       setUploadError("请选择要上传的文件");
       return;
     }
+    if (storageProvider !== "LOCAL" && !cloudDirectory.trim()) {
+      setUploadError("请填写公司云盘文档目录");
+      return;
+    }
 
     setUploading(true);
     setUploadedCount(0);
@@ -183,6 +191,8 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
       for (const file of selectedFiles) {
         const formData = new FormData();
         formData.append("directoryKey", selectedFolder);
+        formData.append("storageProvider", storageProvider);
+        formData.append("cloudDirectory", cloudDirectory.trim());
         formData.append("file", file);
         await api.upload<ProjectDocumentFile>(`/api/projects/${projectId}/documents`, formData);
         completedCount += 1;
@@ -390,8 +400,11 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
                                       <span className="text-right text-xs text-muted-foreground">
                                         {formatFileSize(document.sizeBytes)}
                                       </span>
-                                      <span className="truncate text-right text-[11px] text-muted-foreground">
-                                        {document.uploadedBy} · {formatUploadTime(document.createdAt)}
+                                      <span
+                                        className="truncate text-right text-[11px] text-muted-foreground"
+                                        title={`${document.uploadedBy} · ${formatUploadTime(document.createdAt)} · ${document.storageProvider === "CLOUD" ? "公司云盘" : document.storageProvider === "BOTH" ? "本地与云盘" : "服务器本地"}`}
+                                      >
+                                        {document.uploadedBy} · {document.storageProvider === "CLOUD" ? "云盘" : document.storageProvider === "BOTH" ? "双存储" : "本地"}
                                       </span>
                                       <span className="flex justify-end">
                                         {isReadOnly || !canDelete ? (
@@ -473,6 +486,40 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
                   )),
                 )}
               </Select>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-foreground">存储位置</label>
+                <Select
+                  className="!w-full"
+                  value={storageProvider}
+                  onChange={(event) => {
+                    setStorageProvider(event.target.value as "LOCAL" | "CLOUD" | "BOTH");
+                    setUploadError("");
+                  }}
+                  disabled={uploading}
+                >
+                  <option value="LOCAL">服务器本地</option>
+                  <option value="CLOUD">公司云盘</option>
+                  <option value="BOTH">本地与公司云盘</option>
+                </Select>
+              </div>
+              {storageProvider !== "LOCAL" && (
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-foreground">公司云盘目录</label>
+                  <input
+                    value={cloudDirectory}
+                    onChange={(event) => {
+                      setCloudDirectory(event.target.value);
+                      setUploadError("");
+                    }}
+                    className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm outline-none transition-colors focus:border-primary"
+                    placeholder="Ceastar-PMS/documents"
+                    disabled={uploading}
+                  />
+                </div>
+              )}
             </div>
 
             <div className="space-y-1.5">
@@ -560,7 +607,12 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
                   : "!border-border !bg-muted/40 !text-muted-foreground",
               )}
               onClick={() => void handleUpload()}
-              disabled={uploading || !selectedFolder || !selectedFiles.length}
+              disabled={
+                uploading
+                || !selectedFolder
+                || !selectedFiles.length
+                || (storageProvider !== "LOCAL" && !cloudDirectory.trim())
+              }
             >
               {uploading ? (
                 <>

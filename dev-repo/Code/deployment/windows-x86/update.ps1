@@ -37,6 +37,28 @@ function Wait-ForApplication {
   throw "Ceastar PMS did not become ready within 180 seconds."
 }
 
+function Ensure-ConfigurableBackupMount([string]$Directory) {
+  $composePath = Join-Path $Directory "docker-compose.yml"
+  $content = [System.IO.File]::ReadAllText($composePath)
+  if ($content.Contains('/data/system-backups')) {
+    return
+  }
+
+  $lineBreak = if ($content.Contains("`r`n")) { "`r`n" } else { "`n" }
+  $pattern = '(?m)^([ \t]*-[ \t]*\./backups:/app/\.local-runtime/system-backups[ \t]*)$'
+  if (-not [regex]::IsMatch($content, $pattern)) {
+    throw "The deployment docker-compose.yml does not contain the expected backup volume mapping. Add a /data/system-backups mount before updating."
+  }
+
+  $backupPath = "$composePath.before-update-20260727-3"
+  [System.IO.File]::Copy($composePath, $backupPath, $true)
+  $replacement = '$1' + $lineBreak + '      - ${PMS_BACKUP_HOST_DIR:-./backups}:/data/system-backups'
+  $composeMatcher = New-Object System.Text.RegularExpressions.Regex($pattern)
+  $updated = $composeMatcher.Replace($content, $replacement, 1)
+  [System.IO.File]::WriteAllText($composePath, $updated, (New-Object System.Text.UTF8Encoding($false)))
+  Write-Host "Configurable backup directory mount added. Original compose file: $backupPath" -ForegroundColor Cyan
+}
+
 $deploymentDirectory = Find-DeploymentDirectory
 $imageNameFile = Join-Path $PSScriptRoot "image-name.txt"
 $imageHashFile = Join-Path $PSScriptRoot "image.sha256"
@@ -85,7 +107,7 @@ if (-not $composeImage) {
   throw "The current Ceastar PMS image name could not be determined."
 }
 
-$rollbackImage = "ceastar-project-management:rollback-20260727-2-amd64"
+$rollbackImage = "ceastar-project-management:rollback-20260727-3-amd64"
 docker image inspect $composeImage *> $null
 Assert-LastExitCode "The current Ceastar PMS image is missing."
 docker tag $composeImage $rollbackImage
@@ -93,6 +115,7 @@ Assert-LastExitCode "Failed to preserve the rollback image."
 
 Write-Host "Creating a database and document backup..." -ForegroundColor Cyan
 & (Join-Path $deploymentDirectory "backup.ps1")
+Ensure-ConfigurableBackupMount $deploymentDirectory
 
 Write-Host "Loading the offline update image..." -ForegroundColor Cyan
 docker load --input $imageFiles[0].FullName
@@ -116,7 +139,7 @@ $state = @(
   "rollbackImage=$rollbackImage",
   "updatedAt=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 )
-Set-Content -Path (Join-Path $deploymentDirectory ".ceastar-update-20260727-2.state") -Value $state -Encoding ASCII
+Set-Content -Path (Join-Path $deploymentDirectory ".ceastar-update-20260727-3.state") -Value $state -Encoding ASCII
 
 Write-Host ""
 Write-Host "Ceastar PMS update completed successfully." -ForegroundColor Green

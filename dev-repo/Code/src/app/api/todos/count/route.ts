@@ -18,20 +18,24 @@ export async function GET(req: NextRequest) {
   const roleNames: string[] = JSON.parse(dbUser.assignedRoleNames || "[]")
   const isAdmin = roleNames.includes("管理员")
 
-  const where: Record<string, unknown> = { status: "OPEN" }
+  const targetRoles: string[] = []
+  if (roleNames.includes("项目经理")) targetRoles.push("PROJECT_MANAGER")
+  if (roleNames.includes("项目成员")) targetRoles.push("MEMBER")
+  const where = isAdmin
+    ? { status: "OPEN" }
+    : {
+        status: "OPEN",
+        OR: [
+          { targetPersonName: authUser.displayName },
+          ...(targetRoles.length > 0 ? [{ targetPersonName: null, targetRole: { in: targetRoles } }] : []),
+        ],
+      }
 
-  // 非管理员按角色过滤
-  if (!isAdmin) {
-    const targetRoles: string[] = []
-    if (roleNames.includes("项目经理")) targetRoles.push("PROJECT_MANAGER")
-    if (roleNames.includes("项目成员")) targetRoles.push("MEMBER")
-    if (targetRoles.length > 0) {
-      where.targetRole = { in: targetRoles }
-    } else {
-      return ok({ count: 0 })
-    }
-  }
-
-  const count = await prisma.todoItem.count({ where })
-  return ok({ count })
+  const [todoCount, notificationCount] = await Promise.all([
+    prisma.todoItem.count({ where }),
+    isAdmin
+      ? prisma.systemBackupRecord.count({ where: { status: { in: ["FAILED", "PARTIAL"] }, notificationReadAt: null } })
+      : Promise.resolve(0),
+  ])
+  return ok({ count: todoCount + notificationCount, todoCount, notificationCount })
 }

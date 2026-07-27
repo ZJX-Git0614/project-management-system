@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
 import { access, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -76,11 +77,78 @@ const backupRoot = (settings: SystemBackupSettings) => path.resolve(
   settings.localDirectory.trim() || DEFAULT_SYSTEM_BACKUP_ROOT,
 );
 
-const cloudConfig = (settings: SystemBackupSettings): WebDavBackupConfig => ({
+const uniquePaths = (values: string[]) => [...new Set(values.map((value) => path.resolve(value)).filter(Boolean))];
+
+export const getBackupDirectoryRoots = (settings?: Pick<SystemBackupSettings, "localDirectory">) => uniquePaths([
+  ...(process.env.SYSTEM_BACKUP_ALLOWED_ROOTS?.split(/[;,]/).map((value) => value.trim()).filter(Boolean) ?? []),
+  DEFAULT_SYSTEM_BACKUP_ROOT,
+  settings?.localDirectory?.trim() || "",
+  path.join(process.cwd(), ".local-runtime"),
+  "/data",
+  "/mnt",
+].filter(Boolean));
+
+const isPathInsideRoot = (candidate: string, root: string) => (
+  candidate === root || candidate.startsWith(`${root}${path.sep}`)
+);
+
+export const assertAllowedBackupDirectory = (
+  directory: string,
+  settings?: Pick<SystemBackupSettings, "localDirectory">,
+) => {
+  const resolved = path.resolve(directory);
+  const roots = getBackupDirectoryRoots(settings);
+  if (!roots.some((root) => isPathInsideRoot(resolved, root))) {
+    throw new Error(`备份目录必须位于服务器已允许的存储根目录中：${roots.join("、")}`);
+  }
+  return resolved;
+};
+
+export const ensureWritableBackupDirectory = async (
+  directory: string,
+  settings?: Pick<SystemBackupSettings, "localDirectory">,
+) => {
+  const resolved = assertAllowedBackupDirectory(directory, settings);
+  await mkdir(resolved, { recursive: true });
+  await access(resolved, fsConstants.R_OK | fsConstants.W_OK);
+  return resolved;
+};
+
+export const listServerBackupDirectories = async (
+  requestedPath: string,
+  settings?: Pick<SystemBackupSettings, "localDirectory">,
+) => {
+  const roots = getBackupDirectoryRoots(settings);
+  const existingRoots = (await Promise.all(roots.map(async (root) => ({
+    path: root,
+    exists: await stat(root).then((value) => value.isDirectory()).catch(() => false),
+  })))).filter((entry) => entry.exists).map((entry) => entry.path);
+  const fallbackRoot = existingRoots[0] || await ensureWritableBackupDirectory(DEFAULT_SYSTEM_BACKUP_ROOT, settings);
+  const currentPath = requestedPath ? assertAllowedBackupDirectory(requestedPath, settings) : fallbackRoot;
+  const entries = await readdir(currentPath, { withFileTypes: true });
+  return {
+    currentPath,
+    parentPath: roots.some((root) => root === currentPath)
+      ? null
+      : roots.find((root) => isPathInsideRoot(currentPath, root))
+        ? path.dirname(currentPath)
+        : null,
+    roots: existingRoots.length > 0 ? existingRoots : [fallbackRoot],
+    directories: entries
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+      .map((entry) => ({ name: entry.name, path: path.join(currentPath, entry.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name, "zh-CN")),
+  };
+};
+
+export const getSystemWebDavConfig = (
+  settings: SystemBackupSettings,
+  directory = settings.cloudDirectory.trim(),
+): WebDavBackupConfig => ({
   baseUrl: settings.cloudBaseUrl.trim(),
   username: settings.cloudUsername.trim(),
   password: decryptAssistantSecret(settings.cloudPasswordEncrypted),
-  directory: settings.cloudDirectory.trim(),
+  directory,
 });
 
 const calculateDirectorySize = async (directory: string): Promise<number> => {
@@ -187,7 +255,7 @@ const uploadBackupFilesToCloud = async ({
   databaseFileName: string;
   documentArchiveFileName: string;
 }) => {
-  const config = cloudConfig(settings);
+  const config = getSystemWebDavConfig(settings);
   const directoryName = path.basename(directory);
   const cloudPath = await ensureWebDavDirectory(config, [directoryName]);
   await uploadFileToWebDav(config, [directoryName, databaseFileName], path.join(directory, databaseFileName));

@@ -40,4 +40,19 @@ describe("earned value", () => {
     expect(summary.cpi).toBeNull();
     expect(summary.tcpiBac).toBeNull();
   });
+
+  it("calculates work-hour performance and excludes summary tasks from totals", () => {
+    const { rows, summary } = calculateEarnedValue([
+      { ...task, id: "summary", includeInTotals: false, estimatedWorkHours: 80, actualWorkHours: 40 },
+      { ...task, id: "leaf", estimatedWorkHours: 80, actualWorkHours: 48 },
+    ], "2026-07-05");
+
+    expect(rows[1]).toMatchObject({
+      plannedWorkHours: 40,
+      earnedWorkHours: 32,
+      workVarianceHours: -8,
+      actualWorkHours: 48,
+    });
+    expect(summary).toMatchObject({ pv: 500, ev: 400, ac: 500, bac: 1000 });
+  });
 });

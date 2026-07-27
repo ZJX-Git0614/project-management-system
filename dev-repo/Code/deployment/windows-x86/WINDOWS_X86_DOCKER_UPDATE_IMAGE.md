@@ -99,8 +99,8 @@ git status --short
 每次更新使用两个版本变量：
 
 ```bash
-RELEASE_VERSION=2026.07.27.2
-RELEASE_STAMP=20260727-2
+RELEASE_VERSION=2026.07.27.3
+RELEASE_STAMP=20260727-3
 IMAGE_NAME=ceastar-project-management:${RELEASE_VERSION}-amd64
 PACKAGE_NAME=Ceastar-PMS-更新包-${RELEASE_STAMP}
 ```
@@ -189,7 +189,7 @@ docker buildx build \
 PowerShell 等价命令：
 
 ```powershell
-$ReleaseVersion = "2026.07.27.2"
+$ReleaseVersion = "2026.07.27.3"
 $ImageName = "ceastar-project-management:$ReleaseVersion-amd64"
 docker buildx build --platform linux/amd64 --tag $ImageName --load .
 ```
@@ -257,6 +257,14 @@ SKIP_PRISMA_SEED: "true"
 
 这两个变量必须保留。现有数据库结构通过 `prisma/manual-migrations/*.sql` 中可重复执行的增量 SQL 更新。
 
+如需允许管理员把备份写入其他 Windows 磁盘，Compose 必须保留以下卷挂载：
+
+```yaml
+- ${PMS_BACKUP_HOST_DIR:-./backups}:/data/system-backups
+```
+
+宿主机可在 `.env` 中设置 `PMS_BACKUP_HOST_DIR=D:/Ceastar-PMS-Backups`，页面中选择的服务器目录仍为 `/data/system-backups`。更新脚本应幂等补充该挂载，并在修改前备份原 `docker-compose.yml`。
+
 ## 11. 导出离线镜像
 
 创建更新包目录：
@@ -292,13 +300,13 @@ image.sha256
 Windows PowerShell：
 
 ```powershell
-(Get-FileHash ".\images\ceastar-pms-2026.07.27.2-amd64.tar" -Algorithm SHA256).Hash.ToLowerInvariant()
+(Get-FileHash ".\images\ceastar-pms-2026.07.27.3-amd64.tar" -Algorithm SHA256).Hash.ToLowerInvariant()
 ```
 
 同时创建 `image-name.txt`，内容必须与构建时的镜像标签完全一致：
 
 ```text
-ceastar-project-management:2026.07.27.2-amd64
+ceastar-project-management:2026.07.27.3-amd64
 ```
 
 ## 13. 组装更新包

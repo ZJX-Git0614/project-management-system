@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as XLSX from "@e965/xlsx";
 
 import type { ProjectGanttTask } from "@/domain/models";
-import { buildGanttExcel, buildProjectXml, parseGanttExcel, parseProjectXml, parseProjectXmlBundle } from "@/lib/gantt-file-transfer";
+import { buildGanttExcel, buildGanttExcelTemplate, buildProjectXml, parseGanttExcel, parseProjectXml, parseProjectXmlBundle } from "@/lib/gantt-file-transfer";
 
 const tasks: ProjectGanttTask[] = [
   {
@@ -18,6 +18,8 @@ const tasks: ProjectGanttTask[] = [
     durationDays: 3,
     actualStartDate: "2026-07-24",
     actualEndDate: "",
+    estimatedWorkHours: 24,
+    actualWorkHours: 10,
     progress: 50,
     predecessorTask: "",
     sortOrder: 1,
@@ -35,6 +37,8 @@ const tasks: ProjectGanttTask[] = [
     durationDays: 2,
     actualStartDate: "",
     actualEndDate: "",
+    estimatedWorkHours: 16,
+    actualWorkHours: 0,
     progress: 0,
     predecessorTask: "总体设计",
     predecessorTaskIds: ["root"],
@@ -58,8 +62,31 @@ describe("gantt file transfer", () => {
     const imported = parseGanttExcel(buildGanttExcel(tasks));
 
     expect(imported).toHaveLength(2);
-    expect(imported[0]).toMatchObject({ externalId: "Task1", parentExternalId: null, taskName: "总体设计" });
+    expect(imported[0]).toMatchObject({
+      externalId: "Task1",
+      parentExternalId: null,
+      taskName: "总体设计",
+      estimatedWorkHours: 24,
+      actualWorkHours: 10,
+    });
     expect(imported[1]).toMatchObject({ externalId: "Task1.1", parentExternalId: "Task1", taskName: "接口设计" });
+  });
+
+  it("builds an empty system Excel import template with the supported columns", () => {
+    const workbook = XLSX.read(buildGanttExcelTemplate(), { type: "buffer" });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
+    const headers = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1 })[0];
+
+    expect(rows).toHaveLength(0);
+    expect(headers).toEqual(expect.arrayContaining([
+      "任务ID",
+      "任务名称",
+      "计划开始",
+      "预计工时(小时)",
+      "实际工时(小时)",
+      "紧前任务ID",
+    ]));
   });
 
   it("uses the project start date for unscheduled Excel tasks", () => {
@@ -89,7 +116,14 @@ describe("gantt file transfer", () => {
     const imported = parseProjectXml(buildProjectXml("测试项目", tasks).toString("utf8"));
 
     expect(imported).toHaveLength(2);
-    expect(imported[0]).toMatchObject({ externalId: "1", parentExternalId: null, taskName: "总体设计", progress: 50 });
+    expect(imported[0]).toMatchObject({
+      externalId: "1",
+      parentExternalId: null,
+      taskName: "总体设计",
+      progress: 50,
+      estimatedWorkHours: 24,
+      actualWorkHours: 10,
+    });
     expect(imported[1]).toMatchObject({ externalId: "2", parentExternalId: "1", taskName: "接口设计" });
     expect(imported[1].predecessorExternalIds).toEqual(["1"]);
     expect(imported[1].predecessorDependencies[0]).toMatchObject({ type: 1, lag: 480, lagFormat: 7 });
