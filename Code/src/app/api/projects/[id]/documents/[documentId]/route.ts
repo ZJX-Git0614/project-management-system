@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { getUserFromRequest } from "@/lib/auth";
 import { ensureMutableProject, err, notFound, ok, unauthorized } from "@/lib/api-utils";
 import { getProjectDocumentPath } from "@/lib/project-document-storage";
-import { getSystemBackupSettings, getSystemWebDavConfig } from "@/lib/system-backup";
+import { getDocumentWebDavConfig, getSystemBackupSettings } from "@/lib/system-backup";
 import { deleteFileFromWebDav } from "@/lib/webdav-backup";
 
 export const runtime = "nodejs";
@@ -28,7 +28,7 @@ export async function DELETE(
   if (document.cloudPath) {
     try {
       const settings = await getSystemBackupSettings();
-      await deleteFileFromWebDav(getSystemWebDavConfig(settings), document.cloudPath);
+      await deleteFileFromWebDav(getDocumentWebDavConfig(settings), document.cloudPath);
     } catch (error) {
       return err(error instanceof Error ? error.message : "公司云盘文件删除失败", 502);
     }

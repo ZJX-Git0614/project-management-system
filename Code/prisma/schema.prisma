@@ -354,6 +354,11 @@ model SystemBackupSettings {
   cloudUsername          String    @default("")
   cloudPasswordEncrypted String    @default("")
   cloudDirectory         String    @default("Ceastar-PMS/backups")
+  documentCloudEnabled           Boolean   @default(false)
+  documentCloudBaseUrl           String    @default("")
+  documentCloudUsername          String    @default("")
+  documentCloudPasswordEncrypted String    @default("")
+  documentCloudDirectory         String    @default("Ceastar-PMS/documents")
   lastAutomaticBackupAt  DateTime?
   lastBackupStatus       String    @default("")
   lastBackupMessage      String    @default("") @db.Text

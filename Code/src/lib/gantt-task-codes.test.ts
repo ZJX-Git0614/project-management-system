@@ -50,6 +50,16 @@ describe("gantt task codes", () => {
     expect(tasks.find((item) => item.id === "first")?.taskCode).toBe("Task2");
   });
 
+  it("closes root and descendant code gaps after a task is deleted", () => {
+    const tasks = renumberGanttTaskCodes([
+      task({ id: "old-root-2", taskCode: "Task2", sortOrder: 2 }),
+      task({ id: "old-child-2", parentId: "old-root-2", taskCode: "Task2.2", sortOrder: 2 }),
+    ]);
+
+    expect(tasks.find((item) => item.id === "old-root-2")?.taskCode).toBe("Task1");
+    expect(tasks.find((item) => item.id === "old-child-2")?.taskCode).toBe("Task1.1");
+  });
+
   it("orders children directly under their parent", () => {
     const ordered = orderGanttTasksByHierarchy([
       task({ id: "root-2", taskCode: "Task2", sortOrder: 2 }),

@@ -29,6 +29,11 @@ const serializeSettings = (settings: Awaited<ReturnType<typeof getSystemBackupSe
   cloudUsername: settings.cloudUsername,
   cloudPasswordConfigured: Boolean(settings.cloudPasswordEncrypted),
   cloudDirectory: settings.cloudDirectory,
+  documentCloudEnabled: settings.documentCloudEnabled,
+  documentCloudBaseUrl: settings.documentCloudBaseUrl,
+  documentCloudUsername: settings.documentCloudUsername,
+  documentCloudPasswordConfigured: Boolean(settings.documentCloudPasswordEncrypted),
+  documentCloudDirectory: settings.documentCloudDirectory,
   lastAutomaticBackupAt: settings.lastAutomaticBackupAt?.toISOString() ?? null,
   nextAutomaticBackupAt: settings.automaticBackupEnabled
     ? new Date(settings.lastAutomaticBackupAt
@@ -70,6 +75,11 @@ export async function PUT(req: NextRequest) {
   const cloudUsername = String(body.cloudUsername ?? "").trim();
   const cloudDirectory = String(body.cloudDirectory ?? "").trim();
   const cloudPassword = String(body.cloudPassword ?? "");
+  const documentCloudEnabled = body.documentCloudEnabled === true;
+  const documentCloudBaseUrl = String(body.documentCloudBaseUrl ?? "").trim();
+  const documentCloudUsername = String(body.documentCloudUsername ?? "").trim();
+  const documentCloudDirectory = String(body.documentCloudDirectory ?? "").trim();
+  const documentCloudPassword = String(body.documentCloudPassword ?? "");
 
   if (!localDirectory) return err("请填写服务器本地备份目录");
   if (!path.isAbsolute(localDirectory)) return err("本地备份目录必须是服务器上的绝对路径");
@@ -77,6 +87,10 @@ export async function PUT(req: NextRequest) {
     return err("启用公司云盘后，请完整填写 WebDAV 地址、账号和目录");
   }
   if (cloudBaseUrl && !/^https?:\/\//i.test(cloudBaseUrl)) return err("WebDAV 地址必须以 http:// 或 https:// 开头");
+  if (documentCloudEnabled && (!documentCloudBaseUrl || !documentCloudUsername || !documentCloudDirectory)) {
+    return err("启用项目文档云盘后，请完整填写文档 WebDAV 地址、账号和目录");
+  }
+  if (documentCloudBaseUrl && !/^https?:\/\//i.test(documentCloudBaseUrl)) return err("文档 WebDAV 地址必须以 http:// 或 https:// 开头");
 
   const current = await getSystemBackupSettings();
   let normalizedLocalDirectory = localDirectory;
@@ -99,6 +113,13 @@ export async function PUT(req: NextRequest) {
       cloudPasswordEncrypted: body.clearCloudPassword === true
         ? ""
         : cloudPassword ? encryptAssistantSecret(cloudPassword) : current.cloudPasswordEncrypted,
+      documentCloudEnabled,
+      documentCloudBaseUrl,
+      documentCloudUsername,
+      documentCloudDirectory,
+      documentCloudPasswordEncrypted: body.clearDocumentCloudPassword === true
+        ? ""
+        : documentCloudPassword ? encryptAssistantSecret(documentCloudPassword) : current.documentCloudPasswordEncrypted,
       updatedBy: auth.user.displayName,
     },
   });
@@ -115,6 +136,10 @@ export async function PUT(req: NextRequest) {
         cloudBaseUrl: settings.cloudBaseUrl,
         cloudUsername: settings.cloudUsername,
         cloudDirectory: settings.cloudDirectory,
+        documentCloudEnabled: settings.documentCloudEnabled,
+        documentCloudBaseUrl: settings.documentCloudBaseUrl,
+        documentCloudUsername: settings.documentCloudUsername,
+        documentCloudDirectory: settings.documentCloudDirectory,
       }),
     },
   });

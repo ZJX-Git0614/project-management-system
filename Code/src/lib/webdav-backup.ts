@@ -70,16 +70,22 @@ const request = async (config: WebDavBackupConfig, url: string, init: RequestIni
 
 const resolvedBaseUrlCache = new Map<string, { baseUrl: string; expiresAt: number }>();
 
-const candidateBaseUrls = (baseUrl: string) => {
+export const candidateWebDavBaseUrls = (baseUrl: string, username = "") => {
   const normalized = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
-  const parsed = new URL(normalized);
-  if (parsed.pathname !== "/") return [normalized];
-  return [...new Set([normalized, new URL("webdav/", normalized).toString(), new URL("dav/", normalized).toString()])];
+  const originRoot = new URL("/", normalized).toString();
+  return [...new Set([
+    normalized,
+    originRoot,
+    new URL("webdav/", originRoot).toString(),
+    new URL("dav/", originRoot).toString(),
+    new URL("remote.php/webdav/", originRoot).toString(),
+    ...(username ? [new URL(`remote.php/dav/files/${encodeURIComponent(username)}/`, originRoot).toString()] : []),
+  ])];
 };
 
 const responseErrorDetail = (response: Response, url: string) => {
   const allow = response.headers.get("allow");
-  return `HTTP ${response.status}${allow ? `，服务器允许方法：${allow}` : ""}，地址：${url}`;
+  return `HTTP ${response.status}${allow ? `，服务器允许方法：${allow}` : ""}\n地址：${url}`;
 };
 
 const resolveWebDavConfig = async (config: WebDavBackupConfig) => {
@@ -91,7 +97,7 @@ const resolveWebDavConfig = async (config: WebDavBackupConfig) => {
   if (cached && cached.expiresAt > Date.now()) return { ...config, baseUrl: cached.baseUrl };
 
   let lastResponse: { response: Response; url: string } | null = null;
-  for (const baseUrl of candidateBaseUrls(config.baseUrl)) {
+  for (const baseUrl of candidateWebDavBaseUrls(config.baseUrl, config.username)) {
     const response = await request(config, baseUrl, {
       method: "PROPFIND",
       headers: { Depth: "0", "Content-Type": "application/xml; charset=utf-8" },
@@ -105,7 +111,7 @@ const resolveWebDavConfig = async (config: WebDavBackupConfig) => {
     lastResponse = { response, url: baseUrl };
   }
   if (lastResponse) {
-    throw new Error(`当前地址未提供可写 WebDAV 服务，${responseErrorDetail(lastResponse.response, lastResponse.url)}。请确认已启用 WebDAV Server，且反向代理允许 PROPFIND、MKCOL、PUT 和 DELETE。`);
+    throw new Error(`当前地址未提供可写 WebDAV 服务。${responseErrorDetail(lastResponse.response, lastResponse.url)}\n请确认服务端已启用 WebDAV，并允许 PROPFIND、MKCOL、PUT 和 DELETE。`);
   }
   throw new Error("无法连接 WebDAV 服务");
 };

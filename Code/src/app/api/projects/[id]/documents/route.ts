@@ -11,7 +11,7 @@ import {
   getProjectDocumentPath,
   MAX_PROJECT_DOCUMENT_SIZE_BYTES,
 } from "@/lib/project-document-storage";
-import { getSystemBackupSettings, getSystemWebDavConfig } from "@/lib/system-backup";
+import { getDocumentWebDavConfig, getSystemBackupSettings } from "@/lib/system-backup";
 import { deleteFileFromWebDav, uploadBufferToWebDav } from "@/lib/webdav-backup";
 
 export const runtime = "nodejs";
@@ -71,7 +71,6 @@ export async function POST(
 
   const directoryKey = String(formData.get("directoryKey") ?? "").trim();
   const storageProvider = String(formData.get("storageProvider") ?? "LOCAL").trim().toUpperCase();
-  const cloudDirectory = String(formData.get("cloudDirectory") ?? "Ceastar-PMS/documents").trim();
   const file = formData.get("file");
 
   if (!isProjectDocumentFolderName(directoryKey)) return err("请选择有效的文档文件夹");
@@ -79,7 +78,6 @@ export async function POST(
   if (file.size === 0) return err("不能上传空文件");
   if (file.size > MAX_PROJECT_DOCUMENT_SIZE_BYTES) return err("单个文件不能超过 20 MB");
   if (!["LOCAL", "CLOUD", "BOTH"].includes(storageProvider)) return err("文档存储位置不正确");
-  if (["CLOUD", "BOTH"].includes(storageProvider) && !cloudDirectory) return err("请填写公司云盘文档目录");
 
   const documentId = randomUUID();
   const originalName = file.name.trim();
@@ -96,9 +94,9 @@ export async function POST(
   if (["CLOUD", "BOTH"].includes(storageProvider)) {
     try {
       const settings = await getSystemBackupSettings();
-      if (!settings.cloudEnabled) throw new Error("请先在系统数据管理中启用并保存公司云盘配置");
+      if (!settings.documentCloudEnabled) throw new Error("请先在系统数据管理中启用并保存项目文档云盘配置");
       cloudPath = await uploadBufferToWebDav(
-        getSystemWebDavConfig(settings, cloudDirectory),
+        getDocumentWebDavConfig(settings),
         [id, directoryKey, storedName],
         content,
         file.type || "application/octet-stream",
@@ -146,7 +144,7 @@ export async function POST(
     if (cloudPath) {
       const settings = await getSystemBackupSettings().catch(() => null);
       if (settings) {
-        await deleteFileFromWebDav(getSystemWebDavConfig(settings), cloudPath).catch(() => undefined);
+        await deleteFileFromWebDav(getDocumentWebDavConfig(settings), cloudPath).catch(() => undefined);
       }
     }
     throw error;

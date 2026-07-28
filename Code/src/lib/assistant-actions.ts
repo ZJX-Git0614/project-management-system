@@ -10,7 +10,11 @@ import { prisma } from "@/lib/prisma";
 import { buildAssistantStoredName, getAssistantArtifactPath, getAssistantAttachmentPath } from "@/lib/assistant-artifact-storage";
 import { nextRiskCode } from "@/lib/risk-register-codes";
 import { mergeScheduleFiles, SCHEDULE_MERGE_EXTENSIONS } from "@/lib/schedule-file-merge";
-import { changeProjectGanttTaskHierarchy } from "@/lib/gantt-task-service";
+import {
+  changeProjectGanttTaskHierarchy,
+  getOrderedGanttTasks,
+  renumberProjectGanttTaskCodes,
+} from "@/lib/gantt-task-service";
 
 export type AssistantActionView = {
   id: string;
@@ -69,6 +73,21 @@ export const parseHierarchyIntent = (message: string) => {
     return { taskCodes, direction: "INDENT" as const };
   }
   return null;
+};
+
+export const parseGanttParentWrapIntent = (message: string) => {
+  const requestsParent = /(创建|新增|新建|添加|加)(?:一个|一条)?(?:总)?父(?:级)?任务|父(?:级)?任务.{0,12}(创建|新增|新建|添加|加)/u.test(message);
+  const targetsCurrentRoots = /(当前|现有|全部|所有).{0,12}(一级|顶级|根级|最上层).{0,8}(甘特)?任务/u.test(message);
+  if (!requestsParent || !targetsCurrentRoots) return null;
+
+  const quotedName = message.match(/[“"'《]([^”"'》]{1,100})[”"'》]/u)?.[1]?.trim();
+  const inlineName = message.match(/父(?:级)?任务(?:名称)?\s*(?:为|叫|是|[:：])?\s*([^，。；;\n]{1,100})/u)?.[1]
+    ?.replace(/^(一个|一条)\s*/u, "")
+    .trim();
+  const taskName = (quotedName || inlineName || "")
+    .replace(/(?:并|然后|同时)?\s*(?:把|将)\s*(?:当前|现有|全部|所有)[\s\S]*$/u, "")
+    .trim();
+  return taskName ? { taskName } : null;
 };
 
 const weeklyStatusByLabel: Record<string, string> = {
@@ -161,6 +180,7 @@ const ensureProjectAccess = async (user: AuthenticatedUser, projectId: string) =
 
 const ASSISTANT_TOOL_PERMISSION_KEYS: Record<string, string> = {
   "gantt.progress.update": "project-gantt:edit",
+  "gantt.parent.wrap": "project-gantt:create",
   "gantt.hierarchy.outdent": "project-gantt:edit",
   "gantt.hierarchy.indent": "project-gantt:edit",
   "weekly.status.update": "weekly-items:edit",
@@ -172,6 +192,10 @@ const ASSISTANT_TOOL_PERMISSION_KEYS: Record<string, string> = {
 };
 
 const canUseAssistantTool = async (user: AuthenticatedUser, toolId: string) => {
+  if (toolId === "gantt.parent.wrap") {
+    return await userHasPermission(user, "project-gantt:create")
+      && await userHasPermission(user, "project-gantt:edit");
+  }
   const permissionKey = ASSISTANT_TOOL_PERMISSION_KEYS[toolId];
   return !permissionKey || await userHasPermission(user, permissionKey);
 };
@@ -377,6 +401,25 @@ export const proposeAssistantAction = async (params: {
     });
   }
 
+  const parentWrapIntent = parseGanttParentWrapIntent(params.message);
+  if (canUse("gantt.parent.wrap") && parentWrapIntent) {
+    const rootTasks = await prisma.projectGanttTask.findMany({
+      where: { projectId: params.projectId, parentId: null },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+      select: { id: true, taskCode: true, taskName: true },
+    });
+    if (rootTasks.length > 0) {
+      return createProposal({
+        ...params,
+        toolId: "gantt.parent.wrap",
+        riskLevel: "MEDIUM",
+        args: { taskName: parentWrapIntent.taskName, childTaskIds: rootTasks.map((task) => task.id) },
+        title: "创建任务总父级",
+        description: `创建一级父任务「${parentWrapIntent.taskName}」，并将当前 ${rootTasks.length} 个一级任务及其全部子任务纳入其下`,
+      });
+    }
+  }
+
   const hierarchyIntent = parseHierarchyIntent(params.message);
   const hierarchyToolId = hierarchyIntent?.direction === "OUTDENT"
     ? "gantt.hierarchy.outdent"
@@ -572,6 +615,91 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     return prisma.assistantActionRun.update({
       where: { id: action.id },
       data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "任务进度已更新", taskId: updated.id, progress: updated.progress, navigateUrl: `/projects/${action.projectId}?nav=gantt`, navigateLabel: "查看项目进度" }) },
+    });
+  }
+
+  if (action.toolId === "gantt.parent.wrap") {
+    const taskName = String(args.taskName || "").trim();
+    const requestedChildIds = Array.isArray(args.childTaskIds)
+      ? Array.from(new Set(args.childTaskIds.map(String).filter(Boolean)))
+      : [];
+    if (!taskName || taskName.length > 100) throw new Error("父任务名称不能为空且不能超过 100 个字符");
+
+    const rootTasks = await prisma.projectGanttTask.findMany({
+      where: { projectId: action.projectId, parentId: null },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+    });
+    const requestedSet = new Set(requestedChildIds);
+    const childTasks = rootTasks.filter((task) => requestedSet.has(task.id));
+    if (childTasks.length === 0 || childTasks.length !== requestedSet.size || rootTasks.length !== requestedSet.size) {
+      throw new Error("一级任务已发生变化，请重新发起操作");
+    }
+
+    const startDate = childTasks.map((task) => task.startDate).sort()[0];
+    const finishDate = childTasks.map((task) => task.finishDate).sort().at(-1) || startDate;
+    const durationDays = Math.max(1, Math.round((new Date(`${finishDate}T00:00:00Z`).getTime() - new Date(`${startDate}T00:00:00Z`).getTime()) / 86_400_000) + 1);
+    const actualStartDate = childTasks.map((task) => task.actualStartDate).filter(Boolean).sort()[0] || "";
+    const actualEndDate = childTasks.map((task) => task.actualEndDate).filter(Boolean).sort().at(-1) || "";
+    const estimatedWorkHours = childTasks.reduce((sum, task) => sum + Math.max(0, task.estimatedWorkHours), 0);
+    const actualWorkHours = childTasks.reduce((sum, task) => sum + Math.max(0, task.actualWorkHours), 0);
+    const weightedDuration = childTasks.reduce((sum, task) => sum + Math.max(1, task.durationDays), 0);
+    const progress = Math.round(childTasks.reduce((sum, task) => sum + Math.max(1, task.durationDays) * task.progress, 0) / weightedDuration);
+    const parent = await prisma.$transaction(async (tx) => {
+      await tx.projectGanttTask.updateMany({
+        where: { projectId: action.projectId, parentId: null },
+        data: { sortOrder: { increment: 1 } },
+      });
+      const created = await tx.projectGanttTask.create({
+        data: {
+          projectId: action.projectId,
+          parentId: null,
+          taskCode: "",
+          taskCategory: "",
+          taskName,
+          startDate,
+          finishDate,
+          durationDays,
+          durationMinutes: durationDays * 480,
+          actualStartDate,
+          actualEndDate,
+          estimatedWorkHours,
+          actualWorkHours,
+          progress,
+          predecessorTask: "",
+          sortOrder: 1,
+        },
+      });
+      await Promise.all(childTasks.map((task, index) => tx.projectGanttTask.update({
+        where: { id: task.id },
+        data: { parentId: created.id, sortOrder: index + 1 },
+      })));
+      await tx.operationHistory.create({
+        data: {
+          projectId: action.projectId,
+          entityType: "PROJECT_GANTT_TASK",
+          entityId: created.id,
+          actionType: "CREATE",
+          operator: user.displayName,
+          detail: `通过智能助手创建父任务「${taskName}」，并纳入 ${childTasks.length} 个原一级任务`,
+        },
+      });
+      return created;
+    }, { maxWait: 10_000, timeout: 60_000 });
+    await renumberProjectGanttTaskCodes(action.projectId);
+    const normalizedParent = (await getOrderedGanttTasks(action.projectId)).find((task) => task.id === parent.id);
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: {
+        status: "SUCCEEDED",
+        confirmedAt: new Date(),
+        executedAt: new Date(),
+        resultJson: JSON.stringify({
+          message: `已创建 ${normalizedParent?.taskCode || "Task1"} ${taskName}，并调整现有一级任务层级`,
+          taskId: parent.id,
+          navigateUrl: `/projects/${action.projectId}?nav=gantt`,
+          navigateLabel: "查看项目进度",
+        }),
+      },
     });
   }
 

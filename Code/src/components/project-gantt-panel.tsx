@@ -274,7 +274,9 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
 
     setDeletingSelected(true);
     try {
-      await Promise.all(deleteRoots.map((task) => api.delete(`/api/projects/${projectId}/gantt-tasks/${task.id}`)));
+      for (const task of deleteRoots) {
+        await api.delete(`/api/projects/${projectId}/gantt-tasks/${task.id}`);
+      }
     } catch (error) {
       alert(error instanceof Error ? error.message : "删除失败");
     } finally {

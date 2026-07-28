@@ -147,5 +147,6 @@ export async function DELETE(
   if (!existing) return notFound("甘特任务");
 
   await prisma.projectGanttTask.delete({ where: { id: taskId } });
+  await renumberProjectGanttTaskCodes(id);
   return ok({ message: "甘特任务已删除" });
 }

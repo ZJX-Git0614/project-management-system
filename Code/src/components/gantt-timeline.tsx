@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { ChevronDown, ChevronLeft, ChevronRight, CornerDownRight, GripVertical, IndentDecrease, IndentIncrease, ListTree, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -85,6 +85,42 @@ const ZOOM_LEVELS = [1, 3, 8, 20, 60];
 const ZOOM_LABELS = ["60天", "30天", "15天", "5天", "1天"];
 const DEFAULT_ZOOM_INDEX = 2;
 type DropPosition = "before" | "after";
+
+const GanttDividerToggle = ({
+  collapsed,
+  onToggle,
+  className,
+  style,
+}: {
+  collapsed: boolean;
+  onToggle: () => void;
+  className?: string;
+  style?: CSSProperties;
+}) => (
+  <button
+    type="button"
+    className={cn(
+      "group absolute z-[76] flex h-24 w-4 items-center justify-center border-0 bg-transparent p-0 outline-none",
+      className,
+    )}
+    style={style}
+    onClick={onToggle}
+    title={collapsed ? "展开列" : "折叠列"}
+    aria-label={collapsed ? "展开列" : "折叠列"}
+  >
+    <span className="absolute h-20 w-px bg-border/80 transition-[width,background-color,box-shadow] duration-200 group-hover:w-0.5 group-hover:bg-primary/75 group-focus-visible:w-0.5 group-focus-visible:bg-primary/75" />
+    <span
+      className={cn(
+        "relative z-10 flex h-7 w-3 items-center justify-center rounded-sm border border-primary/25 bg-card/95 text-primary opacity-55 shadow-sm transition-[opacity,transform,box-shadow] duration-200 group-hover:opacity-100 group-focus-visible:opacity-100",
+        collapsed
+          ? "group-hover:translate-x-0.5 group-hover:shadow-[4px_0_12px_hsl(var(--primary)/0.28)]"
+          : "group-hover:-translate-x-0.5 group-hover:shadow-[-4px_0_12px_hsl(var(--primary)/0.28)]",
+      )}
+    >
+      {collapsed ? <ChevronRight className="size-2.5" /> : <ChevronLeft className="size-2.5" />}
+    </span>
+  </button>
+);
 
 const getTickEvery = (dayWidth: number) => {
   if (dayWidth >= 60) return 1;
@@ -171,8 +207,9 @@ export const GanttTimeline = ({
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [taskDropTarget, setTaskDropTarget] = useState<{ id: string; position: DropPosition } | null>(null);
   const [flashingTaskId, setFlashingTaskId] = useState<string | null>(null);
-  const [hoverCollapse, setHoverCollapse] = useState(false);
   const [columnWidths, setColumnWidths] = useState<GanttColumnWidths>({ ...GANTT_COLUMN_MIN_WIDTHS });
+  const leftWidth = ganttColumnsWidth(columnWidths, detailsCollapsed);
+  const [dividerViewportX, setDividerViewportX] = useState(8);
   const manuallySizedColumns = useRef(new Set<GanttColumnKey>());
   const [collapsedTaskIds, setCollapsedTaskIds] = useState<Set<string>>(() => new Set());
   const scrollViewportRef = useRef<HTMLDivElement>(null);
@@ -200,6 +237,18 @@ export const GanttTimeline = ({
     }
     return true;
   }), [collapsedTaskIds, rowByTaskId, rows]);
+  const stripeIndexByTaskId = useMemo(() => {
+    const stripes = new Map<string, number>();
+    let previousDepth: number | null = null;
+    let stripeIndex = 0;
+    visibleRows.forEach((row) => {
+      const depth = taskDepthById.get(row.id) ?? 0;
+      stripeIndex = depth === previousDepth ? stripeIndex + 1 : 0;
+      stripes.set(row.id, stripeIndex);
+      previousDepth = depth;
+    });
+    return stripes;
+  }, [taskDepthById, visibleRows]);
   const virtualRows = useMemo(() => visibleRows
     .slice(virtualRange.start, virtualRange.end)
     .map((row, offset) => ({ row, index: virtualRange.start + offset })), [virtualRange, visibleRows]);
@@ -254,7 +303,10 @@ export const GanttTimeline = ({
     const visibleCount = Math.ceil(viewport.clientHeight / ROW_HEIGHT) + overscan * 2;
     const end = Math.min(visibleRows.length, start + visibleCount);
     setVirtualRange((current) => current.start === start && current.end === end ? current : { start, end });
-  }, [visibleRows.length]);
+    const boundaryX = leftWidth - viewport.scrollLeft;
+    const nextDividerX = Math.min(Math.max(boundaryX, 8), Math.max(8, viewport.clientWidth - 8));
+    setDividerViewportX((current) => Math.abs(current - nextDividerX) < 0.5 ? current : nextDividerX);
+  }, [leftWidth, visibleRows.length]);
 
   useEffect(() => {
     updateVirtualRange();
@@ -419,7 +471,6 @@ export const GanttTimeline = ({
   const visibleEndDate = addCalendarDays(range.endDate, 7);
   const visibleDays = diffDays(visibleStartDate, visibleEndDate) + 1;
   const timelineWidth = Math.max(MIN_TIMELINE_WIDTH, visibleDays * config.dayWidth);
-  const leftWidth = ganttColumnsWidth(columnWidths, detailsCollapsed);
   const bodyHeight = visibleRows.length * ROW_HEIGHT;
   const todayOffset = diffDays(visibleStartDate, new Date().toISOString().slice(0, 10));
   const todayX = todayOffset >= 0 && todayOffset < visibleDays ? todayOffset * config.dayWidth : null;
@@ -580,14 +631,15 @@ export const GanttTimeline = ({
         </div>
       </div>
 
-      <div
-        ref={scrollViewportRef}
-        className={cn(
-          "min-h-[260px] overflow-auto",
-          fullScreen ? "min-h-0 flex-1" : "max-h-[calc(100vh-240px)]",
-        )}
-        onScroll={updateVirtualRange}
-      >
+      <div className={cn("relative min-h-0", fullScreen && "flex-1")}>
+        <div
+          ref={scrollViewportRef}
+          className={cn(
+            "min-h-[260px] overflow-auto",
+            fullScreen ? "h-full min-h-0" : "max-h-[calc(100vh-240px)]",
+          )}
+          onScroll={updateVirtualRange}
+        >
         <div className="grid min-w-max" style={{ gridTemplateColumns: `${leftWidth}px ${timelineWidth}px` }}>
           <TaskGridHeader
             collapsed={detailsCollapsed}
@@ -606,25 +658,6 @@ export const GanttTimeline = ({
             className="sticky left-0 z-10 border-r border-border bg-card transition-colors duration-200 hover:border-primary/40"
             style={{ height: bodyHeight }}
           >
-            <button
-              type="button"
-              className={cn(
-                "absolute right-0 top-0 z-[75] flex !h-full !min-h-0 !w-3 cursor-pointer items-center justify-start !rounded-none !border-0 !p-0 !shadow-none transition-all duration-200",
-                hoverCollapse ? "!bg-primary/5" : "!bg-transparent"
-              )}
-              onMouseEnter={() => setHoverCollapse(true)}
-              onMouseLeave={() => setHoverCollapse(false)}
-              onClick={() => setDetailsCollapsed((prev) => !prev)}
-              title={detailsCollapsed ? "展开列" : "折叠列"}
-              aria-label={detailsCollapsed ? "展开列" : "折叠列"}
-            >
-              <div className={cn(
-                "flex h-8 w-3 -translate-x-1 items-center justify-center rounded-l-sm border-l border-transparent bg-card/95 transition-all duration-200",
-                hoverCollapse ? "opacity-100" : "opacity-0"
-              )}>
-                {detailsCollapsed ? <ChevronRight className="h-2.5 w-2.5 text-primary/70" /> : <ChevronLeft className="h-2.5 w-2.5 text-primary/70" />}
-              </div>
-            </button>
             <div
               className={cn(
                 "absolute inset-x-0 top-0 z-20 h-3",
@@ -685,6 +718,7 @@ export const GanttTimeline = ({
                   predecessorOptions={tasks}
                   row={row}
                   taskDepth={taskDepthById.get(row.id) ?? 0}
+                  stripeIndex={stripeIndexByTaskId.get(row.id) ?? 0}
                   selected={selectedTaskIds.includes(row.id)}
                   selectionLocked={isSelectedByAncestor(row.id)}
                   selectionMode={selectionMode}
@@ -804,6 +838,13 @@ export const GanttTimeline = ({
             })}
           </div>
         </div>
+        </div>
+        <GanttDividerToggle
+          collapsed={detailsCollapsed}
+          onToggle={() => setDetailsCollapsed((prev) => !prev)}
+          className="top-1/2 -translate-x-1/2 -translate-y-1/2"
+          style={{ left: dividerViewportX }}
+        />
       </div>
     </div>
   );
@@ -842,7 +883,6 @@ const EmptyGanttTimeline = ({
   const timelineWidth = Math.max(MIN_TIMELINE_WIDTH, visibleDays * config.dayWidth);
   const leftWidth = ganttColumnsWidth(columnWidths, detailsCollapsed);
   const bodyHeight = ROW_HEIGHT * 3;
-  const [hoverCollapse, setHoverCollapse] = useState(false);
 
   return (
     <div className="overflow-hidden rounded-lg border border-border bg-card">
@@ -926,25 +966,11 @@ const EmptyGanttTimeline = ({
           />
 
           <div className="sticky left-0 z-10 flex items-center justify-center border-r border-border bg-background text-xs text-muted-foreground transition-colors duration-200 hover:border-primary/40" style={{ height: bodyHeight }}>
-            <button
-              type="button"
-              className={cn(
-                "absolute right-0 top-0 z-[75] flex !h-full !min-h-0 !w-3 cursor-pointer items-center justify-start !rounded-none !border-0 !p-0 !shadow-none transition-all duration-200",
-                hoverCollapse ? "!bg-primary/5" : "!bg-transparent"
-              )}
-              onMouseEnter={() => setHoverCollapse(true)}
-              onMouseLeave={() => setHoverCollapse(false)}
-              onClick={() => setDetailsCollapsed((prev) => !prev)}
-              title={detailsCollapsed ? "展开列" : "折叠列"}
-              aria-label={detailsCollapsed ? "展开列" : "折叠列"}
-            >
-              <div className={cn(
-                "flex h-8 w-3 -translate-x-1 items-center justify-center rounded-l-sm border-l border-transparent bg-card/95 transition-all duration-200",
-                hoverCollapse ? "opacity-100" : "opacity-0"
-              )}>
-                {detailsCollapsed ? <ChevronRight className="h-2.5 w-2.5 text-primary/70" /> : <ChevronLeft className="h-2.5 w-2.5 text-primary/70" />}
-              </div>
-            </button>
+            <GanttDividerToggle
+              collapsed={detailsCollapsed}
+              onToggle={() => setDetailsCollapsed((prev) => !prev)}
+              className="-right-2 top-1/2 -translate-y-1/2"
+            />
             {emptyText}
           </div>
           <div className="relative" style={{ width: timelineWidth, height: bodyHeight }}>
@@ -1071,6 +1097,7 @@ const EditableTaskRow = ({
   onUpdateTask,
   predecessorOptions,
   row,
+  stripeIndex,
   taskDepth,
   visualTop,
   selected,
@@ -1100,6 +1127,7 @@ const EditableTaskRow = ({
   onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft) => void | Promise<void>;
   predecessorOptions: ProjectGanttTask[];
   row: ReturnType<typeof buildGanttRows>[number];
+  stripeIndex: number;
   taskDepth: number;
   visualTop: number;
   selected: boolean;
@@ -1109,6 +1137,12 @@ const EditableTaskRow = ({
 }) => {
   const [draft, setDraft] = useState<GanttTaskDraft>(() => toTaskDraft(row));
   const isChildTask = taskDepth > 0;
+  const levelHue = (208 + taskDepth * 47) % 360;
+  const levelRowStyle = {
+    "--gantt-level-row": `hsl(${levelHue} 68% 50% / ${stripeIndex % 2 === 0 ? 0.045 : 0.085})`,
+    "--gantt-level-hover": `hsl(${levelHue} 72% 52% / 0.14)`,
+    "--gantt-level-accent": `hsl(${levelHue} 72% 55% / 0.72)`,
+  } as CSSProperties & Record<"--gantt-level-row" | "--gantt-level-hover" | "--gantt-level-accent", string>;
 
   const updateDraft = <K extends keyof GanttTaskDraft>(key: K, value: GanttTaskDraft[K]) => {
     setDraft((prev) => ({ ...prev, [key]: value }));
@@ -1183,14 +1217,13 @@ const EditableTaskRow = ({
     <div
       className={cn(
         "group relative box-border grid cursor-default items-center border-b border-border text-xs transition-[background,box-shadow,transform] duration-150",
-        isChildTask ? "bg-primary/5" : index % 2 === 0 ? "bg-background" : "bg-muted/25",
+        "bg-[var(--gantt-level-row)] hover:bg-[var(--gantt-level-hover)]",
         row.isCritical
           ? "shadow-[inset_3px_0_0_hsl(var(--destructive))]"
-          : isChildTask && "shadow-[inset_3px_0_0_hsl(var(--primary))]",
-        selected && "bg-primary/15",
+          : "shadow-[inset_3px_0_0_var(--gantt-level-accent)]",
+        selected && "!bg-primary/15 hover:!bg-primary/20",
         dragged && "scale-[0.995] opacity-45 shadow-lg",
-        dropPosition && "bg-primary/10",
-        "hover:bg-primary/10"
+        dropPosition && "!bg-primary/10"
       )}
       onDragEnd={onDragEnd}
       onDragOver={onDragOver}
@@ -1206,6 +1239,7 @@ const EditableTaskRow = ({
         gridTemplateColumns: ganttColumnTemplate(columnWidths, collapsed),
         contentVisibility: dropPosition || dragged ? "visible" : "auto",
         containIntrinsicSize: `${ROW_HEIGHT}px`,
+        ...levelRowStyle,
       }}
     >
       {flashing && (
@@ -1274,7 +1308,7 @@ const EditableTaskRow = ({
             {hierarchyCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
           </button>
         ) : <span className="size-4 shrink-0" aria-hidden="true" />}
-        {isChildTask && <span className="h-px w-2 shrink-0 bg-primary/60" />}
+        {isChildTask && <span className="h-px w-2 shrink-0 bg-[var(--gantt-level-accent)]" />}
         <span
           className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap pr-12 font-mono text-[11px] font-semibold text-muted-foreground"
           title={row.taskCode || row.id}

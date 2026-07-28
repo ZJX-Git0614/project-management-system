@@ -71,7 +71,6 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
   const [selectedFolder, setSelectedFolder] = useState("");
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [storageProvider, setStorageProvider] = useState<"LOCAL" | "CLOUD" | "BOTH">("LOCAL");
-  const [cloudDirectory, setCloudDirectory] = useState("Ceastar-PMS/documents");
   const [uploading, setUploading] = useState(false);
   const [uploadedCount, setUploadedCount] = useState(0);
   const [uploadError, setUploadError] = useState("");
@@ -141,7 +140,6 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
     setSelectedFolder("");
     setSelectedFiles([]);
     setStorageProvider("LOCAL");
-    setCloudDirectory("Ceastar-PMS/documents");
     setUploadError("");
     setUploadedCount(0);
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -186,11 +184,6 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
       setUploadError("请选择要上传的文件");
       return;
     }
-    if (storageProvider !== "LOCAL" && !cloudDirectory.trim()) {
-      setUploadError("请填写公司云盘文档目录");
-      return;
-    }
-
     setUploading(true);
     setUploadedCount(0);
     setUploadError("");
@@ -201,7 +194,6 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
         const formData = new FormData();
         formData.append("directoryKey", selectedFolder);
         formData.append("storageProvider", storageProvider);
-        formData.append("cloudDirectory", cloudDirectory.trim());
         formData.append("file", file);
         await api.upload<ProjectDocumentFile>(`/api/projects/${projectId}/documents`, formData);
         completedCount += 1;
@@ -546,18 +538,8 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
             </div>
 
             {storageProvider !== "LOCAL" && (
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-foreground">公司云盘目录</label>
-                <input
-                  value={cloudDirectory}
-                  onChange={(event) => {
-                    setCloudDirectory(event.target.value);
-                    setUploadError("");
-                  }}
-                  className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm outline-none transition-colors focus:border-primary"
-                  placeholder="Ceastar-PMS/documents"
-                  disabled={uploading}
-                />
+              <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-[11px] leading-5 text-muted-foreground">
+                文件将上传到“系统数据管理”中配置的项目文档云盘目录。
               </div>
             )}
 
@@ -650,7 +632,6 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
                 uploading
                 || !selectedFolder
                 || !selectedFiles.length
-                || (storageProvider !== "LOCAL" && !cloudDirectory.trim())
               }
             >
               {uploading ? (

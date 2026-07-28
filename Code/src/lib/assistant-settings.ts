@@ -70,6 +70,7 @@ export const ASSISTANT_TOOL_CATALOG = [
   { id: "todo.create", label: "创建项目待办", description: "确认后为当前项目创建待办事项", riskLevel: "MEDIUM" },
   { id: "todo.complete", label: "完成项目待办", description: "按待办标题定位并确认完成", riskLevel: "MEDIUM" },
   { id: "gantt.progress.update", label: "更新任务进度", description: "确认后更新当前项目任务进度", riskLevel: "MEDIUM" },
+  { id: "gantt.parent.wrap", label: "创建任务总父级", description: "创建新的一级父任务，并将当前一级任务整体纳入其下", riskLevel: "MEDIUM" },
   { id: "gantt.hierarchy.outdent", label: "上移任务层级", description: "将指定任务及其子任务上移一个层级", riskLevel: "MEDIUM" },
   { id: "gantt.hierarchy.indent", label: "下移任务层级", description: "将指定任务及其子任务下移到上一条同级任务下", riskLevel: "MEDIUM" },
   { id: "weekly.status.update", label: "更新事项状态", description: "按事项 ID 更新状态或当前进度", riskLevel: "MEDIUM" },
@@ -93,7 +94,7 @@ const LEGACY_DEFAULT_TOOL_IDS = [
   "risk.create.from-analysis",
   "todo.create.batch",
 ] as const;
-const NEW_DEFAULT_TOOL_IDS = ["todo.complete", "weekly.status.update", "risk.create", "risk.status.update", "schedule.merge.files", "gantt.hierarchy.outdent", "gantt.hierarchy.indent"] as const;
+const NEW_DEFAULT_TOOL_IDS = ["todo.complete", "weekly.status.update", "risk.create", "risk.status.update", "schedule.merge.files", "gantt.parent.wrap", "gantt.hierarchy.outdent", "gantt.hierarchy.indent"] as const;
 
 const parseToolIds = (value: string) => {
   try {
