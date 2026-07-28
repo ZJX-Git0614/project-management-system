@@ -13,6 +13,7 @@ import {
   Check,
   ChevronDown,
   Database,
+  Download,
   FileSearch,
   Maximize2,
   Minimize2,
@@ -573,6 +574,16 @@ export function ProjectAssistant({
     })))
   }
 
+  const downloadActionResult = async (downloadUrl: string) => {
+    const blob = await api.download(downloadUrl)
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement("a")
+    link.href = url
+    link.download = ""
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+
   const handleAction = async (action: AssistantAction, command: "confirm" | "cancel") => {
     try {
       const result = await api.post<{ action: AssistantAction }>(`/api/assistant/actions/${action.id}/${command}`)
@@ -583,13 +594,7 @@ export function ProjectAssistant({
         window.dispatchEvent(new Event(TODO_CHANGED_EVENT))
       }
       if (result.action.result?.downloadUrl) {
-        const blob = await api.download(result.action.result.downloadUrl)
-        const url = URL.createObjectURL(blob)
-        const link = document.createElement("a")
-        link.href = url
-        link.download = ""
-        link.click()
-        URL.revokeObjectURL(url)
+        await downloadActionResult(result.action.result.downloadUrl)
       }
     } catch (error) {
       notify(error instanceof Error ? error.message : "Agent 操作失败", "error")
@@ -750,14 +755,27 @@ export function ProjectAssistant({
                               <span className={cn("text-[11px] font-medium", block.action.status === "SUCCEEDED" ? "text-emerald-400" : "text-muted-foreground")}>
                                 {block.action.result?.message || ({ CANCELLED: "已取消", EXPIRED: "已过期", FAILED: "执行失败" }[block.action.status] || block.action.status)}
                               </span>
-                              {block.action.status === "SUCCEEDED" && block.action.result?.navigateUrl && (
-                                <button
-                                  type="button"
-                                  className="rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:border-primary/35 hover:bg-primary/[0.08] hover:text-foreground"
-                                  onClick={() => window.location.assign(block.action.result!.navigateUrl!)}
-                                >
-                                  {block.action.result.navigateLabel || "查看结果"}
-                                </button>
+                              {block.action.status === "SUCCEEDED" && (block.action.result?.downloadUrl || block.action.result?.navigateUrl) && (
+                                <span className="flex items-center gap-2">
+                                  {block.action.result.downloadUrl && (
+                                    <button
+                                      type="button"
+                                      className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:border-primary/35 hover:bg-primary/[0.08] hover:text-foreground"
+                                      onClick={() => void downloadActionResult(block.action.result!.downloadUrl!)}
+                                    >
+                                      <Download className="size-3" />下载文件
+                                    </button>
+                                  )}
+                                  {block.action.result.navigateUrl && (
+                                    <button
+                                      type="button"
+                                      className="rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:border-primary/35 hover:bg-primary/[0.08] hover:text-foreground"
+                                      onClick={() => window.location.assign(block.action.result!.navigateUrl!)}
+                                    >
+                                      {block.action.result.navigateLabel || "查看结果"}
+                                    </button>
+                                  )}
+                                </span>
                               )}
                             </div>
                           )}

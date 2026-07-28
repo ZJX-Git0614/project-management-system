@@ -144,6 +144,7 @@ describe("project assistant model routing", () => {
     })
     expect(shouldPlanProjectAssistantAction("有哪些延期事项")).toBe(false)
     expect(shouldPlanProjectAssistantAction("更新 Matter007 的进度")).toBe(true)
+    expect(shouldPlanProjectAssistantAction("把两个进度计划合并成可导入文件")).toBe(true)
     const request = callAssistantProviderModel.mock.calls[0][0]
     expect(request.messages[0].content).toContain("白名单工具")
     expect(request.messages[0].content).toContain("不得生成数据库 ID")

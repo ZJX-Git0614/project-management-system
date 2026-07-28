@@ -11,7 +11,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ arti
   if (!user) return NextResponse.json({ success: false, error: "未登录" }, { status: 401 });
   const { artifactId } = await params;
   const artifact = await prisma.assistantArtifact.findFirst({ where: { id: artifactId, userId: user.userId } });
-  if (!artifact) return NextResponse.json({ success: false, error: "修订稿不存在" }, { status: 404 });
+  if (!artifact) return NextResponse.json({ success: false, error: "助手生成文件不存在" }, { status: 404 });
   try {
     const content = await readFile(getAssistantArtifactPath(artifact.projectId, artifact.storedName));
     return new NextResponse(content, {
@@ -21,6 +21,6 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ arti
       },
     });
   } catch {
-    return NextResponse.json({ success: false, error: "修订稿文件已丢失" }, { status: 404 });
+    return NextResponse.json({ success: false, error: "助手生成文件已丢失" }, { status: 404 });
   }
 }

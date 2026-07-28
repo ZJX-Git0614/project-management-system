@@ -42,6 +42,7 @@ describe("assistant settings foundations", () => {
       "weekly.status.update",
       "risk.create",
       "risk.status.update",
+      "schedule.merge.files",
     ]));
   });
 });

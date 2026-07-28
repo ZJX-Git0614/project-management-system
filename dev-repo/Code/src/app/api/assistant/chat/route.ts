@@ -180,11 +180,11 @@ export async function POST(req: NextRequest) {
   let ragResult: Awaited<ReturnType<typeof queryRagLite>> = null;
   let retrievedChunks: Array<{ content: string; metadata?: Record<string, unknown> }> = [];
 
-  let action = await proposeAssistantAction({ message, projectId, user, runtime, history });
+  let action = await proposeAssistantAction({ message, projectId, user, runtime, history, attachmentIds });
   if (!action && shouldPlanProjectAssistantAction(message)) {
     const actionPlan = await planProjectAssistantActionWithModel({ message, history, runtime, signal: req.signal });
     if (actionPlan) {
-      action = await proposeAssistantAction({ message: actionPlan.command, projectId, user, runtime, history, expectedToolId: actionPlan.toolId });
+      action = await proposeAssistantAction({ message: actionPlan.command, projectId, user, runtime, history, attachmentIds, expectedToolId: actionPlan.toolId });
     }
   }
   if (req.signal.aborted) return err("本次回答已终止", 499);

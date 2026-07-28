@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, extname, basename } from "node:path";
 
 import type { AssistantActionRun } from "@prisma/client";
@@ -7,8 +7,9 @@ import type { AssistantActionRun } from "@prisma/client";
 import type { AuthenticatedUser } from "@/lib/server-auth";
 import type { AssistantRuntimeConfig } from "@/lib/assistant-settings";
 import { prisma } from "@/lib/prisma";
-import { buildAssistantStoredName, getAssistantArtifactPath } from "@/lib/assistant-artifact-storage";
+import { buildAssistantStoredName, getAssistantArtifactPath, getAssistantAttachmentPath } from "@/lib/assistant-artifact-storage";
 import { nextRiskCode } from "@/lib/risk-register-codes";
+import { mergeScheduleFiles, SCHEDULE_MERGE_EXTENSIONS } from "@/lib/schedule-file-merge";
 
 export type AssistantActionView = {
   id: string;
@@ -132,6 +133,11 @@ const parseExportType = (message: string): AssistantExportType | null => {
   return null;
 };
 
+export const isScheduleMergeRequest = (message: string) => (
+  /(合并|整合|汇总|合成|合二为一|拼接).{0,20}(进度|计划|排期|附件|文件)|(进度|计划|排期|附件|文件).{0,20}(合并|整合|汇总|合成|合二为一|拼接)/u.test(message)
+  && /(生成|制作|导出|下载|可导入|模板|文件|表格|计划)/u.test(message)
+);
+
 const ensureProjectAccess = async (user: AuthenticatedUser, projectId: string) => {
   if (user.assignedRoleNames.includes("管理员")) return true;
   return Boolean(await prisma.projectMember.findFirst({
@@ -175,12 +181,36 @@ export const proposeAssistantAction = async (params: {
   user: AuthenticatedUser;
   runtime: AssistantRuntimeConfig;
   history?: Array<{ role: "user" | "assistant"; content: string }>;
+  attachmentIds?: string[];
   expectedToolId?: string;
 }): Promise<AssistantActionView | null> => {
   if (!params.runtime.agentEnabled || !params.projectId) return null;
   if (!(await ensureProjectAccess(params.user, params.projectId))) return null;
   const enabled = new Set(params.runtime.agentEnabledToolIds);
   const canUse = (toolId: string) => enabled.has(toolId) && (!params.expectedToolId || params.expectedToolId === toolId);
+
+  if (canUse("schedule.merge.files") && isScheduleMergeRequest(params.message)) {
+    const requestedIds = Array.from(new Set((params.attachmentIds ?? []).map((id) => id.trim()).filter(Boolean))).slice(0, 5);
+    if (requestedIds.length >= 2) {
+      const attachments = await prisma.assistantAttachment.findMany({
+        where: { id: { in: requestedIds }, projectId: params.projectId, userId: params.user.userId, status: "READY" },
+        select: { id: true, originalName: true },
+      });
+      const attachmentById = new Map(attachments.map((attachment) => [attachment.id, attachment]));
+      const ordered = requestedIds.map((id) => attachmentById.get(id)).filter((attachment): attachment is NonNullable<typeof attachment> => Boolean(attachment));
+      const supported = ordered.filter((attachment) => SCHEDULE_MERGE_EXTENSIONS.includes(extname(attachment.originalName).toLocaleLowerCase("en-US") as typeof SCHEDULE_MERGE_EXTENSIONS[number]));
+      if (supported.length === requestedIds.length) {
+        return createProposal({
+          ...params,
+          toolId: "schedule.merge.files",
+          riskLevel: "LOW",
+          args: { attachmentIds: requestedIds },
+          title: "合并进度计划文件",
+          description: `按原始顺序合并 ${supported.length} 个文件（${supported.map((attachment) => attachment.originalName).join("、")}），统一任务 ID 和依赖关系后生成可导入 Excel；不会直接写入项目进度`,
+        });
+      }
+    }
+  }
 
   if (canUse("document.revision.save") && /(保存|下载|生成).*(修订稿|修改稿|重写稿|文档)/u.test(params.message)) {
     const latestAssistantContent = [...(params.history ?? [])].reverse().find((item) => item.role === "assistant")?.content.trim() || "";
@@ -527,6 +557,81 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     return prisma.assistantActionRun.update({
       where: { id: action.id },
       data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "分析报告已生成", downloadUrl: `/api/assistant/exports/${action.id}` }) },
+    });
+  }
+
+  if (action.toolId === "schedule.merge.files") {
+    const attachmentIds = Array.isArray(args.attachmentIds)
+      ? Array.from(new Set(args.attachmentIds.map((value) => String(value || "").trim()).filter(Boolean))).slice(0, 5)
+      : [];
+    if (attachmentIds.length < 2) throw new Error("合并进度计划至少需要两个附件");
+    const [project, attachments] = await Promise.all([
+      prisma.project.findUnique({ where: { id: action.projectId }, select: { name: true, code: true, startDate: true } }),
+      prisma.assistantAttachment.findMany({
+        where: { id: { in: attachmentIds }, projectId: action.projectId, userId: user.userId, status: "READY" },
+        select: { id: true, originalName: true, storedName: true },
+      }),
+    ]);
+    if (!project) throw new Error("当前项目不存在");
+    const attachmentById = new Map(attachments.map((attachment) => [attachment.id, attachment]));
+    const ordered = attachmentIds.map((id) => attachmentById.get(id)).filter((attachment): attachment is NonNullable<typeof attachment> => Boolean(attachment));
+    if (ordered.length !== attachmentIds.length) throw new Error("部分源附件不存在、尚未解析完成或不属于当前项目");
+    const sources = await Promise.all(ordered.map(async (attachment) => ({
+      fileName: attachment.originalName,
+      buffer: await readFile(getAssistantAttachmentPath(action.projectId, attachment.storedName)),
+    })));
+    const merged = await mergeScheduleFiles(sources, project.startDate);
+    const artifactId = randomUUID();
+    const projectLabel = (project.code || project.name || "项目").replace(/[\\/:*?"<>|]/g, "-").slice(0, 80);
+    const fileName = `${projectLabel}-合并进度计划.xlsx`;
+    const storedName = buildAssistantStoredName(artifactId, fileName);
+    const filePath = getAssistantArtifactPath(action.projectId, storedName);
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(filePath, merged.workbook);
+    const artifact = await prisma.$transaction(async (tx) => {
+      const created = await tx.assistantArtifact.create({
+        data: {
+          id: artifactId,
+          projectId: action.projectId,
+          userId: user.userId,
+          type: "SCHEDULE_MERGE",
+          fileName,
+          storedName,
+          mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          sizeBytes: merged.workbook.length,
+        },
+      });
+      await tx.operationHistory.create({
+        data: {
+          projectId: action.projectId,
+          entityType: "ASSISTANT_ARTIFACT",
+          entityId: artifactId,
+          actionType: "CREATE",
+          operator: user.displayName,
+          detail: `通过智能助手合并 ${sources.length} 个进度计划文件，生成 ${merged.tasks.length} 条任务、${merged.warnings.length} 条校验提示`,
+        },
+      });
+      return created;
+    }).catch(async (error) => {
+      await rm(filePath, { force: true }).catch(() => undefined);
+      throw error;
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: {
+        status: "SUCCEEDED",
+        confirmedAt: new Date(),
+        executedAt: new Date(),
+        resultJson: JSON.stringify({
+          message: `已合并 ${sources.length} 个文件并生成 ${merged.tasks.length} 条任务${merged.warnings.length > 0 ? `，合并说明中有 ${merged.warnings.length} 条待核对提示` : ""}`,
+          artifactId: artifact.id,
+          fileName,
+          sourceCount: sources.length,
+          taskCount: merged.tasks.length,
+          warningCount: merged.warnings.length,
+          downloadUrl: `/api/assistant/artifacts/${artifact.id}/download`,
+        }),
+      },
     });
   }
 

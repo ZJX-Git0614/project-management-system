@@ -74,6 +74,7 @@ export const ASSISTANT_TOOL_CATALOG = [
   { id: "risk.status.update", label: "更新风险状态", description: "按风险 ID 更新跟踪状态", riskLevel: "MEDIUM" },
   { id: "project.export", label: "导出项目数据", description: "导出任务、事项、风险或预算 CSV", riskLevel: "LOW" },
   { id: "schedule.analysis.export", label: "导出计划分析", description: "导出最新计划差异、冲突和影响链", riskLevel: "LOW" },
+  { id: "schedule.merge.files", label: "合并进度计划", description: "合并多个异构进度文件并生成系统可导入 Excel", riskLevel: "LOW" },
   { id: "document.revision.save", label: "保存文档修订稿", description: "将助手生成的文档内容保存为独立修订稿", riskLevel: "LOW" },
   { id: "risk.create.from-analysis", label: "分析结论转风险", description: "将计划分析中选定的严重冲突创建为风险", riskLevel: "MEDIUM" },
   { id: "todo.create.batch", label: "批量创建整改待办", description: "将计划冲突处理建议转为本人待办", riskLevel: "MEDIUM" },
@@ -89,7 +90,7 @@ const LEGACY_DEFAULT_TOOL_IDS = [
   "risk.create.from-analysis",
   "todo.create.batch",
 ] as const;
-const NEW_DEFAULT_TOOL_IDS = ["todo.complete", "weekly.status.update", "risk.create", "risk.status.update"] as const;
+const NEW_DEFAULT_TOOL_IDS = ["todo.complete", "weekly.status.update", "risk.create", "risk.status.update", "schedule.merge.files"] as const;
 
 const parseToolIds = (value: string) => {
   try {

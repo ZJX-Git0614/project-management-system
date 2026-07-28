@@ -8,6 +8,9 @@ const mocks = vi.hoisted(() => {
     assistantActionRun: {
       update: vi.fn(),
     },
+    assistantAttachment: {
+      findMany: vi.fn(),
+    },
     $transaction: vi.fn(),
   }
   return {
@@ -62,10 +65,10 @@ const context = {
   recentOperations: [],
 }
 
-const request = (message: string) => new Request("http://localhost/api/assistant/chat", {
+const request = (message: string, attachmentIds: string[] = []) => new Request("http://localhost/api/assistant/chat", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ message, projectId: "project-1", history: [] }),
+  body: JSON.stringify({ message, projectId: "project-1", history: [], attachmentIds }),
 }) as never
 
 describe("POST /api/assistant/chat", () => {
@@ -100,6 +103,7 @@ describe("POST /api/assistant/chat", () => {
     mocks.buildProjectAssistantContext.mockResolvedValue(context)
     mocks.callProjectAssistantModel.mockResolvedValue(null)
     mocks.queryRagLite.mockResolvedValue(null)
+    mocks.prisma.assistantAttachment.findMany.mockResolvedValue([])
     mocks.prisma.assistantChatMessage.create.mockImplementation(async ({ data }) => ({
       id: `message-${data.role}`,
       role: data.role,
@@ -155,6 +159,36 @@ describe("POST /api/assistant/chat", () => {
     expect(mocks.proposeAssistantAction).toHaveBeenNthCalledWith(2, expect.objectContaining({
       message: "将 Matter007 更新为进行中，当前进度 35%",
       expectedToolId: "weekly.status.update",
+    }))
+    expect(mocks.callProjectAssistantModel).not.toHaveBeenCalled()
+  })
+
+  it("passes the current attachment IDs to deterministic agent actions", async () => {
+    const extraction = {
+      content: "任务清单",
+      structuredJson: JSON.stringify({ format: "md", sections: [], metadata: {}, truncated: false }),
+      diagnosticsJson: "[]",
+    }
+    mocks.prisma.assistantAttachment.findMany.mockResolvedValue([
+      { id: "attachment-1", originalName: "计划一.md", extraction },
+      { id: "attachment-2", originalName: "计划二.xlsx", extraction },
+    ])
+    mocks.proposeAssistantAction.mockResolvedValue({
+      id: "action-merge",
+      toolId: "schedule.merge.files",
+      title: "合并进度计划文件",
+      description: "合并两个文件",
+      riskLevel: "LOW",
+      status: "PROPOSED",
+      expiresAt: "2026-07-28T00:00:00.000Z",
+    })
+
+    const { POST } = await import("./route")
+    const response = await POST(request("合并这两个进度计划并生成可导入 Excel", ["attachment-1", "attachment-2"]))
+
+    expect(response.status).toBe(200)
+    expect(mocks.proposeAssistantAction).toHaveBeenCalledWith(expect.objectContaining({
+      attachmentIds: ["attachment-1", "attachment-2"],
     }))
     expect(mocks.callProjectAssistantModel).not.toHaveBeenCalled()
   })

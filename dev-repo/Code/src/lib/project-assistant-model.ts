@@ -87,7 +87,7 @@ const parseActionPlannerResponse = (content: string, enabledToolIds: Set<string>
 }
 
 export const shouldPlanProjectAssistantAction = (message: string) =>
-  /(创建|新增|新建|登记|更新|修改|调整|推进|设置|设为|改为|完成|关闭|办结|导出|下载|保存|转为)/u.test(message)
+  /(创建|新增|新建|登记|更新|修改|调整|推进|设置|设为|改为|完成|关闭|办结|导出|下载|保存|转为|生成|制作|合并|整合|汇总|合成|合二为一|拼接)/u.test(message)
 
 export const planProjectAssistantActionWithModel = async (params: {
   message: string

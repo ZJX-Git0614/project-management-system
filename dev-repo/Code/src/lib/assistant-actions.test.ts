@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isScheduleMergeRequest,
   parseRiskCreationName,
   parseRiskStatusUpdateIntent,
   parseTodoCompletionTarget,
@@ -36,5 +37,11 @@ describe("assistant action intent parsing", () => {
       .toBeNull();
     expect(parseRiskCreationName("有哪些风险"))
       .toBeNull();
+  });
+
+  it("recognizes an explicit request to merge schedule attachments", () => {
+    expect(isScheduleMergeRequest("把这两个进度计划文件合并成系统可导入的 Excel")).toBe(true);
+    expect(isScheduleMergeRequest("把两个格式不一的进度计划文件合二为一，制作成可导入系统的进度计划")).toBe(true);
+    expect(isScheduleMergeRequest("帮我分析这两个计划有什么差异")).toBe(false);
   });
 });
