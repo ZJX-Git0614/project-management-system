@@ -1,13 +1,34 @@
 "use client";
 
-import { useEffect, useMemo, useState, type DragEvent, type KeyboardEvent } from "react";
-import { ChevronLeft, ChevronRight, CornerDownRight, GripVertical, ZoomIn, ZoomOut } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { ChevronDown, ChevronLeft, ChevronRight, CornerDownRight, GripVertical, ListTree, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { GanttDateField } from "@/components/gantt-date-field";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import type { ProjectGanttTask } from "@/domain/models";
+import {
+  GANTT_COLLAPSED_COLUMN_KEYS,
+  GANTT_COLUMN_LABELS,
+  GANTT_COLUMN_MIN_WIDTHS,
+  GANTT_EXPANDED_COLUMN_KEYS,
+  fitGanttColumnWidth,
+  fitGanttColumnWidths,
+  ganttColumnTemplate,
+  ganttColumnsWidth,
+  ganttTaskDepths,
+  type GanttColumnKey,
+  type GanttColumnWidths,
+} from "@/lib/gantt-column-layout";
 import {
   addCalendarDays,
   addDaysInclusive,
@@ -56,10 +77,6 @@ const ROW_HEIGHT = 30;
 const HEADER_HEIGHT = 32;
 const BAR_HEIGHT = 10;
 const MIN_TIMELINE_WIDTH = 860;
-const LEFT_WIDTH_EXPANDED = 1296;
-const LEFT_WIDTH_COLLAPSED = 360;
-const LEFT_COLUMNS_EXPANDED = "24px 112px 86px 180px 56px 108px 108px 108px 108px 82px 82px 76px 106px";
-const LEFT_COLUMNS_COLLAPSED = "24px 112px 200px";
 const ZOOM_LEVELS = [1, 3, 8, 20, 60];
 const ZOOM_LABELS = ["60天", "30天", "15天", "5天", "1天"];
 const DEFAULT_ZOOM_INDEX = 2;
@@ -72,18 +89,6 @@ const getTickEvery = (dayWidth: number) => {
   if (dayWidth >= 3) return 30;
   return 30;
 };
-
-const getTaskDepth = (taskCode?: string) => (
-  taskCode ? Math.max(0, taskCode.replace(/^Task/, "").split(".").length - 1) : 0
-);
-
-const taskGridColumns = (collapsed: boolean) => (
-  collapsed ? LEFT_COLUMNS_COLLAPSED : LEFT_COLUMNS_EXPANDED
-);
-
-const leftPanelWidth = (collapsed: boolean) => (
-  collapsed ? LEFT_WIDTH_COLLAPSED : LEFT_WIDTH_EXPANDED
-);
 
 const inlineFieldClass = cn(
   "h-6 w-full min-w-0 rounded px-1.5 text-xs shadow-none transition-colors",
@@ -160,6 +165,11 @@ export const GanttTimeline = ({
   const [taskDropTarget, setTaskDropTarget] = useState<{ id: string; position: DropPosition } | null>(null);
   const [flashingTaskId, setFlashingTaskId] = useState<string | null>(null);
   const [hoverCollapse, setHoverCollapse] = useState(false);
+  const [columnWidths, setColumnWidths] = useState<GanttColumnWidths>({ ...GANTT_COLUMN_MIN_WIDTHS });
+  const manuallySizedColumns = useRef(new Set<GanttColumnKey>());
+  const [collapsedTaskIds, setCollapsedTaskIds] = useState<Set<string>>(() => new Set());
+  const scrollViewportRef = useRef<HTMLDivElement>(null);
+  const [virtualRange, setVirtualRange] = useState({ start: 0, end: 40 });
   const range = getGanttDateRange(tasks);
   const rows = useMemo(() => buildGanttRows(tasks), [tasks]);
   const dependencyLinks = useMemo(() => buildGanttDependencyLinks(tasks), [tasks]);
@@ -174,7 +184,92 @@ export const GanttTimeline = ({
     });
     return map;
   }, [rows]);
+  const taskDepthById = useMemo(() => ganttTaskDepths(rows), [rows]);
+  const visibleRows = useMemo(() => rows.filter((row) => {
+    let parentId = row.parentId ?? null;
+    while (parentId) {
+      if (collapsedTaskIds.has(parentId)) return false;
+      parentId = rowByTaskId.get(parentId)?.parentId ?? null;
+    }
+    return true;
+  }), [collapsedTaskIds, rowByTaskId, rows]);
+  const virtualRows = useMemo(() => visibleRows
+    .slice(virtualRange.start, virtualRange.end)
+    .map((row, offset) => ({ row, index: virtualRange.start + offset })), [virtualRange, visibleRows]);
+  const parentDepths = useMemo(() => [...new Set(rows
+    .filter((row) => (childIdsByParentId.get(row.id)?.length ?? 0) > 0)
+    .map((row) => taskDepthById.get(row.id) ?? 0))].sort((left, right) => left - right), [childIdsByParentId, rows, taskDepthById]);
   const selectedCount = selectedTaskIds.length;
+
+  useEffect(() => {
+    const fitted = fitGanttColumnWidths(rows);
+    setColumnWidths((current) => Object.fromEntries(GANTT_EXPANDED_COLUMN_KEYS.map((key) => [
+      key,
+      manuallySizedColumns.current.has(key) ? current[key] : fitted[key],
+    ])) as GanttColumnWidths);
+  }, [rows]);
+
+  useEffect(() => {
+    setCollapsedTaskIds((current) => {
+      const validIds = new Set(rows.filter((row) => childIdsByParentId.has(row.id)).map((row) => row.id));
+      const next = new Set([...current].filter((id) => validIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [childIdsByParentId, rows]);
+
+  const updateVirtualRange = useCallback(() => {
+    const viewport = scrollViewportRef.current;
+    if (!viewport) return;
+    const overscan = 10;
+    const bodyScrollTop = Math.max(0, viewport.scrollTop - HEADER_HEIGHT);
+    const start = Math.max(0, Math.floor(bodyScrollTop / ROW_HEIGHT) - overscan);
+    const visibleCount = Math.ceil(viewport.clientHeight / ROW_HEIGHT) + overscan * 2;
+    const end = Math.min(visibleRows.length, start + visibleCount);
+    setVirtualRange((current) => current.start === start && current.end === end ? current : { start, end });
+  }, [visibleRows.length]);
+
+  useEffect(() => {
+    updateVirtualRange();
+    const viewport = scrollViewportRef.current;
+    if (!viewport || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(updateVirtualRange);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [updateVirtualRange]);
+
+  const resizeColumn = useCallback((key: GanttColumnKey, width: number) => {
+    manuallySizedColumns.current.add(key);
+    setColumnWidths((current) => ({
+      ...current,
+      [key]: Math.max(GANTT_COLUMN_MIN_WIDTHS[key], Math.round(width)),
+    }));
+  }, []);
+
+  const autoFitColumn = useCallback((key: GanttColumnKey) => {
+    manuallySizedColumns.current.add(key);
+    setColumnWidths((current) => ({ ...current, [key]: fitGanttColumnWidth(key, rows, taskDepthById) }));
+  }, [rows, taskDepthById]);
+
+  const toggleTaskCollapsed = useCallback((taskId: string) => {
+    setCollapsedTaskIds((current) => {
+      const next = new Set(current);
+      if (next.has(taskId)) next.delete(taskId);
+      else next.add(taskId);
+      return next;
+    });
+  }, []);
+
+  const toggleDepthCollapsed = useCallback((depth: number) => {
+    const taskIds = rows
+      .filter((row) => (taskDepthById.get(row.id) ?? 0) === depth && childIdsByParentId.has(row.id))
+      .map((row) => row.id);
+    setCollapsedTaskIds((current) => {
+      const next = new Set(current);
+      const shouldCollapse = taskIds.some((id) => !next.has(id));
+      taskIds.forEach((id) => shouldCollapse ? next.add(id) : next.delete(id));
+      return next;
+    });
+  }, [childIdsByParentId, rows, taskDepthById]);
 
   const getDescendantIds = (taskId: string) => {
     const result: string[] = [];
@@ -276,6 +371,9 @@ export const GanttTimeline = ({
         detailsCollapsed={detailsCollapsed}
         setZoomIndex={setZoomIndex}
         setDetailsCollapsed={setDetailsCollapsed}
+        columnWidths={columnWidths}
+        onAutoFitColumn={autoFitColumn}
+        onResizeColumn={resizeColumn}
         canCreate={canCreate}
         creatingParentId={creatingParentId}
         onCreateTask={onCreateTask}
@@ -288,12 +386,12 @@ export const GanttTimeline = ({
   const visibleEndDate = addCalendarDays(range.endDate, 7);
   const visibleDays = diffDays(visibleStartDate, visibleEndDate) + 1;
   const timelineWidth = Math.max(MIN_TIMELINE_WIDTH, visibleDays * config.dayWidth);
-  const leftWidth = leftPanelWidth(detailsCollapsed);
-  const bodyHeight = rows.length * ROW_HEIGHT;
+  const leftWidth = ganttColumnsWidth(columnWidths, detailsCollapsed);
+  const bodyHeight = visibleRows.length * ROW_HEIGHT;
   const todayOffset = diffDays(visibleStartDate, new Date().toISOString().slice(0, 10));
   const todayX = todayOffset >= 0 && todayOffset < visibleDays ? todayOffset * config.dayWidth : null;
   const rowById = new Map(
-    rows.map((row, index) => [row.id, { row, index }])
+    visibleRows.map((row, index) => [row.id, { row, index }])
   );
   const categoryCount = new Set(rows.map((row) => row.taskCategory)).size;
   const criticalCount = rows.filter((row) => row.isCritical).length;
@@ -330,7 +428,7 @@ export const GanttTimeline = ({
               type="button"
               onClick={() => setZoomIndex((i) => Math.max(0, i - 1))}
               disabled={zoomIndex === 0}
-              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition hover:text-primary disabled:opacity-30"
+              className="flex !h-6 !min-h-6 !w-6 items-center justify-center !border-0 !bg-transparent !p-0 text-muted-foreground !shadow-none transition hover:!bg-transparent hover:text-primary disabled:opacity-30"
               aria-label="缩小"
               title="缩小"
             >
@@ -341,13 +439,45 @@ export const GanttTimeline = ({
               type="button"
               onClick={() => setZoomIndex((i) => Math.min(ZOOM_LEVELS.length - 1, i + 1))}
               disabled={zoomIndex === ZOOM_LEVELS.length - 1}
-              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition hover:text-primary disabled:opacity-30"
+              className="flex !h-6 !min-h-6 !w-6 items-center justify-center !border-0 !bg-transparent !p-0 text-muted-foreground !shadow-none transition hover:!bg-transparent hover:text-primary disabled:opacity-30"
               aria-label="放大"
               title="放大"
             >
               <ZoomIn className="h-3 w-3" />
             </button>
           </div>
+          {parentDepths.length > 0 && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button type="button" size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs">
+                  <ListTree className="size-3.5" />
+                  折叠层级
+                  <ChevronDown className="size-3" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-44">
+                <DropdownMenuItem onSelect={() => setCollapsedTaskIds(new Set())}>
+                  全部展开
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                {parentDepths.map((depth) => {
+                  const ids = rows
+                    .filter((row) => (taskDepthById.get(row.id) ?? 0) === depth && childIdsByParentId.has(row.id))
+                    .map((row) => row.id);
+                  return (
+                    <DropdownMenuCheckboxItem
+                      key={depth}
+                      checked={ids.length > 0 && ids.every((id) => collapsedTaskIds.has(id))}
+                      onCheckedChange={() => toggleDepthCollapsed(depth)}
+                      onSelect={(event) => event.preventDefault()}
+                    >
+                      第 {depth + 1} 层父任务
+                    </DropdownMenuCheckboxItem>
+                  );
+                })}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
           {canCreate && (
             <Button
               type="button"
@@ -389,9 +519,18 @@ export const GanttTimeline = ({
         </div>
       </div>
 
-      <div className="overflow-auto">
+      <div
+        ref={scrollViewportRef}
+        className="max-h-[calc(100vh-240px)] min-h-[260px] overflow-auto"
+        onScroll={updateVirtualRange}
+      >
         <div className="grid min-w-max" style={{ gridTemplateColumns: `${leftWidth}px ${timelineWidth}px` }}>
-          <TaskGridHeader collapsed={detailsCollapsed} />
+          <TaskGridHeader
+            collapsed={detailsCollapsed}
+            columnWidths={columnWidths}
+            onAutoFitColumn={autoFitColumn}
+            onResizeColumn={resizeColumn}
+          />
           <TimelineHeader
             config={config}
             visibleDays={visibleDays}
@@ -399,12 +538,15 @@ export const GanttTimeline = ({
             width={timelineWidth}
           />
 
-          <div className="sticky left-0 z-10 border-r border-border bg-card transition-colors duration-200 hover:border-primary/40">
+          <div
+            className="sticky left-0 z-10 border-r border-border bg-card transition-colors duration-200 hover:border-primary/40"
+            style={{ height: bodyHeight }}
+          >
             <button
               type="button"
               className={cn(
-                "absolute -right-1 top-0 z-30 flex h-full w-1 cursor-pointer items-center justify-center transition-all duration-200",
-                hoverCollapse ? "bg-primary/5" : "bg-transparent"
+                "absolute right-0 top-0 z-[75] flex !h-full !min-h-0 !w-3 cursor-pointer items-center justify-start !rounded-none !border-0 !p-0 !shadow-none transition-all duration-200",
+                hoverCollapse ? "!bg-primary/5" : "!bg-transparent"
               )}
               onMouseEnter={() => setHoverCollapse(true)}
               onMouseLeave={() => setHoverCollapse(false)}
@@ -413,7 +555,7 @@ export const GanttTimeline = ({
               aria-label={detailsCollapsed ? "展开列" : "折叠列"}
             >
               <div className={cn(
-                "flex h-8 items-center justify-center rounded-sm transition-all duration-200",
+                "flex h-8 w-3 -translate-x-1 items-center justify-center rounded-l-sm border-l border-transparent bg-card/95 transition-all duration-200",
                 hoverCollapse ? "opacity-100" : "opacity-0"
               )}>
                 {detailsCollapsed ? <ChevronRight className="h-2.5 w-2.5 text-primary/70" /> : <ChevronLeft className="h-2.5 w-2.5 text-primary/70" />}
@@ -421,7 +563,7 @@ export const GanttTimeline = ({
             </button>
             <div
               className={cn(
-                "relative h-3 border-b border-border/60",
+                "absolute inset-x-0 top-0 z-20 h-3",
                 draggedTaskId && "bg-primary/5"
               )}
               onDragOver={(event) => {
@@ -438,7 +580,7 @@ export const GanttTimeline = ({
                 <span className="pointer-events-none absolute inset-x-0 top-0 z-20 h-3 rounded-sm border border-primary/40 bg-sky-400/20 shadow-[0_0_0_1px_rgba(96,165,250,0.22)]" />
               )}
             </div>
-            {rows.map((row, index) => (
+            {virtualRows.map(({ row, index }) => (
                 <EditableTaskRow
                   key={row.id}
                   canCreate={canCreate}
@@ -448,6 +590,7 @@ export const GanttTimeline = ({
                   dropPosition={taskDropTarget?.id === row.id && draggedTaskId !== row.id ? taskDropTarget.position : null}
                   flashing={flashingTaskId === row.id}
                   index={index}
+                  visualTop={index * ROW_HEIGHT}
                   isSaving={savingTaskId === row.id}
                   onDragEnd={() => {
                     setDraggedTaskId(null);
@@ -462,21 +605,32 @@ export const GanttTimeline = ({
                   onDrop={() => reorderTask(row.id, taskDropTarget?.id === row.id ? taskDropTarget.position : "before")}
                   onStartChild={() => {
                     setDetailsCollapsed(false);
+                    setCollapsedTaskIds((current) => {
+                      if (!current.has(row.id)) return current;
+                      const next = new Set(current);
+                      next.delete(row.id);
+                      return next;
+                    });
                     onCreateTask?.(row);
                   }}
+                  hasChildren={childIdsByParentId.has(row.id)}
+                  hierarchyCollapsed={collapsedTaskIds.has(row.id)}
+                  onToggleHierarchy={() => toggleTaskCollapsed(row.id)}
                   onToggleSelected={() => toggleTaskSelection(row.id)}
                   onUpdateTask={onUpdateTask}
-                  predecessorOptions={tasks.filter((task) => task.id !== row.id && task.taskName.trim())}
+                  predecessorOptions={tasks}
                   row={row}
+                  taskDepth={taskDepthById.get(row.id) ?? 0}
                   selected={selectedTaskIds.includes(row.id)}
                   selectionLocked={isSelectedByAncestor(row.id)}
                   selectionMode={selectionMode}
                   collapsed={detailsCollapsed}
+                  columnWidths={columnWidths}
                 />
             ))}
             <div
               className={cn(
-                "relative h-3",
+                "absolute inset-x-0 bottom-0 z-20 h-3",
                 draggedTaskId && "bg-primary/5"
               )}
               onDragOver={(event) => {
@@ -523,6 +677,9 @@ export const GanttTimeline = ({
                 const from = rowById.get(link.predecessorId);
                 const to = rowById.get(link.successorId);
                 if (!from || !to) return null;
+                const firstIndex = Math.min(from.index, to.index);
+                const lastIndex = Math.max(from.index, to.index);
+                if (lastIndex < virtualRange.start || firstIndex >= virtualRange.end) return null;
                 const fromX = (diffDays(visibleStartDate, from.row.endDate) + 1) * config.dayWidth;
                 const toX = diffDays(visibleStartDate, to.row.startDate) * config.dayWidth;
                 const fromY = from.index * ROW_HEIGHT + ROW_HEIGHT / 2;
@@ -539,8 +696,7 @@ export const GanttTimeline = ({
               })}
             </svg>
 
-            {rows.map((row) => {
-              const visualIndex = rowById.get(row.id)?.index ?? 0;
+            {virtualRows.map(({ row, index: visualIndex }) => {
               const left = diffDays(visibleStartDate, row.startDate) * config.dayWidth;
               const width = config.dayWidth * Math.max(1, row.durationDays);
               const showBarLabel = width >= 72;
@@ -595,8 +751,11 @@ const EmptyGanttTimeline = ({
   dayWidth,
   zoomIndex,
   detailsCollapsed,
+  columnWidths,
   emptyText,
+  onAutoFitColumn,
   onCreateTask,
+  onResizeColumn,
   setZoomIndex,
   setDetailsCollapsed,
 }: {
@@ -605,8 +764,11 @@ const EmptyGanttTimeline = ({
   dayWidth: number;
   zoomIndex: number;
   detailsCollapsed: boolean;
+  columnWidths: GanttColumnWidths;
   emptyText: string;
+  onAutoFitColumn: (key: GanttColumnKey) => void;
   onCreateTask?: (parentTask?: ProjectGanttTask) => void;
+  onResizeColumn: (key: GanttColumnKey, width: number) => void;
   setZoomIndex: (value: number | ((prev: number) => number)) => void;
   setDetailsCollapsed: (value: boolean | ((prev: boolean) => boolean)) => void;
 }) => {
@@ -614,7 +776,7 @@ const EmptyGanttTimeline = ({
   const visibleStartDate = new Date().toISOString().slice(0, 10);
   const visibleDays = 28;
   const timelineWidth = Math.max(MIN_TIMELINE_WIDTH, visibleDays * config.dayWidth);
-  const leftWidth = leftPanelWidth(detailsCollapsed);
+  const leftWidth = ganttColumnsWidth(columnWidths, detailsCollapsed);
   const bodyHeight = ROW_HEIGHT * 3;
   const [hoverCollapse, setHoverCollapse] = useState(false);
 
@@ -648,7 +810,7 @@ const EmptyGanttTimeline = ({
               type="button"
               onClick={() => setZoomIndex((i) => Math.max(0, i - 1))}
               disabled={zoomIndex === 0}
-              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition hover:text-primary disabled:opacity-30"
+              className="flex !h-6 !min-h-6 !w-6 items-center justify-center !border-0 !bg-transparent !p-0 text-muted-foreground !shadow-none transition hover:!bg-transparent hover:text-primary disabled:opacity-30"
               aria-label="缩小"
               title="缩小"
             >
@@ -659,7 +821,7 @@ const EmptyGanttTimeline = ({
               type="button"
               onClick={() => setZoomIndex((i) => Math.min(ZOOM_LEVELS.length - 1, i + 1))}
               disabled={zoomIndex === ZOOM_LEVELS.length - 1}
-              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition hover:text-primary disabled:opacity-30"
+              className="flex !h-6 !min-h-6 !w-6 items-center justify-center !border-0 !bg-transparent !p-0 text-muted-foreground !shadow-none transition hover:!bg-transparent hover:text-primary disabled:opacity-30"
               aria-label="放大"
               title="放大"
             >
@@ -686,7 +848,12 @@ const EmptyGanttTimeline = ({
 
       <div className="overflow-auto">
         <div className="grid min-w-max" style={{ gridTemplateColumns: `${leftWidth}px ${timelineWidth}px` }}>
-          <TaskGridHeader collapsed={detailsCollapsed} />
+          <TaskGridHeader
+            collapsed={detailsCollapsed}
+            columnWidths={columnWidths}
+            onAutoFitColumn={onAutoFitColumn}
+            onResizeColumn={onResizeColumn}
+          />
           <TimelineHeader
             config={config}
             visibleDays={visibleDays}
@@ -698,8 +865,8 @@ const EmptyGanttTimeline = ({
             <button
               type="button"
               className={cn(
-                "absolute -right-1 top-0 z-30 flex h-full w-1 cursor-pointer items-center justify-center transition-all duration-200",
-                hoverCollapse ? "bg-primary/5" : "bg-transparent"
+                "absolute right-0 top-0 z-[75] flex !h-full !min-h-0 !w-3 cursor-pointer items-center justify-start !rounded-none !border-0 !p-0 !shadow-none transition-all duration-200",
+                hoverCollapse ? "!bg-primary/5" : "!bg-transparent"
               )}
               onMouseEnter={() => setHoverCollapse(true)}
               onMouseLeave={() => setHoverCollapse(false)}
@@ -708,7 +875,7 @@ const EmptyGanttTimeline = ({
               aria-label={detailsCollapsed ? "展开列" : "折叠列"}
             >
               <div className={cn(
-                "flex h-8 items-center justify-center rounded-sm transition-all duration-200",
+                "flex h-8 w-3 -translate-x-1 items-center justify-center rounded-l-sm border-l border-transparent bg-card/95 transition-all duration-200",
                 hoverCollapse ? "opacity-100" : "opacity-0"
               )}>
                 {detailsCollapsed ? <ChevronRight className="h-2.5 w-2.5 text-primary/70" /> : <ChevronLeft className="h-2.5 w-2.5 text-primary/70" />}
@@ -735,33 +902,89 @@ const EmptyGanttTimeline = ({
   );
 };
 
-const TaskGridHeader = ({ collapsed }: { collapsed: boolean }) => (
-  <div
-    className="sticky top-0 left-0 z-20 box-border grid items-center gap-1 border-b border-r border-border bg-muted px-2 text-[11px] font-medium text-foreground"
-    style={{
-      height: HEADER_HEIGHT,
-      gridTemplateColumns: taskGridColumns(collapsed),
-    }}
-  >
-    <span aria-hidden="true" />
-    <span>任务ID</span>
-    {!collapsed && <span>任务类别</span>}
-    <span>任务名称</span>
-    {!collapsed && (
-      <>
-        <span>工期</span>
-        <span>计划开始</span>
-        <span>计划完成</span>
-        <span>实际开始</span>
-        <span>实际完成</span>
-        <span>预计工时</span>
-        <span>实际工时</span>
-        <span>当前进度</span>
-        <span>紧前任务</span>
-      </>
-    )}
-  </div>
-);
+const ColumnResizeHandle = ({
+  columnKey,
+  onAutoFit,
+  onResize,
+  width,
+}: {
+  columnKey: GanttColumnKey;
+  onAutoFit: (key: GanttColumnKey) => void;
+  onResize: (key: GanttColumnKey, width: number) => void;
+  width: number;
+}) => {
+  const startResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startWidth = width;
+    const handleMove = (moveEvent: PointerEvent) => onResize(columnKey, startWidth + moveEvent.clientX - startX);
+    const handleEnd = () => {
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleEnd);
+      document.body.style.removeProperty("cursor");
+      document.body.style.removeProperty("user-select");
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleEnd, { once: true });
+  };
+
+  return (
+    <button
+      type="button"
+      className="absolute -right-1 top-0 z-30 flex !h-full !min-h-0 !w-2 cursor-col-resize items-center justify-center !rounded-none !border-0 !bg-transparent !p-0 !shadow-none outline-none hover:!bg-transparent focus-visible:!shadow-none"
+      onPointerDown={startResize}
+      onDoubleClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onAutoFit(columnKey);
+      }}
+      title="拖拽调整列宽，双击自动适应内容"
+      aria-label={`调整${GANTT_COLUMN_LABELS[columnKey] || "拖拽"}列宽`}
+    >
+      <span className="h-full w-px bg-primary/70 opacity-0 transition-opacity group-hover/column:opacity-100 focus-visible:opacity-100" />
+    </button>
+  );
+};
+
+const TaskGridHeader = ({
+  collapsed,
+  columnWidths,
+  onAutoFitColumn,
+  onResizeColumn,
+}: {
+  collapsed: boolean;
+  columnWidths: GanttColumnWidths;
+  onAutoFitColumn: (key: GanttColumnKey) => void;
+  onResizeColumn: (key: GanttColumnKey, width: number) => void;
+}) => {
+  const keys = collapsed ? GANTT_COLLAPSED_COLUMN_KEYS : GANTT_EXPANDED_COLUMN_KEYS;
+  return (
+    <div
+      className="sticky top-0 left-0 z-20 box-border grid items-center border-b border-r border-border bg-muted text-[11px] font-medium text-foreground"
+      style={{
+        height: HEADER_HEIGHT,
+        gridTemplateColumns: ganttColumnTemplate(columnWidths, collapsed),
+      }}
+    >
+      {keys.map((key) => (
+        <div key={key} className="group/column relative flex h-full min-w-0 items-center px-2">
+          <span className="whitespace-nowrap">{GANTT_COLUMN_LABELS[key]}</span>
+          {key !== "drag" && (
+            <ColumnResizeHandle
+              columnKey={key}
+              onAutoFit={onAutoFitColumn}
+              onResize={onResizeColumn}
+              width={columnWidths[key]}
+            />
+          )}
+        </div>
+      ))}
+    </div>
+  );
+};
 
 const EditableTaskRow = ({
   canCreate,
@@ -770,6 +993,8 @@ const EditableTaskRow = ({
   dragged,
   dropPosition,
   flashing,
+  hasChildren,
+  hierarchyCollapsed,
   index,
   isSaving,
   onDragEnd,
@@ -777,14 +1002,18 @@ const EditableTaskRow = ({
   onDragStart,
   onDrop,
   onStartChild,
+  onToggleHierarchy,
   onToggleSelected,
   onUpdateTask,
   predecessorOptions,
   row,
+  taskDepth,
+  visualTop,
   selected,
   selectionLocked,
   selectionMode,
   collapsed,
+  columnWidths,
 }: {
   canCreate: boolean;
   canEdit: boolean;
@@ -793,6 +1022,8 @@ const EditableTaskRow = ({
   dragged: boolean;
   dropPosition: DropPosition | null;
   flashing: boolean;
+  hasChildren: boolean;
+  hierarchyCollapsed: boolean;
   index: number;
   isSaving: boolean;
   onDragEnd: () => void;
@@ -800,16 +1031,19 @@ const EditableTaskRow = ({
   onDragStart: () => void;
   onDrop: () => void;
   onStartChild?: () => void;
+  onToggleHierarchy: () => void;
   onToggleSelected: () => void;
   onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft) => void | Promise<void>;
   predecessorOptions: ProjectGanttTask[];
   row: ReturnType<typeof buildGanttRows>[number];
+  taskDepth: number;
+  visualTop: number;
   selected: boolean;
   selectionLocked: boolean;
   selectionMode: boolean;
+  columnWidths: GanttColumnWidths;
 }) => {
   const [draft, setDraft] = useState<GanttTaskDraft>(() => toTaskDraft(row));
-  const taskDepth = getTaskDepth(row.taskCode);
   const isChildTask = taskDepth > 0;
 
   const updateDraft = <K extends keyof GanttTaskDraft>(key: K, value: GanttTaskDraft[K]) => {
@@ -884,7 +1118,7 @@ const EditableTaskRow = ({
   return (
     <div
       className={cn(
-        "group relative box-border grid cursor-default items-center gap-1 border-b border-border px-2 text-xs transition-[background,box-shadow,transform] duration-150",
+        "group relative box-border grid cursor-default items-center border-b border-border text-xs transition-[background,box-shadow,transform] duration-150",
         isChildTask ? "bg-primary/5" : index % 2 === 0 ? "bg-background" : "bg-muted/25",
         row.isCritical
           ? "shadow-[inset_3px_0_0_hsl(var(--destructive))]"
@@ -900,7 +1134,15 @@ const EditableTaskRow = ({
         event.preventDefault();
         onDrop();
       }}
-      style={{ height: ROW_HEIGHT, gridTemplateColumns: taskGridColumns(collapsed) }}
+      style={{
+        position: "absolute",
+        insetInline: 0,
+        top: visualTop,
+        height: ROW_HEIGHT,
+        gridTemplateColumns: ganttColumnTemplate(columnWidths, collapsed),
+        contentVisibility: dropPosition || dragged ? "visible" : "auto",
+        containIntrinsicSize: `${ROW_HEIGHT}px`,
+      }}
     >
       {flashing && (
         <span
@@ -942,7 +1184,7 @@ const EditableTaskRow = ({
         <GripVertical className="h-3.5 w-3.5 transition-transform group-hover:scale-105" strokeWidth={1.7} />
         <span className="sr-only">拖拽排序</span>
       </span>
-      <div className="relative flex min-w-0 items-center gap-1.5 pr-1" style={{ paddingLeft: `${taskDepth * 10}px` }}>
+      <div className="relative flex min-w-0 items-center gap-1 px-2" style={{ paddingLeft: `${8 + taskDepth * 10}px` }}>
         {selectionMode && (
           <input
             type="checkbox"
@@ -954,9 +1196,23 @@ const EditableTaskRow = ({
             title={selectionLocked ? "父任务已选中，子任务随父任务联动选择" : undefined}
           />
         )}
-        {isChildTask && <span className="h-px w-3 shrink-0 bg-primary/60" />}
+        {hasChildren ? (
+          <button
+            type="button"
+            className="flex !size-4 !min-h-0 shrink-0 items-center justify-center rounded-sm !border-0 !bg-transparent !p-0 text-muted-foreground !shadow-none transition-colors hover:!bg-primary/10 hover:text-primary focus-visible:!shadow-none"
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleHierarchy();
+            }}
+            title={hierarchyCollapsed ? "展开子任务" : "折叠子任务"}
+            aria-label={hierarchyCollapsed ? "展开子任务" : "折叠子任务"}
+          >
+            {hierarchyCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+          </button>
+        ) : <span className="size-4 shrink-0" aria-hidden="true" />}
+        {isChildTask && <span className="h-px w-2 shrink-0 bg-primary/60" />}
         <span
-          className="min-w-0 flex-1 truncate whitespace-nowrap pr-12 font-mono text-[11px] font-semibold text-muted-foreground"
+          className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap pr-12 font-mono text-[11px] font-semibold text-muted-foreground"
           title={row.taskCode || row.id}
         >
           {row.taskCode || `Task${index + 1}`}
@@ -1123,6 +1379,7 @@ const EditableTaskRow = ({
               }
             }}
             options={predecessorOptions}
+            currentTaskId={row.id}
             disabled={!canEdit || isSaving}
           />
         </>
@@ -1132,30 +1389,45 @@ const EditableTaskRow = ({
 };
 
 const PredecessorSelect = ({
+  currentTaskId,
   disabled,
   onChange,
   options,
   value,
 }: {
+  currentTaskId: string;
   disabled?: boolean;
   onChange: (value: string) => void;
   options: ProjectGanttTask[];
   value: string;
-}) => (
-  <Select
-    value={value}
-    onChange={(event) => onChange(event.target.value)}
-    className={inlineSelectClass}
-    disabled={disabled}
-  >
-    <option value="">无</option>
-    {options.map((task) => (
-      <option key={task.id} value={task.id}>
-        {task.taskCode} · {task.taskName || "未命名任务"}
-      </option>
-    ))}
-  </Select>
-);
+}) => {
+  const [showAllOptions, setShowAllOptions] = useState(false);
+  const selectedOption = options.find((task) => task.id === value);
+  const visibleOptions = showAllOptions
+    ? options.filter((task) => task.id !== currentTaskId && task.taskName.trim())
+    : selectedOption ? [selectedOption] : [];
+
+  return (
+    <Select
+      value={value}
+      aria-label="紧前任务"
+      onOpenChange={setShowAllOptions}
+      onChange={(event) => {
+        onChange(event.target.value);
+        setShowAllOptions(false);
+      }}
+      className={inlineSelectClass}
+      disabled={disabled}
+    >
+      <option value="">无</option>
+      {visibleOptions.map((task) => (
+        <option key={task.id} value={task.id}>
+          {task.taskCode} · {task.taskName || "未命名任务"}
+        </option>
+      ))}
+    </Select>
+  );
+};
 
 const TimelineHeader = ({
   config,

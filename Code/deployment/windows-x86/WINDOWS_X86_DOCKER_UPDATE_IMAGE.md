@@ -99,8 +99,8 @@ git status --short
 每次更新使用两个版本变量：
 
 ```bash
-RELEASE_VERSION=2026.07.28.2
-RELEASE_STAMP=20260728-2
+RELEASE_VERSION=2026.07.28.3
+RELEASE_STAMP=20260728-3
 IMAGE_NAME=ceastar-project-management:${RELEASE_VERSION}-amd64
 PACKAGE_NAME=Ceastar-PMS-更新包-${RELEASE_STAMP}
 ```
@@ -189,7 +189,7 @@ docker buildx build \
 PowerShell 等价命令：
 
 ```powershell
-$ReleaseVersion = "2026.07.28.2"
+$ReleaseVersion = "2026.07.28.3"
 $ImageName = "ceastar-project-management:$ReleaseVersion-amd64"
 docker buildx build --platform linux/amd64 --tag $ImageName --load .
 ```
@@ -213,7 +213,7 @@ linux/amd64
 验证容器内 Node 平台、应用产物、Prisma、Java MPXJ 转换器和迁移文件：
 
 ```bash
-docker run --rm --entrypoint sh "${IMAGE_NAME}" -lc '
+docker run --rm --entrypoint sh "${IMAGE_NAME}" -c '
   node -p "process.platform + \"/\" + process.arch" &&
   java -version &&
   test -d /app/.next &&
@@ -300,13 +300,13 @@ image.sha256
 Windows PowerShell：
 
 ```powershell
-(Get-FileHash ".\images\ceastar-pms-2026.07.28.2-amd64.tar" -Algorithm SHA256).Hash.ToLowerInvariant()
+(Get-FileHash ".\images\ceastar-pms-2026.07.28.3-amd64.tar" -Algorithm SHA256).Hash.ToLowerInvariant()
 ```
 
 同时创建 `image-name.txt`，内容必须与构建时的镜像标签完全一致：
 
 ```text
-ceastar-project-management:2026.07.28.2-amd64
+ceastar-project-management:2026.07.28.3-amd64
 ```
 
 ## 13. 组装更新包
@@ -321,6 +321,8 @@ Ceastar-PMS-更新包-YYYYMMDD/
 ├── update.ps1
 ├── rollback.bat
 ├── rollback.ps1
+├── install-mpp-export-service.ps1
+├── mpp-export-service.ps1
 ├── 更新手册.txt
 └── images/
     └── ceastar-pms-YYYY.MM.DD-amd64.tar
@@ -354,6 +356,7 @@ node_modules/
 8. 只执行 `docker compose up -d --no-deps --force-recreate pms`；
 9. 等待 `http://localhost:3000/login` 恢复；
 10. 写入本次版本独立的状态文件，供 `rollback.ps1` 使用。
+11. 检测到 Windows 已安装 Microsoft Project 时，注册本机 MPP 导出服务；未安装时继续完成主系统更新。
 
 更新脚本不得执行：
 

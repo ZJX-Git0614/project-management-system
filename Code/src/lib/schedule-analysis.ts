@@ -11,6 +11,7 @@ export type ScheduleDependency = {
 
 export type ScheduleTask = {
   id: string;
+  databaseId?: string;
   externalUid: string;
   taskCode: string;
   taskName: string;
@@ -57,7 +58,7 @@ export type ScheduleSnapshot = {
 export type ScheduleMatch = {
   incomingTaskId: string;
   currentTaskId: string | null;
-  rule: "EXTERNAL_UID" | "TASK_CODE" | "WBS_OUTLINE" | "NAME_PARENT" | "UNMATCHED" | "AMBIGUOUS";
+  rule: "DATABASE_ID" | "EXTERNAL_UID" | "TASK_CODE" | "WBS_OUTLINE" | "NAME_PARENT" | "UNMATCHED" | "AMBIGUOUS";
   confidence: number;
 };
 
@@ -131,6 +132,7 @@ export const matchScheduleTasks = (current: ScheduleTask[], incoming: ScheduleTa
   const currentById = new Map(current.map((task) => [task.id, task]));
   const incomingById = new Map(incoming.map((task) => [task.id, task]));
   const indexes = [
+    { rule: "DATABASE_ID" as const, confidence: 1, values: uniqueIndex(current, (task) => normalized(task.databaseId || task.id)), incoming: (task: ScheduleTask) => normalized(task.databaseId || "") },
     { rule: "EXTERNAL_UID" as const, confidence: 1, values: uniqueIndex(current, (task) => normalized(task.externalUid)), incoming: (task: ScheduleTask) => normalized(task.externalUid) },
     { rule: "TASK_CODE" as const, confidence: 0.98, values: uniqueIndex(current, (task) => normalized(task.taskCode)), incoming: (task: ScheduleTask) => normalized(task.taskCode) },
     { rule: "WBS_OUTLINE" as const, confidence: 0.92, values: uniqueIndex(current, (task) => task.wbsCode && task.outlineNumber ? `${normalized(task.wbsCode)}|${normalized(task.outlineNumber)}` : ""), incoming: (task: ScheduleTask) => task.wbsCode && task.outlineNumber ? `${normalized(task.wbsCode)}|${normalized(task.outlineNumber)}` : "" },

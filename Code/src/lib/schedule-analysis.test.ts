@@ -12,6 +12,7 @@ import {
 
 const task = (value: Partial<ScheduleTask> & Pick<ScheduleTask, "id" | "taskName">): ScheduleTask => ({
   id: value.id,
+  databaseId: value.databaseId,
   externalUid: value.externalUid ?? value.id,
   taskCode: value.taskCode ?? value.id,
   taskName: value.taskName,
@@ -50,6 +51,12 @@ const snapshot = (tasks: ScheduleTask[]): ScheduleSnapshot => ({
 });
 
 describe("schedule analysis", () => {
+  it("matches an exported Excel row by its database key before editable fields", () => {
+    const current = [task({ id: "db-1", databaseId: "db-1", externalUid: "100", taskCode: "Task001", taskName: "原名称" })];
+    const incoming = [task({ id: "edited-code", databaseId: "db-1", externalUid: "edited-code", taskCode: "edited-code", taskName: "新名称" })];
+    expect(matchScheduleTasks(current, incoming)[0]).toMatchObject({ currentTaskId: "db-1", rule: "DATABASE_ID", confidence: 1 });
+  });
+
   it("matches tasks by stable identifiers before names", () => {
     const current = [task({ id: "db-1", externalUid: "100", taskCode: "Task001", taskName: "原名称" })];
     const incoming = [task({ id: "file-1", externalUid: "100", taskCode: "Other", taskName: "新名称" })];

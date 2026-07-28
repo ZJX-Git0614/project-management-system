@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 interface SelectProps extends Omit<React.SelectHTMLAttributes<HTMLSelectElement>, "onChange"> {
   value?: string;
   onChange?: (e: React.ChangeEvent<HTMLSelectElement>) => void;
+  onOpenChange?: (open: boolean) => void;
   variant?: "default" | "ghost";
 }
 
@@ -27,6 +28,9 @@ function Select({
   onChange,
   disabled,
   name,
+  onOpenChange,
+  "aria-label": ariaLabel,
+  title,
   variant = "default",
 }: SelectProps) {
     const [open, setOpen] = React.useState(false);
@@ -71,7 +75,13 @@ function Select({
     };
 
     return (
-      <DropdownMenuPrimitive.Root open={open} onOpenChange={setOpen}>
+      <DropdownMenuPrimitive.Root
+        open={open}
+        onOpenChange={(nextOpen) => {
+          setOpen(nextOpen);
+          onOpenChange?.(nextOpen);
+        }}
+      >
         <DropdownMenuPrimitive.Trigger asChild disabled={disabled}>
           <button
             ref={buttonRef}
@@ -94,7 +104,9 @@ function Select({
                   ],
               className
             )}
+            aria-label={ariaLabel}
             disabled={disabled}
+            title={title}
           >
             <span className={cn("flex-1 truncate text-left", !selectedOption && "text-muted-foreground")}>
               {selectedOption?.label ?? ""}

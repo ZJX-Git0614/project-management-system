@@ -120,7 +120,9 @@ export async function POST(
       let createdCount = 0;
       let updatedCount = 0;
       for (const task of importedTasks) {
-        const parentId = task.parentExternalId ? createdIdByExternalId.get(task.parentExternalId) ?? null : null;
+        const parentId = mode === "MERGE" && task.parentDatabaseId
+          ? task.parentDatabaseId
+          : task.parentExternalId ? createdIdByExternalId.get(task.parentExternalId) ?? null : null;
         const parentKey = parentId ?? "";
         const sortOrder = (nextSortOrderByParent.get(parentKey) ?? 0) + 1;
         nextSortOrderByParent.set(parentKey, sortOrder);
@@ -146,7 +148,7 @@ export async function POST(
               .join(","),
             taskMode: task.taskMode,
             isMilestone: task.isMilestone,
-            externalUid: task.externalId,
+            externalUid: task.databaseId ? undefined : task.externalId,
             wbsCode: task.wbsCode,
             outlineNumber: task.outlineNumber,
             calendarUid: task.calendarUid,
@@ -166,7 +168,7 @@ export async function POST(
           createdIdByExternalId.set(task.externalId, updated.id);
           updatedCount += 1;
         } else {
-          const created = await tx.projectGanttTask.create({ data });
+          const created = await tx.projectGanttTask.create({ data: { ...data, externalUid: task.externalId } });
           createdIdByExternalId.set(task.externalId, created.id);
           createdCount += 1;
         }
@@ -176,7 +178,10 @@ export async function POST(
         const successorTaskId = createdIdByExternalId.get(task.externalId);
         if (!successorTaskId) continue;
         await replaceGanttTaskDependencies(tx, id, successorTaskId, task.predecessorDependencies.flatMap((dependency) => {
-          const predecessorTaskId = createdIdByExternalId.get(dependency.predecessorExternalId);
+          const dependencyIndex = task.predecessorDependencies.indexOf(dependency);
+          const predecessorTaskId = mode === "MERGE" && task.predecessorDatabaseIds?.[dependencyIndex]
+            ? task.predecessorDatabaseIds[dependencyIndex]
+            : createdIdByExternalId.get(dependency.predecessorExternalId);
           return predecessorTaskId ? [{
             predecessorTaskId,
             type: dependency.type,
