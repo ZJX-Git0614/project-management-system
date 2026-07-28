@@ -1,0 +1,29 @@
+Ceastar PMS 20260728-2a 更新脚本修复说明
+========================================
+
+适用情况
+--------
+
+运行“Ceastar-PMS-更新包-20260728-2”时，数据库和文档备份完成后出现以下提示：
+
+The deployment docker-compose.yml does not contain SYSTEM_BACKUP_DIR.
+
+这表示原部署目录使用了更早的 docker-compose.yml 模板。失败发生在镜像加载和容器重建之前，现有数据库、文档和运行版本均未被修改。
+
+修复步骤
+--------
+
+1. 关闭报错的更新窗口。
+2. 打开“Ceastar-PMS-更新脚本修复-20260728-2a”文件夹。
+3. 将其中的 update.ps1 复制到原来的“Ceastar-PMS-更新包-20260728-2”文件夹，选择覆盖同名文件。
+4. 重新双击原更新包中的 update.bat。
+5. 等待显示“Ceastar PMS update completed successfully.”。
+
+注意事项
+--------
+
+1. 不要重新运行 20260727-3 更新包。
+2. 不要删除已经生成的 backups\日期时间 文件夹；多次备份不会影响更新。
+3. 不需要替换 image-name.txt、image.sha256 或 images 文件夹，本修复只替换 update.ps1。
+4. 修复脚本会自动补齐旧 Compose 缺少的备份目录变量和挂载，并在原部署目录保留 docker-compose.yml.before-update-20260728-2 副本。
+5. 不要执行 docker compose down -v，也不要删除 PostgreSQL 数据卷。

@@ -94,3 +94,4 @@ pms 和 pms-postgres 应显示为运行状态，日志中不应持续出现错�
 5. Ollama 模型是否受影响：不会。更新脚本不修改 Windows 上的 Ollama 安装目录和模型目录。
 6. 页面选择不到 D 盘目录：浏览器只能选择容器已挂载目录。请在 .env 中设置 PMS_BACKUP_HOST_DIR=D:/目标目录，重建 pms 容器后，在页面选择 /data/system-backups。
 7. 0727-3 提示缺少 /data/system-backups：这是旧脚本未兼容 Windows CRLF 换行导致的误判，备份已完成则数据未受影响；不要重跑 0727-3，直接使用 2026.07.28.2 累积更新包。
+8. 提示缺少 SYSTEM_BACKUP_DIR：说明部署使用了更早的 Compose 模板。使用 20260728-2a 脚本修复包替换 update.ps1 后重新运行 update.bat；已生成的数据库和文档备份无需删除。
