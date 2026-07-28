@@ -7,6 +7,7 @@ import {
   orderGanttTasksByHierarchy,
   renumberGanttTaskCodes,
 } from "@/lib/gantt-task-codes";
+import { changeGanttTaskHierarchy, type GanttHierarchyDirection } from "@/lib/gantt-hierarchy";
 
 const ganttTaskInclude = {
   predecessorDependencies: {
@@ -153,4 +154,47 @@ export const renumberProjectGanttTaskCodes = async (projectId: string) => {
       })
     ))
   );
+};
+
+export const changeProjectGanttTaskHierarchy = async (params: {
+  projectId: string;
+  taskIds: string[];
+  direction: GanttHierarchyDirection;
+  operator: string;
+}) => {
+  const tasks = await prisma.projectGanttTask.findMany({
+    where: { projectId: params.projectId },
+    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+    select: { id: true, parentId: true, sortOrder: true, createdAt: true },
+  });
+  const validTaskIds = new Set(tasks.map((task) => task.id));
+  if (params.taskIds.some((taskId) => !validTaskIds.has(taskId))) {
+    throw new Error("所选任务不存在或不属于当前项目");
+  }
+
+  const changed = changeGanttTaskHierarchy(tasks, params.taskIds, params.direction);
+  if (changed.changedTasks.length > 0) {
+    await prisma.$transaction([
+      ...changed.changedTasks.map((task) => prisma.projectGanttTask.update({
+        where: { id: task.id },
+        data: { parentId: task.parentId ?? null, sortOrder: task.sortOrder },
+      })),
+      prisma.operationHistory.create({
+        data: {
+          projectId: params.projectId,
+          entityType: "PROJECT_GANTT_TASK",
+          entityId: changed.movedTaskIds.join(","),
+          actionType: "UPDATE",
+          operator: params.operator,
+          detail: `${params.direction === "INDENT" ? "下移" : "上移"} ${changed.movedTaskIds.length} 个任务层级，子任务随父任务联动`,
+        },
+      }),
+    ]);
+    await renumberProjectGanttTaskCodes(params.projectId);
+  }
+
+  return {
+    tasks: (await getOrderedGanttTasks(params.projectId)).map(serializeGanttTask),
+    movedTaskIds: changed.movedTaskIds,
+  };
 };

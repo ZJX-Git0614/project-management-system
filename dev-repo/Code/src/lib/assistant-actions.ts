@@ -4,12 +4,13 @@ import { dirname, extname, basename } from "node:path";
 
 import type { AssistantActionRun } from "@prisma/client";
 
-import type { AuthenticatedUser } from "@/lib/server-auth";
+import { userHasPermission, type AuthenticatedUser } from "@/lib/server-auth";
 import type { AssistantRuntimeConfig } from "@/lib/assistant-settings";
 import { prisma } from "@/lib/prisma";
 import { buildAssistantStoredName, getAssistantArtifactPath, getAssistantAttachmentPath } from "@/lib/assistant-artifact-storage";
 import { nextRiskCode } from "@/lib/risk-register-codes";
 import { mergeScheduleFiles, SCHEDULE_MERGE_EXTENSIONS } from "@/lib/schedule-file-merge";
+import { changeProjectGanttTaskHierarchy } from "@/lib/gantt-task-service";
 
 export type AssistantActionView = {
   id: string;
@@ -56,6 +57,18 @@ const parseProgressIntent = (message: string) => {
   if (!code || progress === undefined) return null;
   const value = Number(progress);
   return Number.isFinite(value) && value >= 0 && value <= 100 ? { taskCode: code, progress: value } : null;
+};
+
+export const parseHierarchyIntent = (message: string) => {
+  const taskCodes = Array.from(new Set([...message.matchAll(/Task\d+(?:\.\d+)*/gi)].map((match) => match[0])));
+  if (taskCodes.length === 0) return null;
+  if (/(上移(?:一个)?层级|提升(?:一个)?层级|取消缩进|升级为父级|减少缩进)/u.test(message)) {
+    return { taskCodes, direction: "OUTDENT" as const };
+  }
+  if (/(下移(?:一个)?层级|降低(?:一个)?层级|设为.*子任务|变为.*子任务|增加缩进|缩进)/u.test(message)) {
+    return { taskCodes, direction: "INDENT" as const };
+  }
+  return null;
 };
 
 const weeklyStatusByLabel: Record<string, string> = {
@@ -146,6 +159,23 @@ const ensureProjectAccess = async (user: AuthenticatedUser, projectId: string) =
   }));
 };
 
+const ASSISTANT_TOOL_PERMISSION_KEYS: Record<string, string> = {
+  "gantt.progress.update": "project-gantt:edit",
+  "gantt.hierarchy.outdent": "project-gantt:edit",
+  "gantt.hierarchy.indent": "project-gantt:edit",
+  "weekly.status.update": "weekly-items:edit",
+  "risk.create": "risk-register:create",
+  "risk.create.from-analysis": "risk-register:create",
+  "risk.status.update": "risk-register:edit",
+  "document.revision.save": "project-documents:create",
+  "schedule.merge.files": "project-gantt:create",
+};
+
+const canUseAssistantTool = async (user: AuthenticatedUser, toolId: string) => {
+  const permissionKey = ASSISTANT_TOOL_PERMISSION_KEYS[toolId];
+  return !permissionKey || await userHasPermission(user, permissionKey);
+};
+
 const createProposal = async (params: {
   user: AuthenticatedUser;
   projectId: string;
@@ -187,7 +217,11 @@ export const proposeAssistantAction = async (params: {
   if (!params.runtime.agentEnabled || !params.projectId) return null;
   if (!(await ensureProjectAccess(params.user, params.projectId))) return null;
   const enabled = new Set(params.runtime.agentEnabledToolIds);
-  const canUse = (toolId: string) => enabled.has(toolId) && (!params.expectedToolId || params.expectedToolId === toolId);
+  const allowed = new Set((await Promise.all([...enabled].map(async (toolId) => ({
+    toolId,
+    allowed: await canUseAssistantTool(params.user, toolId),
+  })))).filter((item) => item.allowed).map((item) => item.toolId));
+  const canUse = (toolId: string) => allowed.has(toolId) && (!params.expectedToolId || params.expectedToolId === toolId);
 
   if (canUse("schedule.merge.files") && isScheduleMergeRequest(params.message)) {
     const requestedIds = Array.from(new Set((params.attachmentIds ?? []).map((id) => id.trim()).filter(Boolean))).slice(0, 5);
@@ -343,6 +377,31 @@ export const proposeAssistantAction = async (params: {
     });
   }
 
+  const hierarchyIntent = parseHierarchyIntent(params.message);
+  const hierarchyToolId = hierarchyIntent?.direction === "OUTDENT"
+    ? "gantt.hierarchy.outdent"
+    : "gantt.hierarchy.indent";
+  if (hierarchyIntent && canUse(hierarchyToolId)) {
+    const tasks = await prisma.projectGanttTask.findMany({
+      where: {
+        projectId: params.projectId,
+        taskCode: { in: hierarchyIntent.taskCodes, mode: "insensitive" },
+      },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+      select: { id: true, taskCode: true, taskName: true },
+    });
+    if (tasks.length === hierarchyIntent.taskCodes.length) {
+      return createProposal({
+        ...params,
+        toolId: hierarchyToolId,
+        riskLevel: "MEDIUM",
+        args: { taskIds: tasks.map((task) => task.id), direction: hierarchyIntent.direction },
+        title: hierarchyIntent.direction === "OUTDENT" ? "上移任务层级" : "下移任务层级",
+        description: `${tasks.map((task) => `${task.taskCode} ${task.taskName}`).join("、")}及其全部子任务将${hierarchyIntent.direction === "OUTDENT" ? "上移一个层级" : "下移到上一条同级任务下"}`,
+      });
+    }
+  }
+
   const weeklyIntent = parseWeeklyItemUpdateIntent(params.message);
   if (canUse("weekly.status.update") && weeklyIntent) {
     const item = await prisma.weeklyItem.findFirst({
@@ -420,6 +479,7 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     return await prisma.assistantActionRun.findUniqueOrThrow({ where: { id: action.id } });
   }
   if (!(await ensureProjectAccess(user, action.projectId))) throw new Error("无权访问当前项目");
+  if (!(await canUseAssistantTool(user, action.toolId))) throw new Error("当前账号没有执行该操作的模块权限");
 
   const claimed = await prisma.assistantActionRun.updateMany({
     where: { id: action.id, userId: user.userId, status: "PROPOSED" },
@@ -512,6 +572,34 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     return prisma.assistantActionRun.update({
       where: { id: action.id },
       data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "任务进度已更新", taskId: updated.id, progress: updated.progress, navigateUrl: `/projects/${action.projectId}?nav=gantt`, navigateLabel: "查看项目进度" }) },
+    });
+  }
+
+  if (action.toolId === "gantt.hierarchy.outdent" || action.toolId === "gantt.hierarchy.indent") {
+    const taskIds = Array.isArray(args.taskIds) ? args.taskIds.map(String).filter(Boolean) : [];
+    const direction = action.toolId === "gantt.hierarchy.outdent" ? "OUTDENT" : "INDENT";
+    if (taskIds.length === 0) throw new Error("没有可调整层级的任务");
+    const result = await changeProjectGanttTaskHierarchy({
+      projectId: action.projectId,
+      taskIds,
+      direction,
+      operator: user.displayName,
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: {
+        status: "SUCCEEDED",
+        confirmedAt: new Date(),
+        executedAt: new Date(),
+        resultJson: JSON.stringify({
+          message: result.movedTaskIds.length > 0
+            ? `已${direction === "OUTDENT" ? "上移" : "下移"} ${result.movedTaskIds.length} 个任务层级`
+            : "所选任务已位于当前方向的边界，未发生变化",
+          taskIds: result.movedTaskIds,
+          navigateUrl: `/projects/${action.projectId}?nav=gantt`,
+          navigateLabel: "查看项目进度",
+        }),
+      },
     });
   }
 

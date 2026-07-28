@@ -19,6 +19,7 @@ import {
   Minimize2,
   Paperclip,
   Send,
+  ShieldCheck,
   Sparkles,
   Square,
   Timer,
@@ -30,8 +31,20 @@ import { AssistantMessageContent } from "@/components/assistant-message-content"
 import { OperationErrorDialog } from "@/components/operation-error-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Textarea } from "@/components/ui/textarea"
 import { api } from "@/lib/api-client"
+import {
+  ASSISTANT_ACCESS_MODE_LABELS,
+  type AssistantAccessMode,
+} from "@/lib/assistant-access"
 import { ASSISTANT_SETTINGS_CHANGED_EVENT } from "@/lib/assistant-events"
 import { TODO_CHANGED_EVENT } from "@/lib/todo-events"
 import { cn } from "@/lib/utils"
@@ -73,6 +86,7 @@ type AssistantRuntime = {
   modelConfigured: boolean
   retrievalConfigured: boolean
   agentEnabled: boolean
+  assistantAccessMode: AssistantAccessMode
 }
 
 type AssistantTrace = {
@@ -111,6 +125,12 @@ type ProjectAssistantProps = {
 const LAUNCHER_SIZE = 58
 const VIEWPORT_MARGIN = 12
 const POSITION_STORAGE_KEY = "pms.project-assistant-position"
+
+const accessModeDescription: Record<AssistantAccessMode, string> = {
+  REQUEST_APPROVAL: "每项操作都由你确认后执行",
+  AUTO_APPROVE: "低、中风险操作自动执行，高风险仍需确认",
+  FULL_ACCESS: "白名单操作自动执行，仍受账号权限限制",
+}
 
 const sourceLabel: Record<AssistantSource, string> = {
   DATABASE: "实时数据库",
@@ -214,6 +234,7 @@ const DEFAULT_RUNTIME: AssistantRuntime = {
   modelConfigured: false,
   retrievalConfigured: false,
   agentEnabled: true,
+  assistantAccessMode: "REQUEST_APPROVAL",
 }
 
 const avatarPaletteClass: Record<string, string> = {
@@ -230,10 +251,15 @@ const avatarShapeClass: Record<string, string> = {
   MINIMAL: "rounded-[42%]",
 }
 
-const assistantWelcomeText = (runtime: AssistantRuntime) => (
-  runtime.welcomeMessage.trim()
-  || `你好，我是${runtime.assistantName}。我可以帮你查询项目数据，并在确认后执行已授权操作。`
-)
+const assistantWelcomeText = (runtime: AssistantRuntime) => {
+  if (runtime.welcomeMessage.trim()) return runtime.welcomeMessage.trim()
+  const actionText = runtime.assistantAccessMode === "REQUEST_APPROVAL"
+    ? "并在你确认后执行已授权操作"
+    : runtime.assistantAccessMode === "AUTO_APPROVE"
+      ? "并按当前授权自动执行低、中风险操作"
+      : "并在账号权限范围内自动执行白名单操作"
+  return `你好，我是${runtime.assistantName}。我可以帮你查询项目数据，${actionText}。`
+}
 
 const launcherWelcomeText = (runtime: AssistantRuntime) => (
   assistantWelcomeText(runtime).replace(/\*\*/g, "").replace(/\s+/g, " ").trim()
@@ -348,7 +374,12 @@ export function ProjectAssistant({
     }
     const handleOutside = (event: PointerEvent) => {
       const target = event.target as Node | null
-      if (!target || panelRef.current?.contains(target) || launcherRef.current?.contains(target)) return
+      if (
+        !target
+        || panelRef.current?.contains(target)
+        || launcherRef.current?.contains(target)
+        || (target instanceof Element && target.closest("[data-assistant-access-menu]"))
+      ) return
       setOpen(false)
     }
     window.addEventListener("keydown", handleEscape)
@@ -601,6 +632,19 @@ export function ProjectAssistant({
     }
   }
 
+  const updateAccessMode = async (assistantAccessMode: AssistantAccessMode) => {
+    if (assistantAccessMode === runtime.assistantAccessMode) return
+    try {
+      const result = await api.put<{ assistantAccessMode: AssistantAccessMode }>("/api/assistant/preferences", {
+        assistantAccessMode,
+      })
+      setRuntime((current) => ({ ...current, assistantAccessMode: result.assistantAccessMode }))
+      notify(`佳佳已切换为“${ASSISTANT_ACCESS_MODE_LABELS[result.assistantAccessMode]}”`, "success")
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "授权模式保存失败", "error")
+    }
+  }
+
   const handleComposerKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== "Enter" || event.shiftKey) return
     event.preventDefault()
@@ -681,13 +725,37 @@ export function ProjectAssistant({
                   {launcherWelcomeText(runtime)}
                 </p>
               </div>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-8"
-                onClick={() => setFullScreen((current) => !current)}
-                title={fullScreen ? "退出全屏" : "展开助手"}
-              >
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-8"
+                    title={`Agent 授权：${ASSISTANT_ACCESS_MODE_LABELS[runtime.assistantAccessMode]}`}
+                    aria-label={`Agent 授权：${ASSISTANT_ACCESS_MODE_LABELS[runtime.assistantAccessMode]}`}
+                  >
+                    <ShieldCheck />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-72" data-assistant-access-menu>
+                  <DropdownMenuLabel>Agent 操作授权</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  {(Object.keys(ASSISTANT_ACCESS_MODE_LABELS) as AssistantAccessMode[]).map((mode) => (
+                    <DropdownMenuItem
+                      key={mode}
+                      className="items-start py-2"
+                      onSelect={() => void updateAccessMode(mode)}
+                    >
+                      <Check className={cn("mt-0.5 size-4", runtime.assistantAccessMode !== mode && "invisible")} />
+                      <span className="min-w-0">
+                        <span className="block text-xs font-medium">{ASSISTANT_ACCESS_MODE_LABELS[mode]}</span>
+                        <span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">{accessModeDescription[mode]}</span>
+                      </span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <Button variant="ghost" size="icon" className="size-8" onClick={() => setFullScreen((current) => !current)} title={fullScreen ? "退出全屏" : "展开助手"}>
                 {fullScreen ? <Minimize2 /> : <Maximize2 />}
               </Button>
               <Button variant="ghost" size="icon" className="size-8" onClick={() => setOpen(false)} title="关闭助手">
@@ -696,7 +764,7 @@ export function ProjectAssistant({
             </header>
 
             <div ref={messagesRef} className="min-h-0 w-full min-w-0 overflow-x-hidden overflow-y-auto overscroll-contain px-3 py-4">
-              <div className={cn("mx-auto w-full min-w-0 space-y-4", fullScreen ? "max-w-[1440px]" : "max-w-none")}>
+              <div className={cn("mx-auto w-full min-w-0 space-y-4", fullScreen ? "max-w-[1680px]" : "max-w-none")}>
                 {loadingHistory && (
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     <Sparkles className="size-3.5 animate-pulse text-primary" /> 正在加载会话记录...
@@ -841,7 +909,7 @@ export function ProjectAssistant({
             </div>
 
             <footer className="w-full min-w-0 shrink-0 overflow-x-hidden border-t border-border bg-background/25 px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-              <div className={cn("mx-auto w-full min-w-0", fullScreen ? "max-w-[1440px]" : "max-w-none")}>
+              <div className={cn("mx-auto w-full min-w-0", fullScreen ? "max-w-[1680px]" : "max-w-none")}>
                 <div className="rounded-md border border-border bg-card/70 p-2 shadow-[var(--app-shadow-soft)] transition-colors focus-within:border-primary/45 focus-within:bg-card">
                   <input
                     ref={attachmentInputRef}

@@ -6,7 +6,10 @@ const mocks = vi.hoisted(() => {
       create: vi.fn(),
     },
     assistantActionRun: {
+      findFirst: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     assistantAttachment: {
       findMany: vi.fn(),
@@ -17,6 +20,7 @@ const mocks = vi.hoisted(() => {
     requireUser: vi.fn(),
     loadAssistantRuntimeConfig: vi.fn(),
     proposeAssistantAction: vi.fn(),
+    executeAssistantAction: vi.fn(),
     serializeAssistantAction: vi.fn(),
     buildProjectAssistantContext: vi.fn(),
     buildDatabaseAssistantAnswer: vi.fn(),
@@ -34,6 +38,7 @@ vi.mock("@/lib/assistant-settings", () => ({
   loadAssistantRuntimeConfig: mocks.loadAssistantRuntimeConfig,
 }))
 vi.mock("@/lib/assistant-actions", () => ({
+  executeAssistantAction: mocks.executeAssistantAction,
   proposeAssistantAction: mocks.proposeAssistantAction,
   serializeAssistantAction: mocks.serializeAssistantAction,
 }))
@@ -79,6 +84,7 @@ describe("POST /api/assistant/chat", () => {
       username: "admin",
       displayName: "管理员",
       assignedRoleNames: ["管理员"],
+      assistantAccessMode: "REQUEST_APPROVAL",
     })
     mocks.loadAssistantRuntimeConfig.mockResolvedValue({
       enabled: true,
@@ -104,6 +110,8 @@ describe("POST /api/assistant/chat", () => {
     mocks.callProjectAssistantModel.mockResolvedValue(null)
     mocks.queryRagLite.mockResolvedValue(null)
     mocks.prisma.assistantAttachment.findMany.mockResolvedValue([])
+    mocks.prisma.assistantActionRun.findFirst.mockResolvedValue(null)
+    mocks.prisma.assistantActionRun.updateMany.mockResolvedValue({ count: 0 })
     mocks.prisma.assistantChatMessage.create.mockImplementation(async ({ data }) => ({
       id: `message-${data.role}`,
       role: data.role,
@@ -191,5 +199,60 @@ describe("POST /api/assistant/chat", () => {
       attachmentIds: ["attachment-1", "attachment-2"],
     }))
     expect(mocks.callProjectAssistantModel).not.toHaveBeenCalled()
+  })
+
+  it("uses the local manual for system operation questions", async () => {
+    const { POST } = await import("./route")
+    const response = await POST(request("怎么把 Task2 变成上一条任务的子任务？"))
+    const payload = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(payload.data.answer).toContain("层级下移")
+    expect(payload.data.source).toBe("SYSTEM")
+    expect(mocks.callProjectAssistantModel).toHaveBeenCalledWith(expect.objectContaining({
+      manualContext: expect.stringContaining("上一条同级任务"),
+    }))
+  })
+
+  it("auto executes medium-risk actions in auto-approve mode", async () => {
+    mocks.requireUser.mockResolvedValue({
+      userId: "user-1",
+      username: "admin",
+      displayName: "管理员",
+      assignedRoleNames: ["管理员"],
+      assistantAccessMode: "AUTO_APPROVE",
+    })
+    const proposal = {
+      id: "action-1",
+      toolId: "weekly.status.update",
+      title: "更新项目事项",
+      description: "Matter007 更新为进行中",
+      riskLevel: "MEDIUM",
+      status: "PROPOSED",
+      expiresAt: "2026-07-29T00:00:00.000Z",
+    }
+    const rawAction = { id: "action-1", userId: "user-1", status: "PROPOSED" }
+    const executedAction = { ...rawAction, status: "SUCCEEDED" }
+    const result = {
+      ...proposal,
+      status: "SUCCEEDED",
+      result: { message: "事项状态已更新" },
+    }
+    mocks.proposeAssistantAction.mockResolvedValue(proposal)
+    mocks.prisma.assistantActionRun.findFirst.mockResolvedValue(rawAction)
+    mocks.executeAssistantAction.mockResolvedValue(executedAction)
+    mocks.serializeAssistantAction.mockReturnValue(result)
+
+    const { POST } = await import("./route")
+    const response = await POST(request("将 Matter007 更新为进行中，当前进度 35%"))
+    const payload = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(mocks.executeAssistantAction).toHaveBeenCalledWith(rawAction, expect.objectContaining({ userId: "user-1" }))
+    expect(payload.data.answer).toContain("已执行")
+    expect(payload.data.assistantMessage.blocks[0]).toMatchObject({
+      type: "action-result",
+      action: { status: "SUCCEEDED" },
+    })
   })
 })
