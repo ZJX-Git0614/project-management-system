@@ -5,7 +5,8 @@ node_modules
 .omx
 .codegraph
 graphify-out
-docs
+docs/*
+!docs/佳佳智能助手使用手册.md
 __tests__
 prisma/dev.db
 *.md

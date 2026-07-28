@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { ChevronDown, ChevronLeft, ChevronRight, CornerDownRight, GripVertical, ListTree, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, CornerDownRight, GripVertical, IndentDecrease, IndentIncrease, ListTree, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { GanttDateField } from "@/components/gantt-date-field";
@@ -16,6 +16,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { ProjectGanttTask } from "@/domain/models";
+import type { GanttHierarchyDirection } from "@/lib/gantt-hierarchy";
 import {
   GANTT_COLLAPSED_COLUMN_KEYS,
   GANTT_COLUMN_LABELS,
@@ -51,10 +52,13 @@ interface GanttTimelineProps {
   creatingParentId?: string | null;
   savingTaskId?: string | null;
   deletingSelected?: boolean;
+  hierarchyChanging?: boolean;
   reordering?: boolean;
+  fullScreen?: boolean;
   onCreateTask?: (parentTask?: ProjectGanttTask) => void;
   onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft) => void | Promise<void>;
   onDeleteSelected?: (taskIds: string[]) => void | Promise<void>;
+  onChangeHierarchy?: (taskIds: string[], direction: GanttHierarchyDirection) => void | Promise<void>;
   onReorderTasks?: (taskIds: string[]) => void | Promise<void>;
 }
 
@@ -150,10 +154,13 @@ export const GanttTimeline = ({
   creatingParentId = null,
   savingTaskId = null,
   deletingSelected = false,
+  hierarchyChanging = false,
   reordering = false,
+  fullScreen = false,
   onCreateTask,
   onUpdateTask,
   onDeleteSelected,
+  onChangeHierarchy,
   onReorderTasks,
 }: GanttTimelineProps) => {
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
@@ -200,6 +207,27 @@ export const GanttTimeline = ({
     .filter((row) => (childIdsByParentId.get(row.id)?.length ?? 0) > 0)
     .map((row) => taskDepthById.get(row.id) ?? 0))].sort((left, right) => left - right), [childIdsByParentId, rows, taskDepthById]);
   const selectedCount = selectedTaskIds.length;
+  const selectedRootTaskIds = useMemo(() => {
+    const selected = new Set(selectedTaskIds);
+    return rows.filter((row) => {
+      if (!selected.has(row.id)) return false;
+      let parentId = row.parentId ?? null;
+      while (parentId) {
+        if (selected.has(parentId)) return false;
+        parentId = rowByTaskId.get(parentId)?.parentId ?? null;
+      }
+      return true;
+    }).map((row) => row.id);
+  }, [rowByTaskId, rows, selectedTaskIds]);
+  const selectedRootSet = useMemo(() => new Set(selectedRootTaskIds), [selectedRootTaskIds]);
+  const canOutdentSelection = selectedRootTaskIds.some((taskId) => Boolean(rowByTaskId.get(taskId)?.parentId));
+  const canIndentSelection = selectedRootTaskIds.some((taskId) => {
+    const task = rowByTaskId.get(taskId);
+    if (!task) return false;
+    const siblings = rows.filter((row) => (row.parentId ?? null) === (task.parentId ?? null));
+    const index = siblings.findIndex((row) => row.id === taskId);
+    return index > 0 && !selectedRootSet.has(siblings[index - 1].id);
+  });
 
   useEffect(() => {
     const fitted = fitGanttColumnWidths(rows);
@@ -320,6 +348,11 @@ export const GanttTimeline = ({
     });
   };
 
+  const changeSelectedHierarchy = (direction: GanttHierarchyDirection) => {
+    if (selectedRootTaskIds.length === 0 || hierarchyChanging) return;
+    void onChangeHierarchy?.(selectedTaskIds, direction);
+  };
+
   useEffect(() => {
     if (!flashingTaskId) return;
     const timer = window.setTimeout(() => setFlashingTaskId(null), 900);
@@ -397,7 +430,7 @@ export const GanttTimeline = ({
   const criticalCount = rows.filter((row) => row.isCritical).length;
 
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card">
+    <div className={cn("flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-card", fullScreen && "h-full rounded-none")}>
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/20 px-3 py-1.5">
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span className="font-medium text-foreground">项目计划</span>
@@ -493,17 +526,45 @@ export const GanttTimeline = ({
               新增任务
             </Button>
           )}
-          {canDelete && (
+          {(canEdit || canDelete) && (
             <Button
               type="button"
               size="sm"
               variant="outline"
               className="h-7 text-xs"
               onClick={toggleSelectionMode}
-              disabled={deletingSelected}
+              disabled={deletingSelected || hierarchyChanging}
             >
               {selectionMode ? "取消选择" : "选择"}
             </Button>
+          )}
+          {canEdit && selectionMode && (
+            <>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-7 gap-1 px-2 text-xs"
+                onClick={() => changeSelectedHierarchy("OUTDENT")}
+                disabled={!canOutdentSelection || hierarchyChanging}
+                title="将所选任务及其全部子任务上移一个层级"
+              >
+                <IndentDecrease className="size-3.5" />
+                上移层级
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-7 gap-1 px-2 text-xs"
+                onClick={() => changeSelectedHierarchy("INDENT")}
+                disabled={!canIndentSelection || hierarchyChanging}
+                title="将所选任务及其全部子任务下移到上一条同级任务下"
+              >
+                <IndentIncrease className="size-3.5" />
+                层级下移
+              </Button>
+            </>
           )}
           {canDelete && selectionMode && (
             <Button
@@ -521,7 +582,10 @@ export const GanttTimeline = ({
 
       <div
         ref={scrollViewportRef}
-        className="max-h-[calc(100vh-240px)] min-h-[260px] overflow-auto"
+        className={cn(
+          "min-h-[260px] overflow-auto",
+          fullScreen ? "min-h-0 flex-1" : "max-h-[calc(100vh-240px)]",
+        )}
         onScroll={updateVirtualRange}
       >
         <div className="grid min-w-max" style={{ gridTemplateColumns: `${leftWidth}px ${timelineWidth}px` }}>

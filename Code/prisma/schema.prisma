@@ -18,6 +18,7 @@ model UserAccount {
   passwordHash          String
   passwordResetRequired Boolean   @default(true)
   passwordUpdatedAt     DateTime?
+  assistantAccessMode   String    @default("REQUEST_APPROVAL")
 }
 
 model Project {

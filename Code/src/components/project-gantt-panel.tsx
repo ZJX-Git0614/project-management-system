@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, Download, FileSpreadsheet, FileType2, Upload } from "lucide-react";
+import { ChevronDown, Download, FileSpreadsheet, FileType2, Maximize2, Minimize2, Upload } from "lucide-react";
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,8 @@ import { usePermission } from "@/lib/use-permission";
 import { api } from "@/lib/api-client";
 import { buildGanttRows, getGanttDateRange } from "@/lib/gantt";
 import { renumberGanttTaskCodes } from "@/lib/gantt-task-codes";
+import { changeGanttTaskHierarchy, type GanttHierarchyDirection } from "@/lib/gantt-hierarchy";
+import { cn } from "@/lib/utils";
 import { ProjectStatus } from "@/domain/enums";
 import type { ProjectGanttTask } from "@/domain/models";
 
@@ -69,12 +71,15 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const [savingTaskId, setSavingTaskId] = useState<string | null>(null);
   const [deletingSelected, setDeletingSelected] = useState(false);
   const [reordering, setReordering] = useState(false);
+  const [hierarchyChanging, setHierarchyChanging] = useState(false);
+  const [fullScreen, setFullScreen] = useState(false);
   const [importing, setImporting] = useState(false);
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
   const [mppExportAvailable, setMppExportAvailable] = useState(false);
   const [importPreview, setImportPreview] = useState<ScheduleImportPreview | null>(null);
   const [operationError, setOperationError] = useState<{ title: string; message: string } | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
+  const ganttCardRef = useRef<HTMLDivElement>(null);
   const confirm = useConfirm();
   const { can } = usePermission();
 
@@ -114,6 +119,12 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       .then((capabilities) => setMppExportAvailable(capabilities.mppExport))
       .catch(() => setMppExportAvailable(false));
   }, [projectId]);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => setFullScreen(document.fullscreenElement === ganttCardRef.current);
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  }, []);
 
   const handleImportFile = async (file?: File) => {
     if (!file) return;
@@ -291,6 +302,37 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     }
   };
 
+  const handleChangeHierarchy = async (taskIds: string[], direction: GanttHierarchyDirection) => {
+    const optimistic = changeGanttTaskHierarchy(tasks, taskIds, direction);
+    if (optimistic.movedTaskIds.length === 0) return;
+    setTasks(renumberGanttTaskCodes(optimistic.tasks));
+    setHierarchyChanging(true);
+    try {
+      const result = await api.put<{ tasks: ProjectGanttTask[]; movedTaskIds: string[]; message: string }>(
+        `/api/projects/${projectId}/gantt-tasks/hierarchy`,
+        { taskIds, direction },
+      );
+      setTasks(result.tasks);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "任务层级调整失败");
+      await fetchTasks();
+    } finally {
+      setHierarchyChanging(false);
+    }
+  };
+
+  const toggleFullScreen = async () => {
+    const element = ganttCardRef.current;
+    if (!element) return;
+    try {
+      if (document.fullscreenElement === element) await document.exitFullscreen();
+      else if (fullScreen) setFullScreen(false);
+      else await element.requestFullscreen();
+    } catch {
+      setFullScreen((current) => !current);
+    }
+  };
+
   if (loading) {
     return <div className="text-sm text-muted-foreground">加载中...</div>;
   }
@@ -300,7 +342,12 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
 
   return (
     <div className="space-y-4">
-      <Card>
+      <Card
+        ref={ganttCardRef}
+        className={cn(
+          fullScreen && "fixed inset-0 z-[120] flex h-screen w-screen flex-col overflow-hidden rounded-none border-0 bg-background",
+        )}
+      >
         <CardHeader className="pb-2">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -377,16 +424,30 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
+              <Button
+                type="button"
+                size="icon"
+                variant="outline"
+                className="size-8"
+                onClick={() => void toggleFullScreen()}
+                title={fullScreen ? "退出全屏" : "全屏编辑"}
+                aria-label={fullScreen ? "退出全屏" : "全屏编辑"}
+              >
+                {fullScreen ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
+              </Button>
             </div>
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className={cn(fullScreen && "min-h-0 flex-1 overflow-hidden px-3 pb-3")}>
           <GanttTimeline
             canCreate={canCreate}
             canDelete={canDelete}
             canEdit={canEdit}
             creatingParentId={creatingParentId}
             deletingSelected={deletingSelected}
+            fullScreen={fullScreen}
+            hierarchyChanging={hierarchyChanging}
+            onChangeHierarchy={handleChangeHierarchy}
             onCreateTask={startCreate}
             onDeleteSelected={handleDeleteSelected}
             onReorderTasks={handleReorderTasks}

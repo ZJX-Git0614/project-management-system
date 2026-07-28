@@ -85,6 +85,7 @@ COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/scripts ./scripts
+COPY --from=builder /app/docs ./docs
 
 # PostgreSQL 通过 docker-compose 的 postgres 服务提供，无需本地数据目录
 

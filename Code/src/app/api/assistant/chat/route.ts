@@ -1,7 +1,16 @@
 import { NextRequest } from "next/server";
 
 import { err, ok } from "@/lib/api-utils";
-import { proposeAssistantAction, serializeAssistantAction } from "@/lib/assistant-actions";
+import {
+  executeAssistantAction,
+  proposeAssistantAction,
+  serializeAssistantAction,
+} from "@/lib/assistant-actions";
+import {
+  normalizeAssistantAccessMode,
+  shouldAutoExecuteAssistantAction,
+} from "@/lib/assistant-access";
+import { searchAssistantManual } from "@/lib/assistant-manual";
 import { loadAssistantRuntimeConfig } from "@/lib/assistant-settings";
 import { prisma } from "@/lib/prisma";
 import {
@@ -66,7 +75,10 @@ const serializeMessage = (message: StoredMessage) => ({
   createdAt: message.createdAt.toISOString(),
 });
 
-const publicRuntime = (runtime: Awaited<ReturnType<typeof loadAssistantRuntimeConfig>>) => ({
+const publicRuntime = (
+  runtime: Awaited<ReturnType<typeof loadAssistantRuntimeConfig>>,
+  assistantAccessMode: unknown,
+) => ({
   enabled: runtime.enabled,
   assistantName: runtime.assistantName,
   welcomeMessage: runtime.welcomeMessage,
@@ -76,6 +88,7 @@ const publicRuntime = (runtime: Awaited<ReturnType<typeof loadAssistantRuntimeCo
   modelConfigured: Boolean(runtime.llmProvider),
   retrievalConfigured: Boolean(runtime.retrievalEnabled && runtime.ragliteBaseUrl && runtime.embeddingProvider),
   agentEnabled: runtime.agentEnabled,
+  assistantAccessMode: normalizeAssistantAccessMode(assistantAccessMode),
 });
 
 export async function GET(req: NextRequest) {
@@ -116,7 +129,7 @@ export async function GET(req: NextRequest) {
   const suggestionContext = await buildProjectAssistantContext({ user, projectId }).catch(() => null);
   return ok({
     messages: serializedMessages,
-    runtime: publicRuntime(runtime),
+    runtime: publicRuntime(runtime, user.assistantAccessMode),
     suggestions: buildAssistantSuggestions({
       context: suggestionContext,
       history: serializedMessages.map((message) => ({
@@ -179,6 +192,8 @@ export async function POST(req: NextRequest) {
   let blocks: unknown[] = [];
   let ragResult: Awaited<ReturnType<typeof queryRagLite>> = null;
   let retrievedChunks: Array<{ content: string; metadata?: Record<string, unknown> }> = [];
+  const assistantAccessMode = normalizeAssistantAccessMode(user.assistantAccessMode);
+  const manualContext = searchAssistantManual(message);
 
   let action = await proposeAssistantAction({ message, projectId, user, runtime, history, attachmentIds });
   if (!action && shouldPlanProjectAssistantAction(message)) {
@@ -200,9 +215,36 @@ export async function POST(req: NextRequest) {
   }
 
   if (action) {
-    answer = `已生成操作建议：**${action.title}**。请核对操作内容后确认执行。`;
+    if (shouldAutoExecuteAssistantAction(assistantAccessMode, action.riskLevel)) {
+      const pendingAction = await prisma.assistantActionRun.findFirst({
+        where: { id: action.id, userId: user.userId },
+      });
+      if (pendingAction) {
+        try {
+          action = serializeAssistantAction(await executeAssistantAction(pendingAction, user));
+        } catch (error) {
+          await prisma.assistantActionRun.updateMany({
+            where: { id: pendingAction.id, userId: user.userId, status: "EXECUTING" },
+            data: {
+              status: "FAILED",
+              errorMessage: error instanceof Error ? error.message : "执行失败",
+            },
+          });
+          const failedAction = await prisma.assistantActionRun.findUniqueOrThrow({
+            where: { id: pendingAction.id },
+          });
+          action = serializeAssistantAction(failedAction);
+        }
+      }
+    }
+    const actionResultMessage = typeof action.result?.message === "string" ? action.result.message : "";
+    answer = action.status === "PROPOSED"
+      ? `已生成操作建议：**${action.title}**。请核对操作内容后确认执行。`
+      : action.status === "SUCCEEDED"
+        ? `已执行：**${action.title}**。${actionResultMessage}`
+        : `操作未完成：**${action.title}**。${actionResultMessage || "请查看操作结果。"}`;
     source = "AGENT";
-    blocks = [{ type: "action-proposal", action }];
+    blocks = [{ type: action.status === "PROPOSED" ? "action-proposal" : "action-result", action }];
   } else {
     const ragCategories = projectAssistantRagCategories(intent);
     ragResult = !intent.identityOnly && context.project?.id && ragCategories.length > 0
@@ -236,6 +278,7 @@ export async function POST(req: NextRequest) {
           runtime,
           intent,
           attachments: attachmentContexts,
+          manualContext,
           signal: req.signal,
         }) || "";
     if (req.signal.aborted) return err("本次回答已终止", 499);
@@ -243,6 +286,10 @@ export async function POST(req: NextRequest) {
     if (!answer && ragResult?.answer) {
       answer = ragResult.answer.trim();
       if (answer) source = "RAG";
+    }
+    if (!answer && manualContext) {
+      answer = `根据佳佳本地使用手册：\n\n${manualContext}`;
+      source = "SYSTEM";
     }
     if (!answer) {
       const fallback = buildProjectAssistantFallbackAnswer({
@@ -256,15 +303,19 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  const baseTrace = buildProjectAssistantAnswerTrace({
+    intent,
+    context,
+    rag: ragResult,
+    providerName: runtime.llmProvider?.name,
+    modelName: runtime.llmProvider?.model,
+    fallbackUsed: !["MODEL", "MODEL_RAG", "RAG"].includes(source),
+  });
   const trace = {
-    ...buildProjectAssistantAnswerTrace({
-      intent,
-      context,
-      rag: ragResult,
-      providerName: runtime.llmProvider?.name,
-      modelName: runtime.llmProvider?.model,
-      fallbackUsed: !["MODEL", "MODEL_RAG", "RAG"].includes(source),
-    }),
+    ...baseTrace,
+    evidence: manualContext
+      ? [...(baseTrace.evidence ?? []), { source: "佳佳本地使用手册", detail: "操作说明优先依据本地能力手册" }]
+      : baseTrace.evidence,
     projectId: context.project?.id ?? null,
     projectName: context.project?.name ?? null,
     source,
@@ -315,7 +366,7 @@ export async function POST(req: NextRequest) {
     source,
     userMessage: serializeMessage(userMessage),
     assistantMessage: serializeMessage(assistantMessage),
-    runtime: publicRuntime(runtime),
+    runtime: publicRuntime(runtime, user.assistantAccessMode),
     suggestions: buildAssistantSuggestions({
       context,
       history: [...history, { role: "user", content: message }, { role: "assistant", content: answer }],
