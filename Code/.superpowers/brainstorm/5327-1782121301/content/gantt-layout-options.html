@@ -1,0 +1,63 @@
+<h2>项目进度总揽：甘特图放置方式</h2>
+<p class="subtitle">当前页面已有项目分布、本月事项、本周事项。下面是把“项目进度甘特图”加进去的 3 种方式。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="padding:14px;display:grid;gap:10px;background:#f8fafc;height:220px">
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+          <div style="height:44px;background:white;border:1px solid #e5e7eb;border-radius:8px"></div>
+          <div style="height:44px;background:white;border:1px solid #e5e7eb;border-radius:8px"></div>
+          <div style="height:44px;background:white;border:1px solid #e5e7eb;border-radius:8px"></div>
+          <div style="height:44px;background:white;border:1px solid #e5e7eb;border-radius:8px"></div>
+        </div>
+        <div style="height:44px;background:white;border:1px solid #e5e7eb;border-radius:8px"></div>
+        <div style="background:white;border:2px solid #2563eb;border-radius:10px;padding:10px;display:grid;gap:8px">
+          <div style="font-size:12px;font-weight:700;color:#1e293b">项目进度甘特图</div>
+          <div style="display:grid;grid-template-columns:130px 1fr;gap:8px;align-items:center"><span style="font-size:10px;color:#64748b">设计评审</span><div style="height:14px;width:52%;background:#60a5fa;border-radius:999px"></div></div>
+          <div style="display:grid;grid-template-columns:130px 1fr;gap:8px;align-items:center"><span style="font-size:10px;color:#64748b">采购准备</span><div style="height:14px;width:38%;margin-left:28%;background:#34d399;border-radius:999px"></div></div>
+          <div style="display:grid;grid-template-columns:130px 1fr;gap:8px;align-items:center"><span style="font-size:10px;color:#64748b">交付验收</span><div style="height:14px;width:26%;margin-left:62%;background:#f59e0b;border-radius:999px"></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. 放在总览统计下面</h3>
+      <p>推荐。打开“项目进度总揽”后先看整体数字，再看跨项目计划排期，符合驾驶舱页面逻辑。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="padding:14px;display:grid;gap:10px;background:#f8fafc;height:220px">
+        <div style="background:white;border:2px solid #2563eb;border-radius:10px;padding:10px;display:grid;gap:8px;height:118px">
+          <div style="font-size:12px;font-weight:700;color:#1e293b">项目进度甘特图</div>
+          <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;align-items:center"><span style="font-size:10px;color:#64748b">设计评审</span><div style="height:14px;width:52%;background:#60a5fa;border-radius:999px"></div></div>
+          <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;align-items:center"><span style="font-size:10px;color:#64748b">采购准备</span><div style="height:14px;width:38%;margin-left:28%;background:#34d399;border-radius:999px"></div></div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px"><div style="height:54px;background:white;border:1px solid #e5e7eb;border-radius:8px"></div><div style="height:54px;background:white;border:1px solid #e5e7eb;border-radius:8px"></div></div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. 放在页面最上方</h3>
+      <p>突出计划排期，但会把原来的“项目分布”挤到下面，首页信息重心会变化。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="padding:14px;display:grid;grid-template-columns:1fr 1fr;gap:10px;background:#f8fafc;height:220px">
+        <div style="display:grid;gap:8px"><div style="height:44px;background:white;border:1px solid #e5e7eb;border-radius:8px"></div><div style="height:64px;background:white;border:1px solid #e5e7eb;border-radius:8px"></div><div style="height:64px;background:white;border:1px solid #e5e7eb;border-radius:8px"></div></div>
+        <div style="background:white;border:2px solid #2563eb;border-radius:10px;padding:10px;display:grid;gap:8px">
+          <div style="font-size:12px;font-weight:700;color:#1e293b">甘特图</div>
+          <div style="height:14px;width:70%;background:#60a5fa;border-radius:999px"></div>
+          <div style="height:14px;width:48%;margin-left:26%;background:#34d399;border-radius:999px"></div>
+          <div style="height:14px;width:32%;margin-left:55%;background:#f59e0b;border-radius:999px"></div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. 右侧并排小组件</h3>
+      <p>占用空间少，但甘特图需要横向时间轴，小组件会压缩可读性，不适合任务多的项目。</p>
+    </div>
+  </div>
+</div>

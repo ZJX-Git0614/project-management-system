@@ -1,0 +1,57 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  assignMissingWeeklyMatterCodes,
+  nextWeeklyMatterCode,
+  renumberWeeklyMatterCodes,
+  renumberWeeklyMatterCodesByProject,
+  type WeeklyMatterCodeSource,
+} from "@/lib/weekly-matter-codes";
+
+const item = (overrides: Partial<WeeklyMatterCodeSource>): WeeklyMatterCodeSource => ({
+  id: "weekly-1",
+  matterCode: "",
+  createdAt: "2026-07-01T00:00:00.000Z",
+  ...overrides,
+});
+
+describe("weekly matter codes", () => {
+  it("assigns Matter001-style codes to missing weekly items by creation order", () => {
+    const items = assignMissingWeeklyMatterCodes([
+      item({ id: "second", createdAt: "2026-07-02T00:00:00.000Z" }),
+      item({ id: "first", createdAt: "2026-07-01T00:00:00.000Z" }),
+    ]);
+
+    expect(items.find((entry) => entry.id === "first")?.matterCode).toBe("Matter001");
+    expect(items.find((entry) => entry.id === "second")?.matterCode).toBe("Matter002");
+  });
+
+  it("generates the next code after existing matter codes", () => {
+    expect(nextWeeklyMatterCode([
+      item({ id: "one", matterCode: "Matter001" }),
+      item({ id: "two", matterCode: "Matter009" }),
+    ])).toBe("Matter010");
+  });
+
+  it("renumbers matter codes by current sort order", () => {
+    const items = renumberWeeklyMatterCodes([
+      item({ id: "first", matterCode: "Matter001", sortOrder: 2 }),
+      item({ id: "second", matterCode: "Matter002", sortOrder: 1 }),
+    ]);
+
+    expect(items.find((entry) => entry.id === "second")?.matterCode).toBe("Matter001");
+    expect(items.find((entry) => entry.id === "first")?.matterCode).toBe("Matter002");
+  });
+
+  it("starts matter codes from one inside each project", () => {
+    const items = renumberWeeklyMatterCodesByProject([
+      { ...item({ id: "a-2", sortOrder: 2 }), projectId: "project-a" },
+      { ...item({ id: "b-1", sortOrder: 1 }), projectId: "project-b" },
+      { ...item({ id: "a-1", sortOrder: 1 }), projectId: "project-a" },
+    ]);
+
+    expect(items.find((entry) => entry.id === "a-1")?.matterCode).toBe("Matter001");
+    expect(items.find((entry) => entry.id === "a-2")?.matterCode).toBe("Matter002");
+    expect(items.find((entry) => entry.id === "b-1")?.matterCode).toBe("Matter001");
+  });
+});

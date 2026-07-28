@@ -1,0 +1,44 @@
+﻿Ceastar项目管理系统 内网电脑完整部署顺序
+========================================
+
+兼容性说明
+----------
+本包使用英文目录和英文脚本文件名，避免不同 ZIP 解压软件造成中文路径乱码。
+PowerShell 脚本使用 UTF-8 BOM 和 Windows CRLF 换行，兼容 Windows PowerShell 5.1。
+
+目标电脑最低要求
+----------------
+1. Windows 10 22H2 Build 19045 或更高版本，或 Windows 11 23H2 Build 22631 或更高版本。
+2. Intel/AMD 64 位处理器，不能是 32 位 Windows。
+3. BIOS/UEFI 中已开启 Intel VT-x 或 AMD-V 硬件虚拟化。
+4. 核心系统建议至少 8 GB 内存、15 GB 可用空间。
+5. 同时运行本地 qwen3.5:9b 时建议至少 16 GB 内存、25 GB 可用空间。
+6. 传输磁盘必须使用 exFAT 或 NTFS，不能使用 FAT32；离线模型文件超过 4 GB。
+
+安装顺序
+--------
+第一步：运行根目录中的 0-verify-files.bat，确认全部文件校验通过。
+第二步：进入 01-Core，右键 1-prepare-wsl2.bat，选择“以管理员身份运行”。
+第三步：脚本完成后重启 Windows。
+第四步：进入 01-Core，运行 2-install-docker-desktop.bat。
+第五步：等待 Docker Desktop 显示 Engine running。
+第六步：进入 02-Application，解压 Ceastar-PMS-Windows-x64-20260724.zip。
+第七步：进入解压目录，右键 install.bat，选择“以管理员身份运行”。
+第八步：访问 http://localhost:3000，确认项目和数据完整。
+
+可选的离线智能助手
+------------------
+只有在内网电脑无法访问现有外部 LLM 服务时才需要安装本地模型。
+
+1. 进入 03-Optional-AI。
+2. 运行 3-install-ollama-models.bat。
+3. 在系统“智能助手设置”中新建或调整 Ollama 供应商：
+   地址：http://host.docker.internal:11434
+   LLM 模型：qwen3.5:9b
+   Embedding 模型：bge-m3:latest
+4. 将相应供应商设置为默认模型。
+
+不需要安装的环境
+----------------
+不需要单独安装 Node.js、npm、PostgreSQL、Prisma、Java 或 Python。
+这些运行依赖已经包含在 Docker 离线镜像中。

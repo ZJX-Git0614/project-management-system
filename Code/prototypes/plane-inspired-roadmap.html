@@ -1,0 +1,1345 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>项目管理系统 Plane 借鉴能力 HTML 原型</title>
+    <style>
+      :root {
+        --bg: #101215;
+        --bg-grad: linear-gradient(180deg, #101215 0%, #0a0b0e 100%);
+        --panel: #12141a;
+        --panel-soft: #161922;
+        --panel-strong: #0d0f14;
+        --border: #252a34;
+        --border-soft: #1d222b;
+        --text: #eef2f7;
+        --muted: #a8b1bf;
+        --dim: #788292;
+        --primary: #3b82f6;
+        --primary-soft: rgba(59, 130, 246, 0.16);
+        --success: #46dc8c;
+        --success-soft: rgba(70, 220, 140, 0.14);
+        --warning: #ffb14a;
+        --warning-soft: rgba(255, 177, 74, 0.14);
+        --danger: #ff6d7a;
+        --danger-soft: rgba(255, 109, 122, 0.14);
+        --radius: 8px;
+        --radius-sm: 6px;
+        --control: 32px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        min-height: 100%;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg-grad);
+        color: var(--text);
+        font-family: Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+        letter-spacing: 0;
+      }
+
+      button,
+      input,
+      select,
+      textarea {
+        font: inherit;
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      ::selection {
+        background: rgba(59, 130, 246, 0.32);
+      }
+
+      .app {
+        min-height: 100vh;
+        display: grid;
+        grid-template-columns: 252px minmax(0, 1fr);
+      }
+
+      .sidebar {
+        border-right: 1px solid var(--border);
+        background: #0f1117;
+        padding: 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        position: sticky;
+        top: 0;
+        height: 100vh;
+      }
+
+      .brand {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        padding: 4px 4px 10px;
+        border-bottom: 1px solid var(--border-soft);
+      }
+
+      .brand-mark {
+        width: 12px;
+        height: 12px;
+        border-radius: 4px;
+        background: var(--primary);
+      }
+
+      .brand h1 {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 650;
+      }
+
+      .brand p {
+        margin: 3px 0 0;
+        color: var(--dim);
+        font-size: 11px;
+      }
+
+      .nav-section-title {
+        margin: 2px 0 8px;
+        color: var(--dim);
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .nav-list {
+        display: grid;
+        gap: 4px;
+      }
+
+      .nav-link {
+        border: 1px solid transparent;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--muted);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 32px;
+        padding: 0 9px;
+        text-align: left;
+        transition: 160ms ease;
+      }
+
+      .nav-link svg {
+        width: 15px;
+        height: 15px;
+        color: #7fa7e9;
+      }
+
+      .nav-link:hover,
+      .nav-link.active {
+        background: var(--primary-soft);
+        border-color: rgba(59, 130, 246, 0.24);
+        color: var(--text);
+      }
+
+      .sidebar-note {
+        margin-top: auto;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--panel);
+        padding: 10px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      .main {
+        min-width: 0;
+        padding: 14px;
+      }
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        margin: -14px -14px 12px;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--border);
+        background: rgba(16, 18, 21, 0.96);
+      }
+
+      .topbar-inner {
+        display: flex;
+        gap: 12px;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .page-title {
+        min-width: 0;
+      }
+
+      .page-title h2 {
+        margin: 0;
+        font-size: 17px;
+        font-weight: 650;
+      }
+
+      .page-title p {
+        margin: 4px 0 0;
+        color: var(--dim);
+        font-size: 12px;
+      }
+
+      .top-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .btn {
+        min-height: var(--control);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        background: var(--panel-soft);
+        color: var(--text);
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 10px;
+        font-size: 12px;
+        line-height: 1;
+      }
+
+      .btn svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      .btn.primary {
+        border-color: rgba(59, 130, 246, 0.5);
+        background: rgba(59, 130, 246, 0.82);
+      }
+
+      .btn.danger {
+        border-color: rgba(255, 109, 122, 0.42);
+        background: var(--danger-soft);
+        color: #ffd6da;
+      }
+
+      .btn.ghost {
+        background: transparent;
+      }
+
+      .tabs {
+        display: flex;
+        gap: 6px;
+        overflow-x: auto;
+        padding-bottom: 2px;
+      }
+
+      .tab {
+        min-height: 30px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        background: var(--panel);
+        color: var(--muted);
+        white-space: nowrap;
+        padding: 0 10px;
+        font-size: 12px;
+      }
+
+      .tab.active,
+      .tab:hover {
+        border-color: rgba(59, 130, 246, 0.45);
+        background: var(--primary-soft);
+        color: var(--text);
+      }
+
+      .screen {
+        display: none;
+      }
+
+      .screen.active {
+        display: block;
+      }
+
+      .panel {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--panel);
+        overflow: hidden;
+      }
+
+      .panel-header {
+        min-height: 46px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        border-bottom: 1px solid var(--border);
+        padding: 9px 10px;
+      }
+
+      .panel-title {
+        min-width: 0;
+      }
+
+      .panel-title h3 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 650;
+      }
+
+      .panel-title p {
+        margin: 3px 0 0;
+        color: var(--dim);
+        font-size: 11px;
+      }
+
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        padding: 10px;
+        border-bottom: 1px solid var(--border-soft);
+        background: rgba(255, 255, 255, 0.012);
+      }
+
+      .field {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-height: var(--control);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        background: var(--panel-strong);
+        padding: 0 8px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .field input,
+      .field select {
+        width: 120px;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        color: var(--text);
+      }
+
+      .field input::placeholder {
+        color: var(--dim);
+      }
+
+      .status-strip {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px;
+        padding: 10px;
+        border-bottom: 1px solid var(--border-soft);
+      }
+
+      .metric {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--panel-soft);
+        padding: 9px;
+      }
+
+      .metric label {
+        display: block;
+        color: var(--dim);
+        font-size: 11px;
+      }
+
+      .metric strong {
+        display: block;
+        margin-top: 6px;
+        font-size: 18px;
+      }
+
+      .content-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 300px;
+        min-height: 520px;
+      }
+
+      .content-grid.wide-drawer {
+        grid-template-columns: minmax(0, 1fr) 340px;
+      }
+
+      .table-wrap {
+        overflow: auto;
+      }
+
+      table {
+        width: 100%;
+        min-width: 820px;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        border-bottom: 1px solid var(--border-soft);
+        padding: 8px 10px;
+        text-align: left;
+        font-size: 12px;
+        white-space: nowrap;
+        vertical-align: middle;
+      }
+
+      th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        background: #151923;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 650;
+      }
+
+      tr {
+        transition: background-color 140ms ease;
+      }
+
+      tbody tr:nth-child(even) {
+        background: rgba(255, 255, 255, 0.018);
+      }
+
+      tbody tr:hover,
+      tbody tr.selected {
+        background: rgba(59, 130, 246, 0.12);
+      }
+
+      .id {
+        color: #9bc0ff;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      .dim {
+        color: var(--dim);
+      }
+
+      .editable {
+        border: 1px solid transparent;
+        border-radius: 5px;
+        min-height: 26px;
+        display: inline-flex;
+        align-items: center;
+        padding: 0 6px;
+      }
+
+      tr:hover .editable,
+      .editable:hover {
+        border-color: var(--border);
+        background: rgba(255, 255, 255, 0.035);
+      }
+
+      .badge {
+        min-height: 22px;
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 0 8px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+
+      .badge.blue {
+        color: #b8d4ff;
+        border-color: rgba(59, 130, 246, 0.38);
+        background: var(--primary-soft);
+      }
+
+      .badge.green {
+        color: #c8ffe0;
+        border-color: rgba(70, 220, 140, 0.35);
+        background: var(--success-soft);
+      }
+
+      .badge.yellow {
+        color: #ffe0b3;
+        border-color: rgba(255, 177, 74, 0.36);
+        background: var(--warning-soft);
+      }
+
+      .badge.red {
+        color: #ffd1d6;
+        border-color: rgba(255, 109, 122, 0.36);
+        background: var(--danger-soft);
+      }
+
+      .progress {
+        width: 88px;
+        height: 6px;
+        border-radius: 999px;
+        background: #262d37;
+        overflow: hidden;
+      }
+
+      .progress span {
+        display: block;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--primary);
+      }
+
+      .drawer {
+        border-left: 1px solid var(--border);
+        background: #10131a;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .drawer-head {
+        padding: 12px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .drawer-head h4 {
+        margin: 0;
+        font-size: 14px;
+      }
+
+      .drawer-head p {
+        margin: 4px 0 0;
+        color: var(--dim);
+        font-size: 11px;
+      }
+
+      .drawer-body {
+        padding: 12px;
+        display: grid;
+        gap: 10px;
+        overflow: auto;
+      }
+
+      .kv {
+        display: grid;
+        grid-template-columns: 72px minmax(0, 1fr);
+        gap: 8px;
+        align-items: start;
+        font-size: 12px;
+      }
+
+      .kv label {
+        color: var(--dim);
+      }
+
+      .box {
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        background: var(--panel);
+        padding: 9px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .view-list {
+        display: grid;
+        gap: 7px;
+      }
+
+      .view-item {
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        background: var(--panel);
+        padding: 9px;
+      }
+
+      .view-item strong {
+        display: block;
+        font-size: 12px;
+      }
+
+      .view-item span {
+        display: block;
+        margin-top: 4px;
+        color: var(--dim);
+        font-size: 11px;
+      }
+
+      .lane-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(180px, 1fr));
+        gap: 10px;
+        padding: 10px;
+        overflow-x: auto;
+      }
+
+      .lane {
+        min-width: 180px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--panel-strong);
+      }
+
+      .lane h4 {
+        margin: 0;
+        padding: 9px;
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .intake-card {
+        margin: 8px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        background: var(--panel);
+        padding: 9px;
+        display: grid;
+        gap: 7px;
+      }
+
+      .intake-card strong {
+        font-size: 12px;
+      }
+
+      .intake-card p {
+        margin: 0;
+        color: var(--dim);
+        font-size: 11px;
+        line-height: 1.5;
+      }
+
+      .doc-layout {
+        display: grid;
+        grid-template-columns: 230px minmax(0, 1fr) 260px;
+        min-height: 560px;
+      }
+
+      .doc-nav {
+        border-right: 1px solid var(--border);
+        background: var(--panel-strong);
+        padding: 10px;
+      }
+
+      .doc-nav-item {
+        min-height: 32px;
+        border: 1px solid transparent;
+        border-radius: var(--radius-sm);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 8px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .doc-nav-item.active,
+      .doc-nav-item:hover {
+        background: var(--primary-soft);
+        border-color: rgba(59, 130, 246, 0.28);
+        color: var(--text);
+      }
+
+      .doc-editor {
+        padding: 18px;
+        overflow: auto;
+      }
+
+      .doc-editor h3 {
+        margin: 0 0 12px;
+        font-size: 20px;
+      }
+
+      .doc-editor h4 {
+        margin: 18px 0 8px;
+        font-size: 13px;
+      }
+
+      .doc-editor p,
+      .doc-editor li {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.7;
+      }
+
+      .doc-actions {
+        border-left: 1px solid var(--border);
+        background: #10131a;
+        padding: 12px;
+      }
+
+      .module-summary {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        padding: 10px;
+        border-bottom: 1px solid var(--border-soft);
+      }
+
+      .module-card {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--panel-soft);
+        padding: 10px;
+      }
+
+      .module-card h4 {
+        margin: 0 0 8px;
+        font-size: 13px;
+      }
+
+      .module-card p {
+        margin: 0;
+        color: var(--dim);
+        font-size: 11px;
+      }
+
+      .mini-bars {
+        display: grid;
+        gap: 6px;
+        margin-top: 10px;
+      }
+
+      .mini-bar {
+        display: grid;
+        grid-template-columns: 58px minmax(0, 1fr) 30px;
+        gap: 8px;
+        align-items: center;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .line {
+        height: 5px;
+        border-radius: 999px;
+        background: #262d37;
+        overflow: hidden;
+      }
+
+      .line span {
+        display: block;
+        height: 100%;
+        background: var(--primary);
+      }
+
+      .toast {
+        position: fixed;
+        right: 14px;
+        bottom: 14px;
+        border: 1px solid rgba(70, 220, 140, 0.3);
+        border-radius: var(--radius);
+        background: #102018;
+        color: #d7ffe6;
+        min-height: 38px;
+        display: none;
+        align-items: center;
+        padding: 0 12px;
+        font-size: 12px;
+        z-index: 30;
+      }
+
+      .toast.show {
+        display: flex;
+      }
+
+      @media (max-width: 1120px) {
+        .app {
+          grid-template-columns: 1fr;
+        }
+
+        .sidebar {
+          position: static;
+          height: auto;
+        }
+
+        .nav-list {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .content-grid,
+        .content-grid.wide-drawer,
+        .doc-layout {
+          grid-template-columns: 1fr;
+        }
+
+        .drawer,
+        .doc-actions {
+          border-left: 0;
+          border-top: 1px solid var(--border);
+        }
+
+        .doc-nav {
+          border-right: 0;
+          border-bottom: 1px solid var(--border);
+        }
+      }
+
+      @media (max-width: 720px) {
+        .main {
+          padding: 10px;
+        }
+
+        .topbar {
+          margin: -10px -10px 10px;
+          padding: 10px;
+        }
+
+        .topbar-inner,
+        .panel-header {
+          align-items: stretch;
+          flex-direction: column;
+        }
+
+        .status-strip,
+        .module-summary {
+          grid-template-columns: 1fr;
+        }
+
+        .nav-list {
+          grid-template-columns: 1fr;
+        }
+
+        .field {
+          width: 100%;
+        }
+
+        .field input,
+        .field select {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark"></span>
+          <div>
+            <h1>项目管理系统</h1>
+            <p>Plane 借鉴能力原型</p>
+          </div>
+        </div>
+
+        <div>
+          <div class="nav-section-title">删除每月事项后的主线</div>
+          <div class="nav-list">
+            <button class="nav-link active" data-screen="weekly">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/></svg>
+              本周事项执行中心
+            </button>
+            <button class="nav-link" data-screen="risk">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+              风险登记册详情抽屉
+            </button>
+            <button class="nav-link" data-screen="intake">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v4H4zM4 10h16v10H4zM8 14h8M8 17h5"/></svg>
+              事项收集池
+            </button>
+            <button class="nav-link" data-screen="docs">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h6"/></svg>
+              项目文档与行动项
+            </button>
+            <button class="nav-link" data-screen="modules">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg>
+              项目阶段/模块
+            </button>
+          </div>
+        </div>
+
+        <div class="sidebar-note">
+          本原型不恢复“本月事项”。月度管理由保存视图、周事项汇总和项目文档中的月度复盘承接。
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="topbar-inner">
+            <div class="page-title">
+              <h2>Plane 可借鉴能力 HTML 原型</h2>
+              <p>按价值排序：本周事项增强、风险详情、事项收集池、项目文档、阶段模块。</p>
+            </div>
+            <div class="top-actions">
+              <button class="btn ghost" id="saveViewBtn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
+                保存当前视图
+              </button>
+              <button class="btn primary">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+                新增
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <div class="tabs" aria-label="prototype tabs">
+          <button class="tab active" data-screen="weekly">原型 A：本周事项 + 保存视图</button>
+          <button class="tab" data-screen="risk">原型 B：风险详情抽屉</button>
+          <button class="tab" data-screen="intake">原型 C：事项收集池</button>
+          <button class="tab" data-screen="docs">原型 D：项目文档</button>
+          <button class="tab" data-screen="modules">原型 E：项目阶段/模块</button>
+        </div>
+
+        <section class="screen active" id="screen-weekly">
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title">
+                <h3>本周事项执行中心</h3>
+                <p>替代“本月事项”的短周期执行入口，支持保存视图、批量选择、直接编辑。</p>
+              </div>
+              <div class="top-actions">
+                <button class="btn">选择</button>
+                <button class="btn danger">删除</button>
+                <button class="btn primary">新增本周事项</button>
+              </div>
+            </div>
+            <div class="toolbar">
+              <span class="field">视图 <select><option>我的待办</option><option>本周到期</option><option>高风险事项</option><option>未分配事项</option></select></span>
+              <span class="field">项目 <select><option>全部项目</option><option>示例项目</option></select></span>
+              <span class="field">状态 <select><option>全部</option><option>待开始</option><option>进行中</option><option>已完成</option></select></span>
+              <span class="field">健康度 <select><option>全部</option><option>健康</option><option>有风险</option><option>偏离</option></select></span>
+              <span class="field">搜索 <input placeholder="事项/负责人/任务ID" /></span>
+            </div>
+            <div class="status-strip">
+              <div class="metric"><label>本周事项</label><strong>18</strong></div>
+              <div class="metric"><label>进行中</label><strong>7</strong></div>
+              <div class="metric"><label>有风险</label><strong>4</strong></div>
+              <div class="metric"><label>逾期</label><strong>2</strong></div>
+            </div>
+            <div class="content-grid">
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th><input type="checkbox" /></th>
+                      <th>事项ID</th>
+                      <th>关联任务</th>
+                      <th>事项名称</th>
+                      <th>负责人</th>
+                      <th>优先级</th>
+                      <th>状态</th>
+                      <th>截止</th>
+                      <th>健康度</th>
+                      <th>进度</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr class="selected">
+                      <td><input type="checkbox" checked /></td>
+                      <td class="id">W001</td>
+                      <td class="id">Task003</td>
+                      <td><span class="editable">完成硬件联调问题闭环</span></td>
+                      <td><span class="editable">成员B</span></td>
+                      <td><span class="badge red">紧急</span></td>
+                      <td><span class="badge yellow">进行中</span></td>
+                      <td>07-10</td>
+                      <td><span class="badge yellow">有风险</span></td>
+                      <td><div class="progress"><span style="width:64%"></span></div></td>
+                    </tr>
+                    <tr>
+                      <td><input type="checkbox" /></td>
+                      <td class="id">W002</td>
+                      <td class="id">Task007</td>
+                      <td><span class="editable">输出客户验收材料清单</span></td>
+                      <td><span class="editable">李四</span></td>
+                      <td><span class="badge blue">普通</span></td>
+                      <td><span class="badge">待开始</span></td>
+                      <td>07-12</td>
+                      <td><span class="badge">未知</span></td>
+                      <td><div class="progress"><span style="width:18%"></span></div></td>
+                    </tr>
+                    <tr>
+                      <td><input type="checkbox" /></td>
+                      <td class="id">W003</td>
+                      <td class="id">Task011</td>
+                      <td><span class="editable">确认采购件到货计划</span></td>
+                      <td><span class="editable">成员C</span></td>
+                      <td><span class="badge yellow">高</span></td>
+                      <td><span class="badge yellow">进行中</span></td>
+                      <td>07-09</td>
+                      <td><span class="badge red">偏离</span></td>
+                      <td><div class="progress"><span style="width:42%"></span></div></td>
+                    </tr>
+                    <tr>
+                      <td><input type="checkbox" /></td>
+                      <td class="id">W004</td>
+                      <td class="id">Task016</td>
+                      <td><span class="editable">完成现场部署前检查</span></td>
+                      <td><span class="editable">赵六</span></td>
+                      <td><span class="badge blue">普通</span></td>
+                      <td><span class="badge green">已完成</span></td>
+                      <td>07-08</td>
+                      <td><span class="badge green">健康</span></td>
+                      <td><div class="progress"><span style="width:100%"></span></div></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <aside class="drawer">
+                <div class="drawer-head">
+                  <h4>保存视图</h4>
+                  <p>把常用筛选、排序、显示列沉淀下来。</p>
+                </div>
+                <div class="drawer-body">
+                  <div class="view-list">
+                    <div class="view-item"><strong>我的待办</strong><span>负责人=当前用户，状态未完成</span></div>
+                    <div class="view-item"><strong>本周到期</strong><span>截止日期在本周，按健康度排序</span></div>
+                    <div class="view-item"><strong>高风险事项</strong><span>健康度=有风险/偏离，优先级高</span></div>
+                    <div class="view-item"><strong>未分配事项</strong><span>负责人为空，用于项目经理分派</span></div>
+                  </div>
+                  <div class="box">建议第一期先做用户级视图；稳定后再支持项目级共享视图。</div>
+                </div>
+              </aside>
+            </div>
+          </div>
+        </section>
+
+        <section class="screen" id="screen-risk">
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title">
+                <h3>风险登记册 + 详情抽屉</h3>
+                <p>列表保留高频字段，长文本、应对措施、活动记录进入右侧详情。</p>
+              </div>
+              <div class="top-actions">
+                <button class="btn">选择</button>
+                <button class="btn danger">删除</button>
+                <button class="btn primary">新增风险</button>
+              </div>
+            </div>
+            <div class="toolbar">
+              <span class="field">视图 <select><option>高等级风险</option><option>我负责的风险</option><option>本周到期</option></select></span>
+              <span class="field">等级 <select><option>全部</option><option>高</option><option>中</option><option>低</option></select></span>
+              <span class="field">状态 <select><option>全部</option><option>识别中</option><option>应对中</option><option>已关闭</option></select></span>
+              <span class="field">搜索 <input placeholder="风险名称/责任人" /></span>
+            </div>
+            <div class="content-grid wide-drawer">
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th><input type="checkbox" /></th>
+                      <th>风险ID</th>
+                      <th>风险名称</th>
+                      <th>关联事项</th>
+                      <th>等级</th>
+                      <th>责任人</th>
+                      <th>目标日期</th>
+                      <th>状态</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr class="selected">
+                      <td><input type="checkbox" checked /></td>
+                      <td class="id">R001</td>
+                      <td><span class="editable">关键采购件到货延期</span></td>
+                      <td>确认采购件到货计划</td>
+                      <td><span class="badge red">高</span></td>
+                      <td><span class="editable">成员C</span></td>
+                      <td>07-16</td>
+                      <td><span class="badge yellow">应对中</span></td>
+                    </tr>
+                    <tr>
+                      <td><input type="checkbox" /></td>
+                      <td class="id">R002</td>
+                      <td><span class="editable">客户验收标准变更</span></td>
+                      <td>输出验收材料清单</td>
+                      <td><span class="badge yellow">中</span></td>
+                      <td><span class="editable">李四</span></td>
+                      <td>07-12</td>
+                      <td><span class="badge">识别中</span></td>
+                    </tr>
+                    <tr>
+                      <td><input type="checkbox" /></td>
+                      <td class="id">R003</td>
+                      <td><span class="editable">现场部署窗口不足</span></td>
+                      <td>部署前检查</td>
+                      <td><span class="badge red">高</span></td>
+                      <td><span class="editable">赵六</span></td>
+                      <td>07-20</td>
+                      <td><span class="badge yellow">应对中</span></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <aside class="drawer">
+                <div class="drawer-head">
+                  <h4>R001 关键采购件到货延期</h4>
+                  <p>详情字段直接编辑，系统自动保存。</p>
+                </div>
+                <div class="drawer-body">
+                  <div class="kv"><label>分类</label><span>采购 / 供应链</span></div>
+                  <div class="kv"><label>触发条件</label><span>供应商确认本周无法完成发货。</span></div>
+                  <div class="kv"><label>概率</label><span><span class="badge red">高</span></span></div>
+                  <div class="kv"><label>影响</label><span><span class="badge red">高</span></span></div>
+                  <div class="kv"><label>责任人</label><span>成员C</span></div>
+                  <div class="box"><strong>应对措施</strong><br />拆分采购批次，优先保障联调样件；项目经理同步客户预期，采购负责人每日更新到货节点。</div>
+                  <div class="box"><strong>活动记录</strong><br />07-06 成员C更新目标日期。<br />07-05 成员A将风险等级调整为高。<br />07-04 系统由事项收集池转入风险登记册。</div>
+                </div>
+              </aside>
+            </div>
+          </div>
+        </section>
+
+        <section class="screen" id="screen-intake">
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title">
+                <h3>事项收集池</h3>
+                <p>承接会议行动项、客户反馈、临时问题，确认后再转为周事项、风险或甘特任务。</p>
+              </div>
+              <button class="btn primary">新增收集事项</button>
+            </div>
+            <div class="toolbar">
+              <span class="field">来源 <select><option>全部</option><option>会议</option><option>客户</option><option>内部</option></select></span>
+              <span class="field">状态 <select><option>待确认</option><option>已转入</option><option>已驳回</option><option>暂缓</option></select></span>
+              <span class="field">项目 <select><option>当前项目</option><option>全部项目</option></select></span>
+            </div>
+            <div class="lane-grid">
+              <div class="lane">
+                <h4>待确认 6</h4>
+                <div class="intake-card">
+                  <strong>客户要求增加验收清单字段</strong>
+                  <p>来源：客户沟通；建议转为本周事项。</p>
+                  <span class="badge blue">转本周事项</span>
+                </div>
+                <div class="intake-card">
+                  <strong>采购件延期可能影响联调</strong>
+                  <p>来源：项目周会；建议转为风险。</p>
+                  <span class="badge red">转风险</span>
+                </div>
+              </div>
+              <div class="lane">
+                <h4>已转入 12</h4>
+                <div class="intake-card">
+                  <strong>现场部署前检查清单</strong>
+                  <p>已转为 W004，本周事项。</p>
+                  <span class="badge green">已转入</span>
+                </div>
+                <div class="intake-card">
+                  <strong>新增联调日志模板</strong>
+                  <p>已转为 Task021，甘特任务。</p>
+                  <span class="badge green">已转入</span>
+                </div>
+              </div>
+              <div class="lane">
+                <h4>暂缓 3</h4>
+                <div class="intake-card">
+                  <strong>客户建议增加移动端页面</strong>
+                  <p>暂缓到二期评估，不进入当前项目范围。</p>
+                  <span class="badge yellow">暂缓</span>
+                </div>
+              </div>
+              <div class="lane">
+                <h4>已驳回 2</h4>
+                <div class="intake-card">
+                  <strong>重复提交的验收材料变更</strong>
+                  <p>已与 I001 合并处理。</p>
+                  <span class="badge">重复</span>
+                </div>
+              </div>
+            </div>
+            <div class="drawer" style="border-left:0;border-top:1px solid var(--border);">
+              <div class="drawer-body" style="grid-template-columns: repeat(4, minmax(160px, 1fr));">
+                <button class="btn primary">转为本周事项</button>
+                <button class="btn">转为风险</button>
+                <button class="btn">转为甘特任务</button>
+                <button class="btn ghost">暂缓 / 驳回</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="screen" id="screen-docs">
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title">
+                <h3>项目文档 / 决策记录</h3>
+                <p>把会议纪要、决策、验收标准和行动项沉淀在项目内。</p>
+              </div>
+              <button class="btn primary">新增文档</button>
+            </div>
+            <div class="doc-layout">
+              <aside class="doc-nav">
+                <div class="nav-section-title">文档分类</div>
+                <div class="doc-nav-item active"><span>周会纪要</span><span>8</span></div>
+                <div class="doc-nav-item"><span>决策记录</span><span>5</span></div>
+                <div class="doc-nav-item"><span>验收标准</span><span>3</span></div>
+                <div class="doc-nav-item"><span>客户沟通</span><span>11</span></div>
+                <div class="doc-nav-item"><span>月度复盘</span><span>2</span></div>
+              </aside>
+              <article class="doc-editor">
+                <h3>2026-07-06 项目周会纪要</h3>
+                <p class="dim">关联项目：示例项目 · 记录人：成员A · 最后更新：14:35</p>
+                <h4>会议结论</h4>
+                <ul>
+                  <li>删除独立“本月事项”，后续月度管理通过周事项视图和项目文档复盘承接。</li>
+                  <li>采购件延期风险进入风险登记册，责任人为成员C。</li>
+                  <li>本周优先完成联调问题闭环和验收材料清单。</li>
+                </ul>
+                <h4>行动项</h4>
+                <ul>
+                  <li>成员B：完成硬件联调问题闭环，截止 07-10。</li>
+                  <li>李四：输出客户验收材料清单，截止 07-12。</li>
+                  <li>成员C：确认采购件到货计划，截止 07-09。</li>
+                </ul>
+              </article>
+              <aside class="doc-actions">
+                <div class="drawer-head" style="padding:0 0 10px;border-bottom:0;">
+                  <h4>可转事项</h4>
+                  <p>从文档中抽取行动项，进入事项收集池或直接转本周事项。</p>
+                </div>
+                <div class="view-list">
+                  <div class="view-item"><strong>完成硬件联调问题闭环</strong><span>建议：转本周事项 · 成员B · 07-10</span></div>
+                  <div class="view-item"><strong>输出客户验收材料清单</strong><span>建议：转本周事项 · 李四 · 07-12</span></div>
+                  <div class="view-item"><strong>采购件到货计划</strong><span>建议：转风险 + 本周事项 · 成员C</span></div>
+                </div>
+                <div style="display:grid;gap:8px;margin-top:12px;">
+                  <button class="btn primary">全部转入事项收集池</button>
+                  <button class="btn">选择转为本周事项</button>
+                </div>
+              </aside>
+            </div>
+          </div>
+        </section>
+
+        <section class="screen" id="screen-modules">
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title">
+                <h3>项目阶段 / 模块管理</h3>
+                <p>把甘特图中的任务类别升级为可管理的阶段，关联任务、风险和周事项。</p>
+              </div>
+              <button class="btn primary">新增模块</button>
+            </div>
+            <div class="module-summary">
+              <div class="module-card">
+                <h4>设计阶段</h4>
+                <p>负责人：成员B · 07-01 至 07-08 · 已完成</p>
+                <div class="mini-bars">
+                  <div class="mini-bar"><span>任务</span><div class="line"><span style="width:100%"></span></div><span>8/8</span></div>
+                  <div class="mini-bar"><span>风险</span><div class="line"><span style="width:12%;background:var(--success)"></span></div><span>1</span></div>
+                </div>
+              </div>
+              <div class="module-card">
+                <h4>联调阶段</h4>
+                <p>负责人：李四 · 07-09 至 07-18 · 进行中</p>
+                <div class="mini-bars">
+                  <div class="mini-bar"><span>任务</span><div class="line"><span style="width:58%"></span></div><span>7/12</span></div>
+                  <div class="mini-bar"><span>风险</span><div class="line"><span style="width:38%;background:var(--warning)"></span></div><span>3</span></div>
+                </div>
+              </div>
+              <div class="module-card">
+                <h4>验收阶段</h4>
+                <p>负责人：赵六 · 07-19 至 07-28 · 未开始</p>
+                <div class="mini-bars">
+                  <div class="mini-bar"><span>任务</span><div class="line"><span style="width:14%"></span></div><span>2/14</span></div>
+                  <div class="mini-bar"><span>风险</span><div class="line"><span style="width:24%;background:var(--danger)"></span></div><span>2</span></div>
+                </div>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>模块ID</th>
+                    <th>模块名称</th>
+                    <th>负责人</th>
+                    <th>起止日期</th>
+                    <th>状态</th>
+                    <th>关联任务</th>
+                    <th>本周事项</th>
+                    <th>风险</th>
+                    <th>说明</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr class="selected">
+                    <td class="id">M001</td>
+                    <td><span class="editable">设计阶段</span></td>
+                    <td>成员B</td>
+                    <td>07-01 ~ 07-08</td>
+                    <td><span class="badge green">已完成</span></td>
+                    <td>8</td>
+                    <td>1</td>
+                    <td>1</td>
+                    <td class="muted">需求、方案、接口确认。</td>
+                  </tr>
+                  <tr>
+                    <td class="id">M002</td>
+                    <td><span class="editable">联调阶段</span></td>
+                    <td>李四</td>
+                    <td>07-09 ~ 07-18</td>
+                    <td><span class="badge yellow">进行中</span></td>
+                    <td>12</td>
+                    <td>6</td>
+                    <td>3</td>
+                    <td class="muted">重点关注采购件和联调缺陷。</td>
+                  </tr>
+                  <tr>
+                    <td class="id">M003</td>
+                    <td><span class="editable">验收阶段</span></td>
+                    <td>赵六</td>
+                    <td>07-19 ~ 07-28</td>
+                    <td><span class="badge">未开始</span></td>
+                    <td>14</td>
+                    <td>2</td>
+                    <td>2</td>
+                    <td class="muted">验收材料、现场部署、客户确认。</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast">视图已保存为原型示例</div>
+
+    <script>
+      const screens = Array.from(document.querySelectorAll(".screen"));
+      const navButtons = Array.from(document.querySelectorAll("[data-screen]"));
+      const tabs = Array.from(document.querySelectorAll(".tab"));
+      const toast = document.getElementById("toast");
+
+      function activateScreen(name) {
+        screens.forEach((screen) => {
+          screen.classList.toggle("active", screen.id === `screen-${name}`);
+        });
+        navButtons.forEach((button) => {
+          button.classList.toggle("active", button.dataset.screen === name);
+        });
+        tabs.forEach((tab) => {
+          tab.classList.toggle("active", tab.dataset.screen === name);
+        });
+      }
+
+      navButtons.forEach((button) => {
+        button.addEventListener("click", () => activateScreen(button.dataset.screen));
+      });
+
+      document.querySelectorAll("tbody tr").forEach((row) => {
+        row.addEventListener("click", () => {
+          const tbody = row.closest("tbody");
+          tbody.querySelectorAll("tr").forEach((item) => item.classList.remove("selected"));
+          row.classList.add("selected");
+        });
+      });
+
+      document.getElementById("saveViewBtn").addEventListener("click", () => {
+        toast.classList.add("show");
+        window.setTimeout(() => toast.classList.remove("show"), 1800);
+      });
+    </script>
+  </body>
+</html>
