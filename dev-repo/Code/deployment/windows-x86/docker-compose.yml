@@ -19,7 +19,7 @@ services:
     restart: unless-stopped
 
   pms:
-    image: ceastar-project-management:2026.07.28.1-amd64
+    image: ceastar-project-management:2026.07.28.2-amd64
     platform: linux/amd64
     container_name: pms
     ports:

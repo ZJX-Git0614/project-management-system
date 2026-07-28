@@ -1,3 +1,7 @@
+param(
+  [string]$ComposeCompatibilityTestDirectory = ""
+)
+
 $ErrorActionPreference = "Stop"
 
 function Assert-LastExitCode([string]$Message) {
@@ -37,26 +41,61 @@ function Wait-ForApplication {
   throw "Ceastar PMS did not become ready within 180 seconds."
 }
 
-function Ensure-ConfigurableBackupMount([string]$Directory) {
+function Ensure-CompatibleSystemBackupConfiguration([string]$Directory) {
   $composePath = Join-Path $Directory "docker-compose.yml"
   $content = [System.IO.File]::ReadAllText($composePath)
-  if ($content.Contains('/data/system-backups')) {
+  $lineBreak = if ($content.Contains("`r`n")) { "`r`n" } else { "`n" }
+  $updated = $content.Replace("`r`n", "`n")
+  $changed = $false
+
+  if (-not $updated.Contains('SYSTEM_BACKUP_ALLOWED_ROOTS:')) {
+    $environmentPattern = '(?m)^([ \t]*)SYSTEM_BACKUP_DIR:[^\n]*$'
+    $environmentMatch = [regex]::Match($updated, $environmentPattern)
+    if (-not $environmentMatch.Success) {
+      throw "The deployment docker-compose.yml does not contain SYSTEM_BACKUP_DIR. The file cannot be upgraded safely."
+    }
+    $environmentLine = $environmentMatch.Value + "`n" + $environmentMatch.Groups[1].Value + 'SYSTEM_BACKUP_ALLOWED_ROOTS: /app/.local-runtime/system-backups,/data/system-backups'
+    $updated = $updated.Substring(0, $environmentMatch.Index) + $environmentLine + $updated.Substring($environmentMatch.Index + $environmentMatch.Length)
+    $changed = $true
+  }
+
+  $configurableMountPattern = '(?m)^[ \t]*-[ \t]*[^\n#]+:/data/system-backups[ \t]*(?:#.*)?$'
+  if (-not [regex]::IsMatch($updated, $configurableMountPattern)) {
+    $backupMountPattern = '(?m)^([ \t]*)-[ \t]*[^\n#]+:/app/\.local-runtime/system-backups[ \t]*(?:#.*)?$'
+    $backupMountMatch = [regex]::Match($updated, $backupMountPattern)
+    if ($backupMountMatch.Success) {
+      $mountLines = $backupMountMatch.Value.TrimEnd() + "`n" + $backupMountMatch.Groups[1].Value + '- ${PMS_BACKUP_HOST_DIR:-./backups}:/data/system-backups'
+      $updated = $updated.Substring(0, $backupMountMatch.Index) + $mountLines + $updated.Substring($backupMountMatch.Index + $backupMountMatch.Length)
+    } else {
+      $documentMountPattern = '(?m)^([ \t]*)-[ \t]*[^\n#]+:/app/\.local-runtime/project-documents[ \t]*(?:#.*)?$'
+      $documentMountMatch = [regex]::Match($updated, $documentMountPattern)
+      if (-not $documentMountMatch.Success) {
+        throw "The deployment docker-compose.yml does not contain the PMS volume section. The file cannot be upgraded safely."
+      }
+      $mountLines = $documentMountMatch.Value.TrimEnd() + "`n" + $documentMountMatch.Groups[1].Value + '- ./backups:/app/.local-runtime/system-backups' + "`n" + $documentMountMatch.Groups[1].Value + '- ${PMS_BACKUP_HOST_DIR:-./backups}:/data/system-backups'
+      $updated = $updated.Substring(0, $documentMountMatch.Index) + $mountLines + $updated.Substring($documentMountMatch.Index + $documentMountMatch.Length)
+    }
+    $changed = $true
+  }
+
+  if (-not $changed) {
     return
   }
 
-  $lineBreak = if ($content.Contains("`r`n")) { "`r`n" } else { "`n" }
-  $pattern = '(?m)^([ \t]*-[ \t]*\./backups:/app/\.local-runtime/system-backups[ \t]*)$'
-  if (-not [regex]::IsMatch($content, $pattern)) {
-    throw "The deployment docker-compose.yml does not contain the expected backup volume mapping. Add a /data/system-backups mount before updating."
+  $backupPath = "$composePath.before-update-20260728-2"
+  if (-not (Test-Path $backupPath)) {
+    [System.IO.File]::Copy($composePath, $backupPath, $false)
   }
-
-  $backupPath = "$composePath.before-update-20260728-1"
-  [System.IO.File]::Copy($composePath, $backupPath, $true)
-  $replacement = '$1' + $lineBreak + '      - ${PMS_BACKUP_HOST_DIR:-./backups}:/data/system-backups'
-  $composeMatcher = New-Object System.Text.RegularExpressions.Regex($pattern)
-  $updated = $composeMatcher.Replace($content, $replacement, 1)
+  if ($lineBreak -eq "`r`n") {
+    $updated = $updated.Replace("`n", "`r`n")
+  }
   [System.IO.File]::WriteAllText($composePath, $updated, (New-Object System.Text.UTF8Encoding($false)))
-  Write-Host "Configurable backup directory mount added. Original compose file: $backupPath" -ForegroundColor Cyan
+  Write-Host "System backup configuration upgraded. Original compose file: $backupPath" -ForegroundColor Cyan
+}
+
+if ($ComposeCompatibilityTestDirectory) {
+  Ensure-CompatibleSystemBackupConfiguration $ComposeCompatibilityTestDirectory
+  return
 }
 
 $deploymentDirectory = Find-DeploymentDirectory
@@ -107,7 +146,7 @@ if (-not $composeImage) {
   throw "The current Ceastar PMS image name could not be determined."
 }
 
-$rollbackImage = "ceastar-project-management:rollback-20260728-1-amd64"
+$rollbackImage = "ceastar-project-management:rollback-20260728-2-amd64"
 docker image inspect $composeImage *> $null
 Assert-LastExitCode "The current Ceastar PMS image is missing."
 docker tag $composeImage $rollbackImage
@@ -115,7 +154,7 @@ Assert-LastExitCode "Failed to preserve the rollback image."
 
 Write-Host "Creating a database and document backup..." -ForegroundColor Cyan
 & (Join-Path $deploymentDirectory "backup.ps1")
-Ensure-ConfigurableBackupMount $deploymentDirectory
+Ensure-CompatibleSystemBackupConfiguration $deploymentDirectory
 
 Write-Host "Loading the offline update image..." -ForegroundColor Cyan
 docker load --input $imageFiles[0].FullName
@@ -139,7 +178,7 @@ $state = @(
   "rollbackImage=$rollbackImage",
   "updatedAt=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 )
-Set-Content -Path (Join-Path $deploymentDirectory ".ceastar-update-20260728-1.state") -Value $state -Encoding ASCII
+Set-Content -Path (Join-Path $deploymentDirectory ".ceastar-update-20260728-2.state") -Value $state -Encoding ASCII
 
 Write-Host ""
 Write-Host "Ceastar PMS update completed successfully." -ForegroundColor Green
