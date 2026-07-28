@@ -48,14 +48,23 @@ function Ensure-CompatibleSystemBackupConfiguration([string]$Directory) {
   $updated = $content.Replace("`r`n", "`n")
   $changed = $false
 
-  if (-not $updated.Contains('SYSTEM_BACKUP_ALLOWED_ROOTS:')) {
-    $environmentPattern = '(?m)^([ \t]*)SYSTEM_BACKUP_DIR:[^\n]*$'
-    $environmentMatch = [regex]::Match($updated, $environmentPattern)
-    if (-not $environmentMatch.Success) {
-      throw "The deployment docker-compose.yml does not contain SYSTEM_BACKUP_DIR. The file cannot be upgraded safely."
+  $backupDirectoryPattern = '(?m)^([ \t]*)SYSTEM_BACKUP_DIR:[^\n]*$'
+  if (-not [regex]::IsMatch($updated, $backupDirectoryPattern)) {
+    $environmentAnchorPattern = '(?m)^([ \t]*)(?:PROJECT_DOCUMENT_STORAGE_DIR|DATABASE_URL):[^\n]*$'
+    $environmentAnchorMatch = [regex]::Match($updated, $environmentAnchorPattern)
+    if (-not $environmentAnchorMatch.Success) {
+      throw "The deployment docker-compose.yml does not contain a supported PMS environment section. The file cannot be upgraded safely."
     }
-    $environmentLine = $environmentMatch.Value + "`n" + $environmentMatch.Groups[1].Value + 'SYSTEM_BACKUP_ALLOWED_ROOTS: /app/.local-runtime/system-backups,/data/system-backups'
-    $updated = $updated.Substring(0, $environmentMatch.Index) + $environmentLine + $updated.Substring($environmentMatch.Index + $environmentMatch.Length)
+    $environmentLines = $environmentAnchorMatch.Value + "`n" + $environmentAnchorMatch.Groups[1].Value + 'SYSTEM_BACKUP_DIR: /app/.local-runtime/system-backups'
+    $updated = $updated.Substring(0, $environmentAnchorMatch.Index) + $environmentLines + $updated.Substring($environmentAnchorMatch.Index + $environmentAnchorMatch.Length)
+    $changed = $true
+  }
+
+  $allowedRootsPattern = '(?m)^([ \t]*)SYSTEM_BACKUP_ALLOWED_ROOTS:[^\n]*$'
+  if (-not [regex]::IsMatch($updated, $allowedRootsPattern)) {
+    $backupDirectoryMatch = [regex]::Match($updated, $backupDirectoryPattern)
+    $environmentLines = $backupDirectoryMatch.Value + "`n" + $backupDirectoryMatch.Groups[1].Value + 'SYSTEM_BACKUP_ALLOWED_ROOTS: /app/.local-runtime/system-backups,/data/system-backups'
+    $updated = $updated.Substring(0, $backupDirectoryMatch.Index) + $environmentLines + $updated.Substring($backupDirectoryMatch.Index + $backupDirectoryMatch.Length)
     $changed = $true
   }
 
