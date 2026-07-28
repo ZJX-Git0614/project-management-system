@@ -373,7 +373,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                     <FileType2 className="size-4" /> Microsoft Project XML
                   </DropdownMenuItem>
                   <DropdownMenuItem disabled={!mppExportAvailable} onClick={() => void handleExport("mpp")}>
-                    <FileType2 className="size-4" /> MPP 文件{mppExportAvailable ? "" : "（未配置转换服务）"}
+                    <FileType2 className="size-4" /> MPP 文件{mppExportAvailable ? "" : "（需安装 Microsoft Project 转换服务）"}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -402,7 +402,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
           <DialogHeader>
             <DialogTitle>计划导入预览</DialogTitle>
             <DialogDescription>
-              已分析 {importPreview?.file.name}，当前计划尚未修改。请核对差异和冲突后再选择应用方式。
+              已分析 {importPreview?.file.name}，当前计划尚未修改。系统导出的 Excel 包含隐藏数据库键，修改日期、名称等字段后可使用“合并更新”增量导入。
             </DialogDescription>
           </DialogHeader>
           {importPreview && (

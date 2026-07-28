@@ -48,22 +48,32 @@ function Ensure-CompatibleSystemBackupConfiguration([string]$Directory) {
   $updated = $content.Replace("`r`n", "`n")
   $changed = $false
 
-  $backupDirectoryPattern = '(?m)^([ \t]*)SYSTEM_BACKUP_DIR:[^\n]*$'
+  $backupDirectoryPattern = '(?m)^([ \t]*)(?:-[ \t]*)?SYSTEM_BACKUP_DIR(?::|=)[^\n]*$'
   if (-not [regex]::IsMatch($updated, $backupDirectoryPattern)) {
-    $environmentAnchorPattern = '(?m)^([ \t]*)(?:PROJECT_DOCUMENT_STORAGE_DIR|DATABASE_URL):[^\n]*$'
+    $environmentAnchorPattern = '(?m)^([ \t]*)(-?[ \t]*)(?:PROJECT_DOCUMENT_STORAGE_DIR|DATABASE_URL)(?::|=)[^\n]*$'
     $environmentAnchorMatch = [regex]::Match($updated, $environmentAnchorPattern)
     if (-not $environmentAnchorMatch.Success) {
       throw "The deployment docker-compose.yml does not contain a supported PMS environment section. The file cannot be upgraded safely."
     }
-    $environmentLines = $environmentAnchorMatch.Value + "`n" + $environmentAnchorMatch.Groups[1].Value + 'SYSTEM_BACKUP_DIR: /app/.local-runtime/system-backups'
+    $backupDirectoryLine = if ($environmentAnchorMatch.Groups[2].Value.Trim().StartsWith("-")) {
+      '- SYSTEM_BACKUP_DIR=/app/.local-runtime/system-backups'
+    } else {
+      'SYSTEM_BACKUP_DIR: /app/.local-runtime/system-backups'
+    }
+    $environmentLines = $environmentAnchorMatch.Value + "`n" + $environmentAnchorMatch.Groups[1].Value + $backupDirectoryLine
     $updated = $updated.Substring(0, $environmentAnchorMatch.Index) + $environmentLines + $updated.Substring($environmentAnchorMatch.Index + $environmentAnchorMatch.Length)
     $changed = $true
   }
 
-  $allowedRootsPattern = '(?m)^([ \t]*)SYSTEM_BACKUP_ALLOWED_ROOTS:[^\n]*$'
+  $allowedRootsPattern = '(?m)^([ \t]*)(?:-[ \t]*)?SYSTEM_BACKUP_ALLOWED_ROOTS(?::|=)[^\n]*$'
   if (-not [regex]::IsMatch($updated, $allowedRootsPattern)) {
     $backupDirectoryMatch = [regex]::Match($updated, $backupDirectoryPattern)
-    $environmentLines = $backupDirectoryMatch.Value + "`n" + $backupDirectoryMatch.Groups[1].Value + 'SYSTEM_BACKUP_ALLOWED_ROOTS: /app/.local-runtime/system-backups,/data/system-backups'
+    $allowedRootsLine = if ($backupDirectoryMatch.Value.TrimStart().StartsWith("-")) {
+      '- SYSTEM_BACKUP_ALLOWED_ROOTS=/app/.local-runtime/system-backups,/data/system-backups'
+    } else {
+      'SYSTEM_BACKUP_ALLOWED_ROOTS: /app/.local-runtime/system-backups,/data/system-backups'
+    }
+    $environmentLines = $backupDirectoryMatch.Value + "`n" + $backupDirectoryMatch.Groups[1].Value + $allowedRootsLine
     $updated = $updated.Substring(0, $backupDirectoryMatch.Index) + $environmentLines + $updated.Substring($backupDirectoryMatch.Index + $backupDirectoryMatch.Length)
     $changed = $true
   }
@@ -91,7 +101,7 @@ function Ensure-CompatibleSystemBackupConfiguration([string]$Directory) {
     return
   }
 
-  $backupPath = "$composePath.before-update-20260728-2"
+  $backupPath = "$composePath.before-update-20260728-3"
   if (-not (Test-Path $backupPath)) {
     [System.IO.File]::Copy($composePath, $backupPath, $false)
   }
@@ -155,7 +165,7 @@ if (-not $composeImage) {
   throw "The current Ceastar PMS image name could not be determined."
 }
 
-$rollbackImage = "ceastar-project-management:rollback-20260728-2-amd64"
+$rollbackImage = "ceastar-project-management:rollback-20260728-3-amd64"
 docker image inspect $composeImage *> $null
 Assert-LastExitCode "The current Ceastar PMS image is missing."
 docker tag $composeImage $rollbackImage
@@ -164,6 +174,16 @@ Assert-LastExitCode "Failed to preserve the rollback image."
 Write-Host "Creating a database and document backup..." -ForegroundColor Cyan
 & (Join-Path $deploymentDirectory "backup.ps1")
 Ensure-CompatibleSystemBackupConfiguration $deploymentDirectory
+
+$mppInstaller = Join-Path $PSScriptRoot "install-mpp-export-service.ps1"
+if (Test-Path $mppInstaller) {
+  try {
+    & $mppInstaller -DeploymentDirectory $deploymentDirectory -SkipContainerRestart
+  } catch {
+    Write-Host "MPP export service was not enabled: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "The PMS update will continue. Excel and Project XML export remain available." -ForegroundColor Yellow
+  }
+}
 
 Write-Host "Loading the offline update image..." -ForegroundColor Cyan
 docker load --input $imageFiles[0].FullName
@@ -187,7 +207,7 @@ $state = @(
   "rollbackImage=$rollbackImage",
   "updatedAt=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 )
-Set-Content -Path (Join-Path $deploymentDirectory ".ceastar-update-20260728-2.state") -Value $state -Encoding ASCII
+Set-Content -Path (Join-Path $deploymentDirectory ".ceastar-update-20260728-3.state") -Value $state -Encoding ASCII
 
 Write-Host ""
 Write-Host "Ceastar PMS update completed successfully." -ForegroundColor Green

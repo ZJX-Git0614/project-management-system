@@ -32,7 +32,7 @@ export async function GET(
   if (!user) return unauthorized();
 
   const format = req.nextUrl.searchParams.get("format")?.toLowerCase();
-  if (!format) return ok(ganttTransferCapabilities());
+  if (!format) return ok(await ganttTransferCapabilities());
 
   const project = await prisma.project.findUnique({ where: { id }, select: { name: true, code: true } });
   if (!project) return notFound("项目");

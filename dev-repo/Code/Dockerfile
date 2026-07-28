@@ -84,6 +84,7 @@ COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/scripts ./scripts
 
 # PostgreSQL 通过 docker-compose 的 postgres 服务提供，无需本地数据目录
 
@@ -96,4 +97,4 @@ ENV HOSTNAME=0.0.0.0
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["npx", "next", "start"]
+CMD ["npm", "run", "start"]

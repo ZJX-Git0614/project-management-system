@@ -11,7 +11,9 @@ import { addDaysInclusive } from "@/lib/gantt";
 
 export interface ImportedGanttTask {
   externalId: string;
+  databaseId?: string;
   parentExternalId: string | null;
+  parentDatabaseId?: string | null;
   taskCategory: string;
   taskName: string;
   startDate: string;
@@ -25,6 +27,7 @@ export interface ImportedGanttTask {
   actualWorkHours: number;
   progress: number;
   predecessorExternalIds: string[];
+  predecessorDatabaseIds?: string[];
   predecessorDependencies: ImportedGanttDependency[];
   taskMode: "AUTO" | "MANUAL";
   isMilestone: boolean;
@@ -344,10 +347,13 @@ export const parseGanttExcel = (buffer: Buffer, fallbackStartDate = ""): Importe
     const finishDate = dateOnly(excelValue(row, "计划完成", "Finish", "Finish Date"));
     const explicitDuration = Number(text(excelValue(row, "工期(天)", "工期", "Duration Days")));
     const predecessorValue = text(excelValue(row, "紧前任务ID", "Predecessors", "Predecessor"));
+    const predecessorDatabaseValue = text(excelValue(row, "系统紧前任务键", "System Predecessor Keys"));
 
     return {
       externalId: text(excelValue(row, "任务ID", "Task ID", "ID")) || `row-${index + 1}`,
+      databaseId: text(excelValue(row, "系统任务键", "System Task Key")),
       parentExternalId: text(excelValue(row, "父任务ID", "Parent Task ID", "Parent ID")) || null,
+      parentDatabaseId: text(excelValue(row, "系统父任务键", "System Parent Task Key")) || null,
       taskCategory: text(excelValue(row, "任务类别", "Category")),
       taskName,
       startDate,
@@ -364,6 +370,7 @@ export const parseGanttExcel = (buffer: Buffer, fallbackStartDate = ""): Importe
       actualWorkHours: Math.max(0, numberValue(excelValue(row, "实际工时(小时)", "实际工时", "Actual Work Hours"))),
       progress: normalizeProgress(excelValue(row, "当前进度(%)", "当前进度", "Progress")),
       predecessorExternalIds: predecessorValue.split(/[,，;；\s]+/).filter(Boolean),
+      predecessorDatabaseIds: predecessorDatabaseValue.split(/[,，;；\s]+/).filter(Boolean),
       predecessorDependencies: predecessorValue.split(/[,，;；\s]+/).filter(Boolean).map((predecessorExternalId) => ({
         predecessorExternalId,
         type: 1,
@@ -452,6 +459,9 @@ export const buildGanttExcel = (tasks: ProjectGanttTask[]) => {
     基线成本: task.baselineCost ?? 0,
     "完工预算(BAC)": task.budgetAtCompletion ?? 0,
     "实际成本(AC)": task.actualCost ?? 0,
+    系统任务键: task.id,
+    系统父任务键: task.parentId ?? "",
+    系统紧前任务键: task.predecessorTaskIds?.join(",") ?? "",
   }));
   const worksheet = XLSX.utils.json_to_sheet(rows);
   worksheet["!cols"] = [
@@ -459,6 +469,7 @@ export const buildGanttExcel = (tasks: ProjectGanttTask[]) => {
     { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 14 },
     { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 24 },
     { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 16 },
+    { hidden: true }, { hidden: true }, { hidden: true },
   ];
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "项目进度");
@@ -651,14 +662,38 @@ export const convertProjectXmlToMpp = async (xml: Buffer) => {
     signal: AbortSignal.timeout(120_000),
   });
   if (!response.ok) throw new Error(`MPP 转换服务返回 ${response.status}`);
-  return Buffer.from(await response.arrayBuffer());
+  const output = Buffer.from(await response.arrayBuffer());
+  const compoundFileSignature = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+  if (output.length < compoundFileSignature.length || !output.subarray(0, 8).equals(compoundFileSignature)) {
+    throw new Error("MPP 转换服务未返回有效的 Microsoft Project 文件");
+  }
+  return output;
 };
 
-export const ganttTransferCapabilities = () => ({
+const mppExportServiceAvailable = async () => {
+  const serviceUrl = process.env.PROJECT_MPP_EXPORT_SERVICE_URL?.trim();
+  if (!serviceUrl) return false;
+  const healthUrl = process.env.PROJECT_MPP_EXPORT_SERVICE_HEALTH_URL?.trim();
+  if (!healthUrl) return true;
+  try {
+    const response = await fetch(healthUrl, {
+      headers: process.env.PROJECT_MPP_EXPORT_SERVICE_TOKEN
+        ? { Authorization: `Bearer ${process.env.PROJECT_MPP_EXPORT_SERVICE_TOKEN}` }
+        : {},
+      cache: "no-store",
+      signal: AbortSignal.timeout(3_000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+};
+
+export const ganttTransferCapabilities = async () => ({
   excelImport: true,
   excelExport: true,
   projectXmlImport: true,
   projectXmlExport: true,
   mppImport: true,
-  mppExport: Boolean(process.env.PROJECT_MPP_EXPORT_SERVICE_URL?.trim()),
+  mppExport: await mppExportServiceAvailable(),
 });

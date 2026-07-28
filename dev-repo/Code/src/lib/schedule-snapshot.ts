@@ -34,6 +34,7 @@ export const getCurrentScheduleSnapshot = async (
     statusDate,
     tasks: tasks.map((task): ScheduleTask => ({
       id: task.id,
+      databaseId: task.id,
       externalUid: task.externalUid,
       taskCode: task.taskCode,
       taskName: task.taskName,
@@ -81,17 +82,22 @@ export const buildImportedScheduleSnapshot = (
   sourceFileName: string,
   bundle: GanttImportBundle,
   statusDate = new Date().toISOString().slice(0, 10),
-): ScheduleSnapshot => ({
+): ScheduleSnapshot => {
+  const databaseIdByExternalId = new Map(bundle.tasks.flatMap((task) => (
+    task.databaseId ? [[task.externalId, task.databaseId] as const] : []
+  )));
+  return ({
   schemaVersion: SCHEDULE_SNAPSHOT_SCHEMA_VERSION,
   sourceFileName,
   statusDate,
   tasks: bundle.tasks.map((task): ScheduleTask => ({
     id: task.externalId,
+    databaseId: task.databaseId,
     externalUid: task.externalId,
     taskCode: task.wbsCode || task.outlineNumber || task.externalId,
     taskName: task.taskName,
     taskCategory: task.taskCategory,
-    parentId: task.parentExternalId,
+    parentId: task.parentDatabaseId || (task.parentExternalId ? databaseIdByExternalId.get(task.parentExternalId) || task.parentExternalId : null),
     wbsCode: task.wbsCode,
     outlineNumber: task.outlineNumber,
     startDate: task.startDate,
@@ -114,7 +120,9 @@ export const buildImportedScheduleSnapshot = (
     actualCost: task.actualCost,
     baselines: task.baselines,
     dependencies: task.predecessorDependencies.map((dependency) => ({
-      predecessorTaskId: dependency.predecessorExternalId,
+      predecessorTaskId: task.predecessorDatabaseIds?.[task.predecessorDependencies.indexOf(dependency)]
+        || databaseIdByExternalId.get(dependency.predecessorExternalId)
+        || dependency.predecessorExternalId,
       type: dependency.type,
       lag: dependency.lag,
       lagFormat: dependency.lagFormat,
@@ -124,4 +132,5 @@ export const buildImportedScheduleSnapshot = (
     ...bundle.metadata,
     taskUidMap: stringRecord(bundle.metadata.taskUidMap),
   } : null,
-});
+  });
+};

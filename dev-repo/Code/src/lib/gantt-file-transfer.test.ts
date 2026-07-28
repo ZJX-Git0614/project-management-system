@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as XLSX from "@e965/xlsx";
 
 import type { ProjectGanttTask } from "@/domain/models";
-import { buildGanttExcel, buildGanttExcelTemplate, buildProjectXml, parseGanttExcel, parseProjectXml, parseProjectXmlBundle } from "@/lib/gantt-file-transfer";
+import { buildGanttExcel, buildGanttExcelTemplate, buildProjectXml, convertProjectXmlToMpp, ganttTransferCapabilities, parseGanttExcel, parseProjectXml, parseProjectXmlBundle } from "@/lib/gantt-file-transfer";
 
 const tasks: ProjectGanttTask[] = [
   {
@@ -58,18 +58,44 @@ const tasks: ProjectGanttTask[] = [
 ];
 
 describe("gantt file transfer", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
   it("round-trips task hierarchy through Excel", () => {
     const imported = parseGanttExcel(buildGanttExcel(tasks));
 
     expect(imported).toHaveLength(2);
     expect(imported[0]).toMatchObject({
       externalId: "Task1",
+      databaseId: "root",
       parentExternalId: null,
       taskName: "总体设计",
       estimatedWorkHours: 24,
       actualWorkHours: 10,
     });
-    expect(imported[1]).toMatchObject({ externalId: "Task1.1", parentExternalId: "Task1", taskName: "接口设计" });
+    expect(imported[1]).toMatchObject({
+      externalId: "Task1.1",
+      databaseId: "child",
+      parentExternalId: "Task1",
+      parentDatabaseId: "root",
+      predecessorDatabaseIds: ["root"],
+      taskName: "接口设计",
+    });
+  });
+
+  it("keeps database keys hidden while exporting an editable Excel plan", () => {
+    const workbook = XLSX.read(buildGanttExcel(tasks), { type: "buffer", cellStyles: true });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const headers = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1 })[0];
+
+    expect(headers.slice(-3)).toEqual(["系统任务键", "系统父任务键", "系统紧前任务键"]);
+    expect(sheet["!cols"]?.slice(-3)).toEqual([
+      expect.objectContaining({ hidden: true }),
+      expect.objectContaining({ hidden: true }),
+      expect.objectContaining({ hidden: true }),
+    ]);
   });
 
   it("builds an empty system Excel import template with the supported columns", () => {
@@ -87,6 +113,22 @@ describe("gantt file transfer", () => {
       "实际工时(小时)",
       "紧前任务ID",
     ]));
+  });
+
+  it("reports MPP export only when the configured conversion service is healthy", async () => {
+    vi.stubEnv("PROJECT_MPP_EXPORT_SERVICE_URL", "http://converter/convert");
+    vi.stubEnv("PROJECT_MPP_EXPORT_SERVICE_HEALTH_URL", "http://converter/health");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 200 })));
+
+    await expect(ganttTransferCapabilities()).resolves.toMatchObject({ mppExport: true });
+  });
+
+  it("rejects a converter response that is not a real compound MPP file", async () => {
+    vi.stubEnv("PROJECT_MPP_EXPORT_SERVICE_URL", "http://converter/convert");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("<Project />", { status: 200 })));
+
+    await expect(convertProjectXmlToMpp(Buffer.from("<Project />"))).rejects
+      .toThrow("未返回有效的 Microsoft Project 文件");
   });
 
   it("uses the project start date for unscheduled Excel tasks", () => {
