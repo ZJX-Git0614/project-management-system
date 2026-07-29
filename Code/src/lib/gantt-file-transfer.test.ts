@@ -72,7 +72,7 @@ describe("gantt file transfer", () => {
       databaseId: "root",
       parentExternalId: null,
       taskName: "总体设计",
-      estimatedWorkHours: 24,
+      estimatedWorkHours: 22.5,
       actualWorkHours: 10,
     });
     expect(imported[1]).toMatchObject({
@@ -90,8 +90,9 @@ describe("gantt file transfer", () => {
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const headers = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1 })[0];
 
-    expect(headers.slice(-3)).toEqual(["系统任务键", "系统父任务键", "系统紧前任务键"]);
-    expect(sheet["!cols"]?.slice(-3)).toEqual([
+    expect(headers.slice(-4)).toEqual(["系统任务键", "系统父任务键", "系统紧前任务键", "系统负责人键"]);
+    expect(sheet["!cols"]?.slice(-4)).toEqual([
+      expect.objectContaining({ hidden: true }),
       expect.objectContaining({ hidden: true }),
       expect.objectContaining({ hidden: true }),
       expect.objectContaining({ hidden: true }),
@@ -113,6 +114,23 @@ describe("gantt file transfer", () => {
       "实际工时(小时)",
       "紧前任务ID",
     ]));
+  });
+
+  it("keeps the system 7.5-hour workday when imported Project metadata used 8 hours", () => {
+    const xml = buildProjectXml("测试项目", tasks, {
+      projectSettings: {
+        MinutesPerDay: 480,
+        MinutesPerWeek: 2400,
+      },
+      taskUidMap: {},
+      calendars: {},
+      resources: {},
+      assignments: {},
+    }).toString("utf8");
+
+    expect(xml).toContain("<MinutesPerDay>450</MinutesPerDay>");
+    expect(xml).toContain("<MinutesPerWeek>2250</MinutesPerWeek>");
+    expect(xml).not.toContain("<MinutesPerDay>480</MinutesPerDay>");
   });
 
   it("reports MPP export only when the configured conversion service is healthy", async () => {
@@ -163,7 +181,7 @@ describe("gantt file transfer", () => {
       parentExternalId: null,
       taskName: "总体设计",
       progress: 50,
-      estimatedWorkHours: 24,
+      estimatedWorkHours: 22.5,
       actualWorkHours: 10,
     });
     expect(imported[1]).toMatchObject({ externalId: "2", parentExternalId: "1", taskName: "接口设计" });

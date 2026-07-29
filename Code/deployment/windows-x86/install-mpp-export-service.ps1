@@ -25,11 +25,45 @@ function Set-EnvValue([string]$Path, [string]$Name, [string]$Value) {
   [System.IO.File]::WriteAllText($Path, $content, (New-Object System.Text.UTF8Encoding($false)))
 }
 
+function Get-EnvValue([string]$Path, [string]$Name) {
+  if (-not (Test-Path $Path)) { return "" }
+  $content = [System.IO.File]::ReadAllText($Path)
+  $pattern = "(?m)^$([regex]::Escape($Name))=(.*)$"
+  $match = [regex]::Match($content, $pattern)
+  if (-not $match.Success) { return "" }
+  return $match.Groups[1].Value.Trim()
+}
+
 function New-ServiceToken {
   $bytes = New-Object byte[] 32
   $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
   try { $generator.GetBytes($bytes) } finally { $generator.Dispose() }
   return [Convert]::ToBase64String($bytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
+}
+
+function Wait-ForServiceHealth([int]$ServicePort, [string]$ServiceToken) {
+  $headers = @{ Authorization = "Bearer $ServiceToken" }
+  $lastError = "No response"
+  for ($attempt = 1; $attempt -le 15; $attempt++) {
+    try {
+      $health = Invoke-WebRequest -Uri "http://127.0.0.1:$ServicePort/health" -Headers $headers -UseBasicParsing -TimeoutSec 5
+      if ($health.StatusCode -eq 200) { return }
+      $lastError = "HTTP $($health.StatusCode)"
+    } catch {
+      $lastError = $_.Exception.Message
+    }
+    Start-Sleep -Seconds 1
+  }
+  throw "MPP export service health check failed after restart: $lastError"
+}
+
+$requestedDeploymentDirectory = $DeploymentDirectory
+$requestedComposePath = Join-Path $requestedDeploymentDirectory "docker-compose.yml"
+if (-not (Test-Path $requestedComposePath)) {
+  $parentDirectory = Split-Path -Parent $PSScriptRoot
+  if (Test-Path (Join-Path $parentDirectory "docker-compose.yml")) {
+    $DeploymentDirectory = $parentDirectory
+  }
 }
 
 $serviceSource = Join-Path $PSScriptRoot "mpp-export-service.ps1"
@@ -69,7 +103,8 @@ if (-not (Test-Administrator)) {
 New-Item -ItemType Directory -Path $serviceDirectory -Force | Out-Null
 Copy-Item -Path $serviceSource -Destination $servicePath -Force
 
-$token = New-ServiceToken
+$token = Get-EnvValue $envPath "PROJECT_MPP_EXPORT_SERVICE_TOKEN"
+if (-not $token) { $token = New-ServiceToken }
 Set-EnvValue $envPath "PROJECT_MPP_EXPORT_SERVICE_URL" "http://host.docker.internal:$Port/convert"
 Set-EnvValue $envPath "PROJECT_MPP_EXPORT_SERVICE_HEALTH_URL" "http://host.docker.internal:$Port/health"
 Set-EnvValue $envPath "PROJECT_MPP_EXPORT_SERVICE_TOKEN" $token
@@ -108,17 +143,22 @@ Get-NetFirewallRule -DisplayName $firewallRuleName -ErrorAction SilentlyContinue
 New-NetFirewallRule -DisplayName $firewallRuleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -Profile Private | Out-Null
 
 $taskName = "Ceastar PMS MPP Export Service"
+$existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($existingTask) {
+  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  for ($attempt = 1; $attempt -le 10; $attempt++) {
+    $state = (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue).State
+    if ($state -ne "Running") { break }
+    Start-Sleep -Milliseconds 500
+  }
+}
 $actionArguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$servicePath`" -Port $Port -ConfigPath `"$envPath`""
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $actionArguments
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 $settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -User $user -RunLevel Highest -Force | Out-Null
 Start-ScheduledTask -TaskName $taskName
-Start-Sleep -Seconds 2
-
-$headers = @{ Authorization = "Bearer $token" }
-$health = Invoke-WebRequest -Uri "http://localhost:$Port/health" -Headers $headers -UseBasicParsing -TimeoutSec 10
-if ($health.StatusCode -ne 200) { throw "MPP export service health check failed." }
+Wait-ForServiceHealth $Port $token
 
 if (-not $SkipContainerRestart) {
   Push-Location $DeploymentDirectory

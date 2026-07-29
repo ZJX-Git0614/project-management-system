@@ -3,6 +3,7 @@ export type GanttColumnKey =
   | "taskCode"
   | "taskCategory"
   | "taskName"
+  | "owner"
   | "durationDays"
   | "startDate"
   | "endDate"
@@ -21,6 +22,7 @@ export interface GanttColumnLayoutTask {
   taskCode?: string;
   taskCategory?: string;
   taskName?: string;
+  ownerMember?: { personName?: string; roleName?: string } | null;
   durationDays?: number;
   startDate?: string;
   endDate?: string;
@@ -40,6 +42,7 @@ export const GANTT_EXPANDED_COLUMN_KEYS: GanttColumnKey[] = [
   "taskCode",
   "taskCategory",
   "taskName",
+  "owner",
   "durationDays",
   "startDate",
   "endDate",
@@ -58,6 +61,7 @@ export const GANTT_COLUMN_LABELS: Record<GanttColumnKey, string> = {
   taskCode: "任务ID",
   taskCategory: "任务类别",
   taskName: "任务名称",
+  owner: "负责人",
   durationDays: "工期",
   startDate: "计划开始",
   endDate: "计划完成",
@@ -74,6 +78,7 @@ export const GANTT_COLUMN_MIN_WIDTHS: GanttColumnWidths = {
   taskCode: 112,
   taskCategory: 86,
   taskName: 180,
+  owner: 120,
   durationDays: 56,
   startDate: 108,
   endDate: 108,
@@ -90,6 +95,7 @@ const GANTT_COLUMN_MAX_WIDTHS: GanttColumnWidths = {
   taskCode: 720,
   taskCategory: 520,
   taskName: 720,
+  owner: 260,
   durationDays: 120,
   startDate: 150,
   endDate: 150,
@@ -144,6 +150,7 @@ export const fitGanttColumnWidth = (
       case "taskCode": return textWidth(task.taskCode || task.id) + depth * 10 + 92;
       case "taskCategory": return textWidth(task.taskCategory) + 28;
       case "taskName": return textWidth(task.taskName) + depth * 18 + (task.isCritical ? 92 : 28);
+      case "owner": return textWidth(task.ownerMember ? `${task.ownerMember.personName ?? ""}（${task.ownerMember.roleName ?? ""}）` : "未分配") + 36;
       case "durationDays": return textWidth(task.durationDays ?? 0) + 34;
       case "startDate": return textWidth(task.startDate) + 42;
       case "endDate": return textWidth(task.endDate || task.finishDate) + 42;
@@ -179,4 +186,3 @@ export const ganttColumnsWidth = (widths: GanttColumnWidths, collapsed: boolean)
   (collapsed ? GANTT_COLLAPSED_COLUMN_KEYS : GANTT_EXPANDED_COLUMN_KEYS)
     .reduce((total, key) => total + widths[key], 0)
 );
-

@@ -4,7 +4,8 @@ import type { Prisma } from "@prisma/client";
 import { getUserFromRequest } from "@/lib/auth";
 import { ensureMutableProject, err, notFound, ok, unauthorized } from "@/lib/api-utils";
 import { parseGanttImportFile } from "@/lib/gantt-file-transfer";
-import { renumberProjectGanttTaskCodes, replaceGanttTaskDependencies } from "@/lib/gantt-task-service";
+import { estimatedHoursForDuration, roundGanttHours } from "@/lib/gantt-calendar";
+import { recalculateProjectGanttSchedule, renumberProjectGanttTaskCodes, replaceGanttTaskDependencies } from "@/lib/gantt-task-service";
 import { prisma } from "@/lib/prisma";
 import { analyzeSchedule, matchScheduleTasks } from "@/lib/schedule-analysis";
 import { buildImportedScheduleSnapshot, getCurrentScheduleSnapshot } from "@/lib/schedule-snapshot";
@@ -104,6 +105,15 @@ export async function POST(
     const existingIdByExternalId = new Map(mergeMatches.flatMap((match) => (
       match.currentTaskId ? [[match.incomingTaskId, match.currentTaskId] as const] : []
     )));
+    const projectMembers = await prisma.projectMember.findMany({
+      where: { projectId: id },
+      select: { id: true, personName: true },
+    });
+    const memberIds = new Set(projectMembers.map((member) => member.id));
+    const memberIdsByName = new Map<string, string[]>();
+    projectMembers.forEach((member) => {
+      memberIdsByName.set(member.personName, [...(memberIdsByName.get(member.personName) ?? []), member.id]);
+    });
 
     const applyResult = await prisma.$transaction(async (tx) => {
       const existing = await tx.projectGanttTask.findMany({
@@ -126,21 +136,26 @@ export async function POST(
         const parentKey = parentId ?? "";
         const sortOrder = (nextSortOrderByParent.get(parentKey) ?? 0) + 1;
         nextSortOrderByParent.set(parentKey, sortOrder);
+        const ownerMatches = task.ownerName ? memberIdsByName.get(task.ownerName) ?? [] : [];
+        const ownerMemberId = task.ownerMemberId && memberIds.has(task.ownerMemberId)
+          ? task.ownerMemberId
+          : ownerMatches.length === 1 ? ownerMatches[0] : null;
         const data = {
             projectId: id,
             parentId,
+            ownerMemberId,
             taskCode: mode === "MERGE" ? (task.wbsCode || task.outlineNumber || "") : "",
             taskCategory: task.taskCategory,
             taskName: task.taskName,
             startDate: task.startDate,
             finishDate: task.finishDate,
             durationDays: task.durationDays,
-            durationMinutes: task.durationMinutes,
+            durationMinutes: task.durationDays * 450,
             durationFormat: task.durationFormat,
             actualStartDate: task.actualStartDate,
             actualEndDate: task.actualEndDate,
-            estimatedWorkHours: task.estimatedWorkHours,
-            actualWorkHours: task.actualWorkHours,
+            estimatedWorkHours: estimatedHoursForDuration(task.durationDays),
+            actualWorkHours: roundGanttHours(task.actualWorkHours),
             progress: task.progress,
             predecessorTask: task.predecessorExternalIds
               .map((externalId) => taskNameByExternalId.get(externalId) ?? "")
@@ -230,6 +245,7 @@ export async function POST(
       return { createdCount, updatedCount };
     }, APPLY_TRANSACTION_OPTIONS);
     await renumberProjectGanttTaskCodes(id);
+    await recalculateProjectGanttSchedule(id);
 
     return ok({ importedCount: importedTasks.length, fileName: file.name, mode, ...applyResult, analysis, currentPlanModified: true });
   } catch (error) {

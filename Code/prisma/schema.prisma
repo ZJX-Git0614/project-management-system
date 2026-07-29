@@ -22,18 +22,19 @@ model UserAccount {
 }
 
 model Project {
-  id              String   @id @default(cuid())
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  name            String
-  code            String   @default("")
-  clientName      String   @default("")
-  amountWan       Float    @default(0)
-  deviceCount     Int      @default(0)
-  repairCycleDays Int      @default(0)
-  startDate       String   @default("")
-  expectedEndDate String   @default("")
-  status          String   @default("DRAFT") // ProjectStatus
+  id                String   @id @default(cuid())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  name              String
+  code              String   @default("")
+  clientName        String   @default("")
+  amountWan         Float    @default(0)
+  deviceCount       Int      @default(0)
+  repairCycleDays   Int      @default(0)
+  startDate         String   @default("")
+  expectedEndDate   String   @default("")
+  status            String   @default("DRAFT") // ProjectStatus
+  ganttCalendarMode String   @default("CALENDAR_DAYS")
 
   projectMembers       ProjectMember[]
   ganttTasks           ProjectGanttTask[]
@@ -61,6 +62,7 @@ model ProjectGanttTask {
   updatedAt          DateTime @updatedAt
   projectId          String
   parentId           String?
+  ownerMemberId      String?
   taskCode           String   @default("")
   taskCategory       String
   taskName           String
@@ -93,6 +95,7 @@ model ProjectGanttTask {
   sortOrder          Int      @default(0)
 
   project                 Project                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  ownerMember             ProjectMember?           @relation(fields: [ownerMemberId], references: [id], onDelete: SetNull)
   budgetItem              ProjectBudgetItem?       @relation(fields: [budgetItemId], references: [id], onDelete: SetNull)
   parent                  ProjectGanttTask?        @relation("GanttTaskChildren", fields: [parentId], references: [id], onDelete: Cascade)
   children                ProjectGanttTask[]       @relation("GanttTaskChildren")
@@ -103,6 +106,7 @@ model ProjectGanttTask {
 
   @@index([projectId, externalUid])
   @@index([projectId, budgetItemId])
+  @@index([projectId, ownerMemberId])
 }
 
 model ProjectGanttDependency {
@@ -262,7 +266,8 @@ model ProjectMember {
   roleName   String
   personName String
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project    Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  ganttTasks ProjectGanttTask[]
 }
 
 model WeeklyItem {
@@ -370,28 +375,28 @@ model AdminAuditLog {
 }
 
 model SystemBackupSettings {
-  id                     String    @id @default("default")
-  createdAt              DateTime  @default(now())
-  updatedAt              DateTime  @updatedAt
-  automaticBackupEnabled Boolean   @default(true)
-  intervalHours          Int       @default(6)
-  localDirectory         String    @default("")
-  retentionCount         Int       @default(28)
-  cloudEnabled           Boolean   @default(false)
-  cloudProvider          String    @default("WEBDAV")
-  cloudBaseUrl           String    @default("")
-  cloudUsername          String    @default("")
-  cloudPasswordEncrypted String    @default("")
-  cloudDirectory         String    @default("Ceastar-PMS/backups")
+  id                             String    @id @default("default")
+  createdAt                      DateTime  @default(now())
+  updatedAt                      DateTime  @updatedAt
+  automaticBackupEnabled         Boolean   @default(true)
+  intervalHours                  Int       @default(6)
+  localDirectory                 String    @default("")
+  retentionCount                 Int       @default(28)
+  cloudEnabled                   Boolean   @default(false)
+  cloudProvider                  String    @default("WEBDAV")
+  cloudBaseUrl                   String    @default("")
+  cloudUsername                  String    @default("")
+  cloudPasswordEncrypted         String    @default("")
+  cloudDirectory                 String    @default("Ceastar-PMS/backups")
   documentCloudEnabled           Boolean   @default(false)
   documentCloudBaseUrl           String    @default("")
   documentCloudUsername          String    @default("")
   documentCloudPasswordEncrypted String    @default("")
   documentCloudDirectory         String    @default("Ceastar-PMS/documents")
-  lastAutomaticBackupAt  DateTime?
-  lastBackupStatus       String    @default("")
-  lastBackupMessage      String    @default("") @db.Text
-  updatedBy              String    @default("")
+  lastAutomaticBackupAt          DateTime?
+  lastBackupStatus               String    @default("")
+  lastBackupMessage              String    @default("") @db.Text
+  updatedBy                      String    @default("")
 }
 
 model SystemBackupRecord {
@@ -670,7 +675,7 @@ model AssistantPlanRun {
   expiresAt        DateTime
   completedAt      DateTime?
 
-  project Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
   steps   AssistantPlanStep[]
   actions AssistantActionRun[]
 
@@ -679,28 +684,28 @@ model AssistantPlanRun {
 }
 
 model AssistantPlanStep {
-  id              String    @id @default(cuid())
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  planId          String
-  stepIndex       Int
-  toolId          String
-  title           String
-  command         String    @db.Text
-  status          String    @default("PENDING")
-  riskLevel       String
-  dependsOnJson   String    @default("[]") @db.Text
-  inputJson       String    @default("{}") @db.Text
-  outputJson      String    @default("{}") @db.Text
-  attemptCount    Int       @default(0)
-  maxAttempts     Int       @default(1)
-  verificationJson String   @default("{}") @db.Text
-  errorCode       String    @default("")
-  errorMessage    String    @default("") @db.Text
-  startedAt       DateTime?
-  completedAt     DateTime?
+  id               String    @id @default(cuid())
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  planId           String
+  stepIndex        Int
+  toolId           String
+  title            String
+  command          String    @db.Text
+  status           String    @default("PENDING")
+  riskLevel        String
+  dependsOnJson    String    @default("[]") @db.Text
+  inputJson        String    @default("{}") @db.Text
+  outputJson       String    @default("{}") @db.Text
+  attemptCount     Int       @default(0)
+  maxAttempts      Int       @default(1)
+  verificationJson String    @default("{}") @db.Text
+  errorCode        String    @default("")
+  errorMessage     String    @default("") @db.Text
+  startedAt        DateTime?
+  completedAt      DateTime?
 
-  plan   AssistantPlanRun  @relation(fields: [planId], references: [id], onDelete: Cascade)
+  plan   AssistantPlanRun    @relation(fields: [planId], references: [id], onDelete: Cascade)
   action AssistantActionRun? @relation("AssistantPlanStepAction")
 
   @@unique([planId, stepIndex])

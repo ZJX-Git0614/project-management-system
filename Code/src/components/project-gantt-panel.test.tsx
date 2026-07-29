@@ -9,6 +9,7 @@ import type { ProjectGanttTask } from "@/domain/models";
 const mocks = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
+  put: vi.fn(),
   delete: vi.fn(),
 }));
 
@@ -16,7 +17,7 @@ vi.mock("@/lib/api-client", () => ({
   api: {
     get: mocks.get,
     post: mocks.post,
-    put: vi.fn(),
+    put: mocks.put,
     delete: mocks.delete,
   },
 }));
@@ -34,16 +35,19 @@ vi.mock("@/components/gantt-timeline", () => ({
     creatingParentId,
     onDeleteSelected,
     onCreateTask,
+    projectMembers,
     tasks,
   }: {
     creatingParentId: string | null;
     onDeleteSelected?: (taskIds: string[]) => void | Promise<void>;
     onCreateTask?: (parentTask?: ProjectGanttTask) => void;
+    projectMembers: Array<{ id: string }>;
     tasks: ProjectGanttTask[];
   }) => (
     <div data-testid="gantt-timeline">
       <span data-testid="task-count">{tasks.length}</span>
       <span data-testid="creating-parent">{creatingParentId ?? "idle"}</span>
+      <span data-testid="member-count">{projectMembers.length}</span>
       <button type="button" onClick={() => onCreateTask?.()}>
         测试新增任务
       </button>
@@ -96,6 +100,7 @@ describe("ProjectGanttPanel", () => {
   beforeEach(() => {
     mocks.get.mockReset();
     mocks.post.mockReset();
+    mocks.put.mockReset();
     mocks.delete.mockReset();
   });
 
@@ -107,6 +112,8 @@ describe("ProjectGanttPanel", () => {
     let taskRequestCount = 0;
     mocks.get.mockImplementation((url: string) => {
       if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
       taskRequestCount += 1;
       return taskRequestCount === 1 ? Promise.resolve([rootTask]) : refresh.promise;
     });
@@ -133,6 +140,8 @@ describe("ProjectGanttPanel", () => {
     let taskRequestCount = 0;
     mocks.get.mockImplementation((url: string) => {
       if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
       taskRequestCount += 1;
       return Promise.resolve(taskRequestCount === 1 ? [rootTask, childTask] : []);
     });
@@ -147,5 +156,26 @@ describe("ProjectGanttPanel", () => {
     await waitFor(() => expect(mocks.delete).toHaveBeenCalledTimes(1));
     expect(mocks.delete).toHaveBeenCalledWith("/api/projects/project-1/gantt-tasks/task-1");
     await waitFor(() => expect(screen.getByTestId("task-count")).toHaveTextContent("0"));
+  });
+
+  it("loads project members and applies the project-wide working-day mode", async () => {
+    mocks.get.mockImplementation((url: string) => {
+      if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([{ id: "member-1", personName: "张三", roleName: "项目经理" }]);
+      if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      return Promise.resolve([rootTask]);
+    });
+    mocks.put.mockResolvedValue({ calendarMode: "WORKING_DAYS", hoursPerDay: 7.5 });
+
+    render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
+
+    const user = userEvent.setup();
+    await waitFor(() => expect(screen.getByTestId("member-count")).toHaveTextContent("1"));
+    await user.click(screen.getByRole("button", { name: "工作日" }));
+
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith(
+      "/api/projects/project-1/gantt-settings",
+      { calendarMode: "WORKING_DAYS" },
+    ));
   });
 });

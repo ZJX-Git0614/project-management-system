@@ -15,7 +15,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { ProjectGanttTask } from "@/domain/models";
+import type { ProjectGanttTask, ProjectMember } from "@/domain/models";
 import type { GanttHierarchyDirection } from "@/lib/gantt-hierarchy";
 import {
   GANTT_COLLAPSED_COLUMN_KEYS,
@@ -32,18 +32,25 @@ import {
 } from "@/lib/gantt-column-layout";
 import {
   addCalendarDays,
-  addDaysInclusive,
   buildGanttDependencyLinks,
   buildGanttRows,
   diffDays,
-  diffDaysInclusive,
   getGanttDateRange,
   parseGanttDate,
 } from "@/lib/gantt";
+import {
+  calculateTaskDurationDays,
+  calculateTaskFinishDate,
+  estimatedHoursForDuration,
+  roundGanttHours,
+  type GanttCalendarMode,
+} from "@/lib/gantt-calendar";
 import { cn } from "@/lib/utils";
 
 interface GanttTimelineProps {
   tasks: ProjectGanttTask[];
+  projectMembers?: ProjectMember[];
+  calendarMode?: GanttCalendarMode;
   showProject?: boolean;
   emptyText?: string;
   canCreate?: boolean;
@@ -64,6 +71,7 @@ interface GanttTimelineProps {
 
 export type GanttTaskDraft = {
   parentId?: string | null;
+  ownerMemberId?: string | null;
   taskCategory: string;
   taskName: string;
   startDate: string;
@@ -153,38 +161,42 @@ const durationFieldClass = cn(
   "px-1 text-center font-mono tabular-nums"
 );
 
-const toTaskDraft = (task: ProjectGanttTask): GanttTaskDraft => ({
+const toTaskDraft = (task: ProjectGanttTask, calendarMode: GanttCalendarMode): GanttTaskDraft => ({
   parentId: task.parentId ?? null,
+  ownerMemberId: task.ownerMemberId ?? null,
   taskCategory: task.taskCategory,
   taskName: task.taskName,
   startDate: task.startDate,
-  endDate: task.finishDate || addDaysInclusive(task.startDate, task.durationDays),
+  endDate: task.finishDate || calculateTaskFinishDate(task.startDate, task.durationDays, calendarMode),
   durationDays: task.durationDays,
   actualStartDate: task.actualStartDate ?? "",
   actualEndDate: task.actualEndDate ?? "",
-  estimatedWorkHours: Math.max(0, task.estimatedWorkHours ?? 0),
-  actualWorkHours: Math.max(0, task.actualWorkHours ?? 0),
+  estimatedWorkHours: estimatedHoursForDuration(task.durationDays),
+  actualWorkHours: roundGanttHours(task.actualWorkHours ?? 0),
   progress: Math.min(100, Math.max(0, task.progress ?? 0)),
   predecessorTaskIds: task.predecessorTaskIds ?? [],
 });
 
-const taskDraftEquals = (task: ProjectGanttTask, draft: GanttTaskDraft) => (
+const taskDraftEquals = (task: ProjectGanttTask, draft: GanttTaskDraft, calendarMode: GanttCalendarMode) => (
   task.taskCategory === draft.taskCategory
     && task.taskName === draft.taskName
     && task.startDate === draft.startDate
-    && (task.finishDate || addDaysInclusive(task.startDate, task.durationDays)) === draft.endDate
+    && (task.finishDate || calculateTaskFinishDate(task.startDate, task.durationDays, calendarMode)) === draft.endDate
     && task.durationDays === draft.durationDays
     && (task.actualStartDate ?? "") === draft.actualStartDate
     && (task.actualEndDate ?? "") === draft.actualEndDate
-    && (task.estimatedWorkHours ?? 0) === draft.estimatedWorkHours
-    && (task.actualWorkHours ?? 0) === draft.actualWorkHours
+    && estimatedHoursForDuration(task.durationDays) === draft.estimatedWorkHours
+    && roundGanttHours(task.actualWorkHours ?? 0) === draft.actualWorkHours
     && (task.progress ?? 0) === draft.progress
     && JSON.stringify(task.predecessorTaskIds ?? []) === JSON.stringify(draft.predecessorTaskIds)
     && (task.parentId ?? null) === (draft.parentId ?? null)
+    && (task.ownerMemberId ?? null) === (draft.ownerMemberId ?? null)
 );
 
 export const GanttTimeline = ({
   tasks,
+  projectMembers = [],
+  calendarMode = "CALENDAR_DAYS",
   emptyText = "暂无甘特任务",
   canCreate = false,
   canEdit = false,
@@ -705,6 +717,8 @@ export const GanttTimeline = ({
                   onToggleHierarchy={() => toggleTaskCollapsed(row.id)}
                   onToggleSelected={() => toggleTaskSelection(row.id)}
                   onUpdateTask={onUpdateTask}
+                  projectMembers={projectMembers}
+                  calendarMode={calendarMode}
                   predecessorOptions={tasks}
                   row={row}
                   taskDepth={taskDepthById.get(row.id) ?? 0}
@@ -785,7 +799,7 @@ export const GanttTimeline = ({
 
             {virtualRows.map(({ row, index: visualIndex }) => {
               const left = diffDays(visibleStartDate, row.startDate) * config.dayWidth;
-              const width = config.dayWidth * Math.max(1, row.durationDays);
+              const width = config.dayWidth * Math.max(1, row.spanDays);
               const showBarLabel = width >= 72;
               const barLabel = row.taskName || row.taskCode;
               const progress = Math.min(100, Math.max(0, row.progress ?? 0));
@@ -1065,7 +1079,55 @@ const TaskGridHeader = ({
   );
 };
 
+const ActualWorkHoursInput = ({
+  disabled,
+  onCommit,
+  value,
+}: {
+  disabled: boolean;
+  onCommit: (value: number) => void;
+  value: number;
+}) => {
+  const [text, setText] = useState(() => roundGanttHours(value).toFixed(2));
+
+  useEffect(() => {
+    setText(roundGanttHours(value).toFixed(2));
+  }, [value]);
+
+  const commit = () => {
+    const next = roundGanttHours(Number(text || 0));
+    setText(next.toFixed(2));
+    onCommit(next);
+  };
+
+  return (
+    <Input
+      type="text"
+      inputMode="decimal"
+      value={text}
+      onFocus={(event) => event.currentTarget.select()}
+      onChange={(event) => {
+        const next = event.target.value.replace(/[^\d.]/g, "");
+        if (/^\d*(?:\.\d{0,2})?$/.test(next)) setText(next);
+      }}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") event.currentTarget.blur();
+        if (event.key === "Escape") {
+          setText(roundGanttHours(value).toFixed(2));
+          event.currentTarget.blur();
+        }
+      }}
+      className={durationFieldClass}
+      disabled={disabled}
+      aria-label="实际工时"
+      title="单位：小时，最多两位小数"
+    />
+  );
+};
+
 const EditableTaskRow = ({
+  calendarMode,
   canCreate,
   canEdit,
   creatingChild,
@@ -1085,6 +1147,7 @@ const EditableTaskRow = ({
   onToggleSelected,
   onUpdateTask,
   predecessorOptions,
+  projectMembers,
   row,
   taskDepth,
   visualTop,
@@ -1094,6 +1157,7 @@ const EditableTaskRow = ({
   collapsed,
   columnWidths,
 }: {
+  calendarMode: GanttCalendarMode;
   canCreate: boolean;
   canEdit: boolean;
   collapsed: boolean;
@@ -1114,6 +1178,7 @@ const EditableTaskRow = ({
   onToggleSelected: () => void;
   onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft) => void | Promise<void>;
   predecessorOptions: ProjectGanttTask[];
+  projectMembers: ProjectMember[];
   row: ReturnType<typeof buildGanttRows>[number];
   taskDepth: number;
   visualTop: number;
@@ -1122,7 +1187,7 @@ const EditableTaskRow = ({
   selectionMode: boolean;
   columnWidths: GanttColumnWidths;
 }) => {
-  const [draft, setDraft] = useState<GanttTaskDraft>(() => toTaskDraft(row));
+  const [draft, setDraft] = useState<GanttTaskDraft>(() => toTaskDraft(row, calendarMode));
   const isChildTask = taskDepth > 0;
   const levelColor = GANTT_DEPTH_COLORS[taskDepth % GANTT_DEPTH_COLORS.length];
   const levelCycle = Math.floor(taskDepth / GANTT_DEPTH_COLORS.length);
@@ -1142,22 +1207,25 @@ const EditableTaskRow = ({
   };
 
   const commitDraft = () => {
-    if (!canEdit || taskDraftEquals(row, draft)) return;
+    if (!canEdit || taskDraftEquals(row, draft, calendarMode)) return;
     void onUpdateTask?.(row, draft);
   };
 
   const withPlannedStart = (current: GanttTaskDraft, value: string): GanttTaskDraft => ({
     ...current,
     startDate: value,
-    endDate: value ? addDaysInclusive(value, current.durationDays) : current.endDate,
+    endDate: value ? calculateTaskFinishDate(value, current.durationDays, calendarMode) : current.endDate,
   });
 
   const withPlannedEnd = (current: GanttTaskDraft, value: string): GanttTaskDraft => ({
     ...current,
     endDate: value,
     durationDays: current.startDate && value
-      ? diffDaysInclusive(current.startDate, value)
+      ? calculateTaskDurationDays(current.startDate, value, calendarMode)
       : current.durationDays,
+    estimatedWorkHours: current.startDate && value
+      ? estimatedHoursForDuration(calculateTaskDurationDays(current.startDate, value, calendarMode))
+      : current.estimatedWorkHours,
   });
 
   const withActualStart = (current: GanttTaskDraft, value: string): GanttTaskDraft => ({
@@ -1183,21 +1251,21 @@ const EditableTaskRow = ({
   ) => {
     const nextDraft = builder(draft, value);
     setDraft(nextDraft);
-    if (canEdit && !taskDraftEquals(row, nextDraft)) {
+    if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
       void onUpdateTask?.(row, nextDraft);
     }
   };
 
   useEffect(() => {
-    setDraft(toTaskDraft(row));
-  }, [row]);
+    setDraft(toTaskDraft(row, calendarMode));
+  }, [calendarMode, row]);
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement | HTMLSelectElement>) => {
     if (event.key === "Enter") {
       event.currentTarget.blur();
     }
     if (event.key === "Escape") {
-      setDraft(toTaskDraft(row));
+      setDraft(toTaskDraft(row, calendarMode));
       event.currentTarget.blur();
     }
   };
@@ -1360,6 +1428,27 @@ const EditableTaskRow = ({
       </div>
       {!collapsed && (
         <>
+          <Select
+            value={draft.ownerMemberId ?? ""}
+            aria-label="负责人"
+            onChange={(event) => {
+              const nextDraft = { ...draft, ownerMemberId: event.target.value || null };
+              setDraft(nextDraft);
+              if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
+                void onUpdateTask?.(row, nextDraft);
+              }
+            }}
+            className={inlineSelectClass}
+            variant="ghost"
+            disabled={!canEdit || isSaving}
+          >
+            <option value="">未分配</option>
+            {projectMembers.map((member) => (
+              <option key={member.id} value={member.id}>
+                {member.personName}（{member.roleName}）
+              </option>
+            ))}
+          </Select>
           <Input
             type="text"
             inputMode="numeric"
@@ -1372,7 +1461,8 @@ const EditableTaskRow = ({
               setDraft((current) => ({
                 ...current,
                 durationDays,
-                endDate: current.startDate ? addDaysInclusive(current.startDate, durationDays) : current.endDate,
+                endDate: current.startDate ? calculateTaskFinishDate(current.startDate, durationDays, calendarMode) : current.endDate,
+                estimatedWorkHours: estimatedHoursForDuration(durationDays),
               }));
             }}
             onKeyDown={handleKeyDown}
@@ -1413,30 +1503,23 @@ const EditableTaskRow = ({
             min={draft.actualStartDate || undefined}
           />
           <Input
-            type="number"
-            min={0}
-            step="0.5"
-            value={draft.estimatedWorkHours}
-            onBlur={commitDraft}
-            onChange={(event) => updateDraft("estimatedWorkHours", Math.max(0, Number(event.target.value) || 0))}
-            onKeyDown={handleKeyDown}
+            type="text"
+            value={roundGanttHours(draft.estimatedWorkHours).toFixed(2)}
             className={durationFieldClass}
-            disabled={!canEdit || isSaving}
+            readOnly
             aria-label="预计工时"
-            title="单位：小时"
+            title="按工期 × 7.5 小时自动计算"
           />
-          <Input
-            type="number"
-            min={0}
-            step="0.5"
+          <ActualWorkHoursInput
             value={draft.actualWorkHours}
-            onBlur={commitDraft}
-            onChange={(event) => updateDraft("actualWorkHours", Math.max(0, Number(event.target.value) || 0))}
-            onKeyDown={handleKeyDown}
-            className={durationFieldClass}
             disabled={!canEdit || isSaving}
-            aria-label="实际工时"
-            title="单位：小时"
+            onCommit={(value) => {
+              const nextDraft = { ...draft, actualWorkHours: value };
+              setDraft(nextDraft);
+              if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
+                void onUpdateTask?.(row, nextDraft);
+              }
+            }}
           />
           <div className="flex min-w-0 items-center gap-1">
             <Input
@@ -1461,7 +1544,7 @@ const EditableTaskRow = ({
             onChange={(value) => {
               const nextDraft = { ...draft, predecessorTaskIds: value ? [value] : [] };
               setDraft(nextDraft);
-              if (canEdit && !taskDraftEquals(row, nextDraft)) {
+              if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
                 void onUpdateTask?.(row, nextDraft);
               }
             }}

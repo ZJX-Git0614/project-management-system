@@ -16,11 +16,14 @@ export interface Project extends BaseEntity {
   startDate: string;
   expectedEndDate: string;
   status: ProjectStatus;
+  ganttCalendarMode?: "CALENDAR_DAYS" | "WORKING_DAYS";
 }
 
 export interface ProjectGanttTask extends BaseEntity {
   projectId: string;
   parentId?: string | null;
+  ownerMemberId?: string | null;
+  ownerMember?: Pick<ProjectMember, "id" | "personName" | "roleName"> | null;
   taskCode: string;
   taskCategory: string;
   taskName: string;

@@ -8,8 +8,13 @@ import {
   renumberGanttTaskCodes,
 } from "@/lib/gantt-task-codes";
 import { changeGanttTaskHierarchy, type GanttHierarchyDirection } from "@/lib/gantt-hierarchy";
+import { normalizeGanttCalendarMode, type GanttCalendarMode } from "@/lib/gantt-calendar";
+import { scheduleGanttTasks } from "@/lib/gantt-schedule";
 
 const ganttTaskInclude = {
+  ownerMember: {
+    select: { id: true, personName: true, roleName: true },
+  },
   predecessorDependencies: {
     orderBy: { createdAt: "asc" },
     include: {
@@ -66,6 +71,54 @@ export const getOrderedGanttTasks = async (projectId: string) => {
   }
 
   return orderGanttTasksByHierarchy(normalizedTasks);
+};
+
+export const getProjectGanttCalendarMode = async (projectId: string): Promise<GanttCalendarMode> => {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: { ganttCalendarMode: true },
+  });
+  return normalizeGanttCalendarMode(project?.ganttCalendarMode);
+};
+
+export const recalculateProjectGanttSchedule = async (
+  projectId: string,
+  requestedMode?: GanttCalendarMode,
+) => {
+  const mode = requestedMode ?? await getProjectGanttCalendarMode(projectId);
+  const tasks = await prisma.projectGanttTask.findMany({
+    where: { projectId },
+    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+    include: {
+      predecessorDependencies: {
+        select: { predecessorTaskId: true, type: true, lag: true },
+      },
+    },
+  });
+  const scheduled = scheduleGanttTasks(tasks, mode);
+  const currentById = new Map(tasks.map((task) => [task.id, task]));
+  const updates = scheduled.filter((task) => {
+    const current = currentById.get(task.id)!;
+    return current.startDate !== task.startDate
+      || current.finishDate !== task.finishDate
+      || current.durationDays !== task.durationDays
+      || current.durationMinutes !== task.durationMinutes
+      || Math.abs(current.estimatedWorkHours - task.estimatedWorkHours) > 0.001;
+  });
+
+  if (updates.length > 0) {
+    await prisma.$transaction(updates.map((task) => prisma.projectGanttTask.update({
+      where: { id: task.id },
+      data: {
+        startDate: task.startDate,
+        finishDate: task.finishDate,
+        durationDays: task.durationDays,
+        durationMinutes: task.durationMinutes,
+        estimatedWorkHours: task.estimatedWorkHours,
+      },
+    })));
+  }
+  return mode;
 };
 
 export const replaceGanttTaskDependencies = async (

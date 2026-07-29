@@ -8,12 +8,15 @@ import { XMLBuilder, XMLParser } from "fast-xml-parser";
 
 import type { ProjectGanttTask } from "@/domain/models";
 import { addDaysInclusive } from "@/lib/gantt";
+import { estimatedHoursForDuration, roundGanttHours } from "@/lib/gantt-calendar";
 
 export interface ImportedGanttTask {
   externalId: string;
   databaseId?: string;
   parentExternalId: string | null;
   parentDatabaseId?: string | null;
+  ownerMemberId?: string | null;
+  ownerName?: string;
   taskCategory: string;
   taskName: string;
   startDate: string;
@@ -228,7 +231,7 @@ export const parseProjectXmlBundle = (xml: string): GanttImportBundle => {
   const taskContainer = project?.Tasks as Record<string, unknown> | undefined;
   const rawTasks = asArray(taskContainer?.Task as Record<string, unknown> | Record<string, unknown>[] | undefined);
   if (rawTasks.length === 0) throw new Error("Project 文件中没有可导入的任务");
-  const minutesPerDay = Math.max(1, numberValue(project?.MinutesPerDay, 480));
+  const minutesPerDay = Math.max(1, numberValue(project?.MinutesPerDay, 450));
 
   const stack: Array<{ level: number; externalId: string }> = [];
   const imported: ImportedGanttTask[] = [];
@@ -262,6 +265,7 @@ export const parseProjectXmlBundle = (xml: string): GanttImportBundle => {
     imported.push({
       externalId,
       parentExternalId,
+      ownerName: text(rawTask.Text2),
       taskCategory: "",
       taskName,
       startDate,
@@ -354,6 +358,8 @@ export const parseGanttExcel = (buffer: Buffer, fallbackStartDate = ""): Importe
       databaseId: text(excelValue(row, "系统任务键", "System Task Key")),
       parentExternalId: text(excelValue(row, "父任务ID", "Parent Task ID", "Parent ID")) || null,
       parentDatabaseId: text(excelValue(row, "系统父任务键", "System Parent Task Key")) || null,
+      ownerMemberId: text(excelValue(row, "系统负责人键", "System Owner Key")) || null,
+      ownerName: text(excelValue(row, "负责人", "Owner", "Resource Name")),
       taskCategory: text(excelValue(row, "任务类别", "Category")),
       taskName,
       startDate,
@@ -362,7 +368,7 @@ export const parseGanttExcel = (buffer: Buffer, fallbackStartDate = ""): Importe
         ? explicitDuration
         : durationBetween(startDate, finishDate),
       durationMinutes: Math.max(0, Math.round(numberValue(excelValue(row, "工期(分钟)", "Duration Minutes"), 0)))
-        || (Number.isInteger(explicitDuration) && explicitDuration > 0 ? explicitDuration * 480 : durationBetween(startDate, finishDate) * 480),
+        || (Number.isInteger(explicitDuration) && explicitDuration > 0 ? explicitDuration * 450 : durationBetween(startDate, finishDate) * 450),
       durationFormat: Math.round(numberValue(excelValue(row, "工期格式", "Duration Format"), 7)),
       actualStartDate: dateOnly(excelValue(row, "实际开始", "Actual Start")),
       actualEndDate: dateOnly(excelValue(row, "实际完成", "Actual Finish")),
@@ -441,17 +447,18 @@ export const buildGanttExcel = (tasks: ProjectGanttTask[]) => {
     父任务ID: task.parentId ? taskById.get(task.parentId)?.taskCode ?? "" : "",
     任务类别: task.taskCategory,
     任务名称: task.taskName,
+    负责人: task.ownerMember?.personName ?? "",
     计划开始: task.startDate,
     计划完成: task.finishDate || addDaysInclusive(task.startDate, task.durationDays),
     "工期(天)": task.durationDays,
-    "工期(分钟)": task.durationMinutes || task.durationDays * 480,
+    "工期(分钟)": task.durationMinutes || task.durationDays * 450,
     任务模式: task.taskMode ?? "AUTO",
     里程碑: task.isMilestone ? "是" : "否",
     WBS: task.wbsCode || task.taskCode.replace(/^Task/, ""),
     实际开始: task.actualStartDate,
     实际完成: task.actualEndDate,
-    "预计工时(小时)": task.estimatedWorkHours ?? 0,
-    "实际工时(小时)": task.actualWorkHours ?? 0,
+    "预计工时(小时)": estimatedHoursForDuration(task.durationDays),
+    "实际工时(小时)": roundGanttHours(task.actualWorkHours ?? 0),
     "当前进度(%)": task.progress,
     紧前任务ID: task.predecessorTaskIds?.map((id) => taskById.get(id)?.taskCode).filter(Boolean).join(",") || task.predecessorTask,
     基线开始: task.baselineStartDate ?? "",
@@ -462,14 +469,15 @@ export const buildGanttExcel = (tasks: ProjectGanttTask[]) => {
     系统任务键: task.id,
     系统父任务键: task.parentId ?? "",
     系统紧前任务键: task.predecessorTaskIds?.join(",") ?? "",
+    系统负责人键: task.ownerMemberId ?? "",
   }));
   const worksheet = XLSX.utils.json_to_sheet(rows);
   worksheet["!cols"] = [
-    { wch: 14 }, { wch: 14 }, { wch: 18 }, { wch: 32 }, { wch: 14 }, { wch: 14 },
+    { wch: 14 }, { wch: 14 }, { wch: 18 }, { wch: 32 }, { wch: 16 }, { wch: 14 }, { wch: 14 },
     { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 14 },
     { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 24 },
     { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 16 },
-    { hidden: true }, { hidden: true }, { hidden: true },
+    { hidden: true }, { hidden: true }, { hidden: true }, { hidden: true },
   ];
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "项目进度");
@@ -478,7 +486,7 @@ export const buildGanttExcel = (tasks: ProjectGanttTask[]) => {
 
 export const buildGanttExcelTemplate = () => {
   const headers = [
-    "任务ID", "父任务ID", "任务类别", "任务名称", "计划开始", "计划完成", "工期(天)",
+    "任务ID", "父任务ID", "任务类别", "任务名称", "负责人", "计划开始", "计划完成", "工期(天)",
     "预计工时(小时)", "实际开始", "实际完成", "实际工时(小时)", "当前进度(%)", "紧前任务ID",
     "任务模式", "里程碑", "WBS", "基线开始", "基线完成", "基线成本", "完工预算(BAC)", "实际成本(AC)",
   ];
@@ -550,7 +558,7 @@ export const buildProjectXml = (
         .map((name) => uidByTaskName.get(name.trim()))
         .filter((uid): uid is number => Boolean(uid))
         .map((uid) => ({ PredecessorUID: uid, Type: 1, CrossProject: 0, LinkLag: 0, LagFormat: 7 }));
-    const durationMinutes = task.isMilestone ? 0 : (task.durationMinutes || task.durationDays * 480);
+    const durationMinutes = task.isMilestone ? 0 : (task.durationMinutes || task.durationDays * 450);
     const finishDate = task.finishDate || addDaysInclusive(task.startDate, task.durationDays);
     const baselines = Array.isArray(task.baselines) && task.baselines.length > 0
       ? task.baselines
@@ -575,13 +583,14 @@ export const buildProjectXml = (
       OutlineLevel: depth,
       Manual: task.taskMode === "MANUAL" ? 1 : 0,
       Text1: task.taskCategory,
+      Text2: task.ownerMember?.personName ?? "",
       Priority: 500,
       Start: isoDateTime(task.startDate),
       Finish: isoDateTime(finishDate),
       Duration: durationMinutesToIso(durationMinutes),
       DurationFormat: task.durationFormat ?? 7,
-      Work: durationMinutesToIso(Math.round((task.estimatedWorkHours ?? 0) * 60) || durationMinutes),
-      ActualWork: durationMinutesToIso(Math.round((task.actualWorkHours ?? 0) * 60)),
+      Work: durationMinutesToIso(Math.round(estimatedHoursForDuration(task.durationDays) * 60)),
+      ActualWork: durationMinutesToIso(Math.round(roundGanttHours(task.actualWorkHours ?? 0) * 60)),
       ResumeValid: 0,
       EffortDriven: 0,
       Recurring: 0,
@@ -625,13 +634,13 @@ export const buildProjectXml = (
       CurrencyDigits: 2,
       CurrencySymbol: "¥",
       CurrencyCode: "CNY",
-      MinutesPerDay: 480,
-      MinutesPerWeek: 2400,
+      ...(metadata?.projectSettings ?? {}),
+      MinutesPerDay: 450,
+      MinutesPerWeek: 2250,
       DaysPerMonth: 20,
       DefaultStartTime: "08:00:00",
       DefaultFinishTime: "17:00:00",
       CalendarUID: 1,
-      ...(metadata?.projectSettings ?? {}),
       Name: projectName,
       Title: projectName,
       LastSaved: now,

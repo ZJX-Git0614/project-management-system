@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, Download, FileSpreadsheet, FileType2, Maximize2, Minimize2, Upload } from "lucide-react";
+import { BriefcaseBusiness, CalendarDays, ChevronDown, Download, FileSpreadsheet, FileType2, Maximize2, Minimize2, Upload } from "lucide-react";
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -25,11 +25,12 @@ import { useConfirm } from "@/components/confirm-provider";
 import { usePermission } from "@/lib/use-permission";
 import { api } from "@/lib/api-client";
 import { buildGanttRows, getGanttDateRange } from "@/lib/gantt";
+import { calculateTaskDurationDays, type GanttCalendarMode } from "@/lib/gantt-calendar";
 import { renumberGanttTaskCodes } from "@/lib/gantt-task-codes";
 import { changeGanttTaskHierarchy, type GanttHierarchyDirection } from "@/lib/gantt-hierarchy";
 import { cn } from "@/lib/utils";
 import { ProjectStatus } from "@/domain/enums";
-import type { ProjectGanttTask } from "@/domain/models";
+import type { ProjectGanttTask, ProjectMember } from "@/domain/models";
 
 interface ProjectGanttPanelProps {
   projectId: string;
@@ -43,6 +44,11 @@ interface FetchTasksOptions {
 
 interface GanttTransferCapabilities {
   mppExport: boolean;
+}
+
+interface GanttSettings {
+  calendarMode: GanttCalendarMode;
+  hoursPerDay: number;
 }
 
 type ScheduleImportPreview = {
@@ -66,6 +72,9 @@ type ScheduleImportPreview = {
 
 export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPanelProps) => {
   const [tasks, setTasks] = useState<ProjectGanttTask[]>([]);
+  const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([]);
+  const [calendarMode, setCalendarMode] = useState<GanttCalendarMode>("CALENDAR_DAYS");
+  const [savingCalendarMode, setSavingCalendarMode] = useState(false);
   const [loading, setLoading] = useState(true);
   const [creatingParentId, setCreatingParentId] = useState<string | null>(null);
   const [savingTaskId, setSavingTaskId] = useState<string | null>(null);
@@ -112,6 +121,17 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   useEffect(() => {
     void Promise.resolve().then(() => fetchTasks({ showLoading: true, clearOnError: true }));
   }, [fetchTasks]);
+
+  useEffect(() => {
+    if (!projectId) return;
+    void Promise.all([
+      api.get<ProjectMember[]>(`/api/projects/${projectId}/members`).then(setProjectMembers),
+      api.get<GanttSettings>(`/api/projects/${projectId}/gantt-settings`).then((settings) => setCalendarMode(settings.calendarMode)),
+    ]).catch(() => {
+      setProjectMembers([]);
+      setCalendarMode("CALENDAR_DAYS");
+    });
+  }, [projectId]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -213,9 +233,10 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
         taskName: "",
         startDate,
         durationDays: 1,
+        ownerMemberId: null,
         actualStartDate: "",
         actualEndDate: "",
-        estimatedWorkHours: 0,
+        estimatedWorkHours: 7.5,
         actualWorkHours: 0,
         progress: 0,
         predecessorTaskIds: [],
@@ -243,11 +264,8 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     }
     setSavingTaskId(task.id);
     try {
-      const updated = await api.put<ProjectGanttTask>(`/api/projects/${projectId}/gantt-tasks/${task.id}`, draft);
-      setTasks((prev) => prev.map((item) => (item.id === task.id ? updated : item)));
-      if (task.taskCategory !== draft.taskCategory) {
-        await fetchTasks();
-      }
+      await api.put<ProjectGanttTask>(`/api/projects/${projectId}/gantt-tasks/${task.id}`, draft);
+      await fetchTasks();
     } catch (error) {
       alert(error instanceof Error ? error.message : "保存失败");
       await fetchTasks();
@@ -335,6 +353,22 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     }
   };
 
+  const changeCalendarMode = async (nextMode: GanttCalendarMode) => {
+    if (nextMode === calendarMode || savingCalendarMode || !canEdit) return;
+    setSavingCalendarMode(true);
+    try {
+      const settings = await api.put<GanttSettings>(`/api/projects/${projectId}/gantt-settings`, {
+        calendarMode: nextMode,
+      });
+      setCalendarMode(settings.calendarMode);
+      await fetchTasks();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "工期计算方式保存失败");
+    } finally {
+      setSavingCalendarMode(false);
+    }
+  };
+
   if (loading) {
     return <div className="text-sm text-muted-foreground">加载中...</div>;
   }
@@ -363,7 +397,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                 <div className="mr-1 grid grid-cols-3 gap-3 text-right text-xs">
                   <div>
                     <div className="text-muted-foreground">总工期</div>
-                    <div className="font-semibold">{range.totalDays} 天</div>
+                    <div className="font-semibold">{calculateTaskDurationDays(range.startDate, range.endDate, calendarMode)} 天</div>
                   </div>
                   <div>
                     <div className="text-muted-foreground">任务数</div>
@@ -375,6 +409,30 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   </div>
                 </div>
               )}
+              <div className="flex h-8 items-center rounded-md border border-border bg-background p-0.5" title="工作日按中国法定节假日及调休日历计算，每天 7.5 小时">
+                <button
+                  type="button"
+                  className={cn(
+                    "flex h-6 items-center gap-1 rounded px-2 text-[11px] transition-colors",
+                    calendarMode === "CALENDAR_DAYS" ? "bg-accent text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+                  )}
+                  disabled={!canEdit || savingCalendarMode}
+                  onClick={() => void changeCalendarMode("CALENDAR_DAYS")}
+                >
+                  <CalendarDays className="size-3" />自然日
+                </button>
+                <button
+                  type="button"
+                  className={cn(
+                    "flex h-6 items-center gap-1 rounded px-2 text-[11px] transition-colors",
+                    calendarMode === "WORKING_DAYS" ? "bg-accent text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+                  )}
+                  disabled={!canEdit || savingCalendarMode}
+                  onClick={() => void changeCalendarMode("WORKING_DAYS")}
+                >
+                  <BriefcaseBusiness className="size-3" />工作日
+                </button>
+              </div>
               {canCreate && (
                 <>
                   <input
@@ -448,12 +506,14 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
             creatingParentId={creatingParentId}
             deletingSelected={deletingSelected}
             fullScreen={fullScreen}
+            calendarMode={calendarMode}
             hierarchyChanging={hierarchyChanging}
             onChangeHierarchy={handleChangeHierarchy}
             onCreateTask={startCreate}
             onDeleteSelected={handleDeleteSelected}
             onReorderTasks={handleReorderTasks}
             onUpdateTask={handleUpdateTask}
+            projectMembers={projectMembers}
             reordering={reordering}
             savingTaskId={savingTaskId}
             tasks={tasks}

@@ -8,6 +8,7 @@ export interface GanttDateRange {
 
 export interface GanttRow extends ProjectGanttTask {
   endDate: string;
+  spanDays: number;
   offsetDays: number;
   leftPercent: number;
   widthPercent: number;
@@ -172,15 +173,15 @@ export const buildGanttRows = (tasks: ProjectGanttTask[]): GanttRow[] => {
   return tasks.map((task) => {
     const endDate = task.finishDate || addDaysInclusive(task.startDate, task.durationDays);
     const offsetDays = diffDaysInclusive(range.startDate, task.startDate) - 1;
-    const durationDays = Math.max(1, diffDaysInclusive(task.startDate, endDate));
+    const spanDays = Math.max(1, diffDaysInclusive(task.startDate, endDate));
 
     return {
       ...task,
-      durationDays,
       endDate,
+      spanDays,
       offsetDays,
       leftPercent: Math.round((offsetDays / range.totalDays) * 100),
-      widthPercent: Math.max(4, Math.round((durationDays / range.totalDays) * 100)),
+      widthPercent: Math.max(4, Math.round((spanDays / range.totalDays) * 100)),
       isCritical: criticalIds.has(task.id),
     };
   });
