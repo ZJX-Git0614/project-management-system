@@ -325,11 +325,11 @@ export function SystemBackupPanel() {
               </Field>
             </div>
 
-            <Field label="本机备份目录">
+            <Field label="服务器备份目录">
               <div className="flex gap-2">
                 <Input className="min-w-0 flex-1" value={draft.localDirectory} onChange={(event) => setDraft({ ...draft, localDirectory: event.target.value })} />
-                <Button type="button" variant="outline" size="sm" className="h-9 shrink-0 px-3 text-xs" onClick={() => void openDirectoryPicker()}>
-                  <FolderOpen className="size-3.5" /> 选择目录
+                <Button type="button" variant="outline" size="sm" className="h-9 shrink-0 px-3 text-xs" onClick={() => void openDirectoryPicker()} title="浏览服务器或 Docker 已挂载的目录">
+                  <FolderOpen className="size-3.5" /> 浏览目录
                 </Button>
               </div>
             </Field>
@@ -472,14 +472,14 @@ export function SystemBackupPanel() {
       <Dialog open={directoryPickerOpen} onOpenChange={setDirectoryPickerOpen}>
         <DialogContent className="w-[min(1040px,calc(100vw-32px))] max-w-none overflow-hidden">
           <DialogHeader>
-            <DialogTitle>选择本机备份目录</DialogTitle>
-            <DialogDescription className="sr-only">
-              按文件夹层级浏览服务器允许访问的目录，并将当前目录设置为系统备份位置。
+            <DialogTitle>选择服务器备份目录</DialogTitle>
+            <DialogDescription>
+              自动备份由服务器执行，这里仅显示服务器或 Docker 已挂载且可写的目录。
             </DialogDescription>
           </DialogHeader>
           <div className="min-w-0 overflow-hidden rounded-md border border-border bg-background/55">
             <div className="flex min-h-[460px] max-h-[68vh] min-w-0">
-              <aside className="w-52 shrink-0 border-r border-border bg-muted/15 p-2">
+              <aside className="w-52 shrink-0 overflow-hidden border-r border-border bg-muted/15 p-2">
                 <div className="px-2 pb-2 pt-1 text-[10px] font-medium uppercase text-muted-foreground">存储位置</div>
                 <div className="space-y-1">
                   {directoryData?.roots.map((root) => {
@@ -495,9 +495,9 @@ export function SystemBackupPanel() {
                         onClick={() => void loadDirectories(root.path)}
                       >
                         <HardDrive className={cn("size-4 shrink-0", active ? "text-primary" : "text-muted-foreground")} />
-                        <span className="min-w-0">
+                        <span className="min-w-0 flex-1 overflow-hidden">
                           <span className="block truncate font-medium">{root.name}</span>
-                          <span className="block truncate text-[9px] text-muted-foreground/75">{root.path}</span>
+                          <span className="block truncate text-[9px] text-muted-foreground/75" title={root.path}>{root.path}</span>
                         </span>
                       </button>
                     );

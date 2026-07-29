@@ -84,6 +84,16 @@ const MIN_TIMELINE_WIDTH = 860;
 const ZOOM_LEVELS = [1, 3, 8, 20, 60];
 const ZOOM_LABELS = ["60天", "30天", "15天", "5天", "1天"];
 const DEFAULT_ZOOM_INDEX = 2;
+const GANTT_DEPTH_COLORS = [
+  { hue: 214, saturation: 66, lightness: 58 },
+  { hue: 192, saturation: 58, lightness: 52 },
+  { hue: 168, saturation: 48, lightness: 48 },
+  { hue: 42, saturation: 62, lightness: 56 },
+  { hue: 276, saturation: 48, lightness: 65 },
+  { hue: 342, saturation: 52, lightness: 62 },
+  { hue: 24, saturation: 58, lightness: 58 },
+  { hue: 228, saturation: 48, lightness: 66 },
+] as const;
 type DropPosition = "before" | "after";
 
 const GanttDividerToggle = ({
@@ -100,7 +110,7 @@ const GanttDividerToggle = ({
   <button
     type="button"
     className={cn(
-      "group absolute z-[76] flex h-24 w-4 items-center justify-center border-0 bg-transparent p-0 outline-none",
+      "group absolute z-[76] flex h-16 w-6 items-center justify-center !border-0 !bg-transparent p-0 text-muted-foreground/55 !shadow-none outline-none transition-[color,transform] duration-200 hover:!bg-transparent hover:text-primary focus-visible:!bg-transparent focus-visible:text-primary",
       className,
     )}
     style={style}
@@ -108,17 +118,9 @@ const GanttDividerToggle = ({
     title={collapsed ? "展开列" : "折叠列"}
     aria-label={collapsed ? "展开列" : "折叠列"}
   >
-    <span className="absolute h-20 w-px bg-border/80 transition-[width,background-color,box-shadow] duration-200 group-hover:w-0.5 group-hover:bg-primary/75 group-focus-visible:w-0.5 group-focus-visible:bg-primary/75" />
-    <span
-      className={cn(
-        "relative z-10 flex h-7 w-3 items-center justify-center rounded-sm border border-primary/25 bg-card/95 text-primary opacity-55 shadow-sm transition-[opacity,transform,box-shadow] duration-200 group-hover:opacity-100 group-focus-visible:opacity-100",
-        collapsed
-          ? "group-hover:translate-x-0.5 group-hover:shadow-[4px_0_12px_hsl(var(--primary)/0.28)]"
-          : "group-hover:-translate-x-0.5 group-hover:shadow-[-4px_0_12px_hsl(var(--primary)/0.28)]",
-      )}
-    >
-      {collapsed ? <ChevronRight className="size-2.5" /> : <ChevronLeft className="size-2.5" />}
-    </span>
+    {collapsed
+      ? <ChevronRight className="size-4 transition-transform group-hover:translate-x-0.5" strokeWidth={1.8} />
+      : <ChevronLeft className="size-4 transition-transform group-hover:-translate-x-0.5" strokeWidth={1.8} />}
   </button>
 );
 
@@ -237,18 +239,6 @@ export const GanttTimeline = ({
     }
     return true;
   }), [collapsedTaskIds, rowByTaskId, rows]);
-  const stripeIndexByTaskId = useMemo(() => {
-    const stripes = new Map<string, number>();
-    let previousDepth: number | null = null;
-    let stripeIndex = 0;
-    visibleRows.forEach((row) => {
-      const depth = taskDepthById.get(row.id) ?? 0;
-      stripeIndex = depth === previousDepth ? stripeIndex + 1 : 0;
-      stripes.set(row.id, stripeIndex);
-      previousDepth = depth;
-    });
-    return stripes;
-  }, [taskDepthById, visibleRows]);
   const virtualRows = useMemo(() => visibleRows
     .slice(virtualRange.start, virtualRange.end)
     .map((row, offset) => ({ row, index: virtualRange.start + offset })), [virtualRange, visibleRows]);
@@ -718,7 +708,6 @@ export const GanttTimeline = ({
                   predecessorOptions={tasks}
                   row={row}
                   taskDepth={taskDepthById.get(row.id) ?? 0}
-                  stripeIndex={stripeIndexByTaskId.get(row.id) ?? 0}
                   selected={selectedTaskIds.includes(row.id)}
                   selectionLocked={isSelectedByAncestor(row.id)}
                   selectionMode={selectionMode}
@@ -1097,7 +1086,6 @@ const EditableTaskRow = ({
   onUpdateTask,
   predecessorOptions,
   row,
-  stripeIndex,
   taskDepth,
   visualTop,
   selected,
@@ -1127,7 +1115,6 @@ const EditableTaskRow = ({
   onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft) => void | Promise<void>;
   predecessorOptions: ProjectGanttTask[];
   row: ReturnType<typeof buildGanttRows>[number];
-  stripeIndex: number;
   taskDepth: number;
   visualTop: number;
   selected: boolean;
@@ -1137,11 +1124,13 @@ const EditableTaskRow = ({
 }) => {
   const [draft, setDraft] = useState<GanttTaskDraft>(() => toTaskDraft(row));
   const isChildTask = taskDepth > 0;
-  const levelHue = (208 + taskDepth * 47) % 360;
+  const levelColor = GANTT_DEPTH_COLORS[taskDepth % GANTT_DEPTH_COLORS.length];
+  const levelCycle = Math.floor(taskDepth / GANTT_DEPTH_COLORS.length);
+  const levelLightness = Math.max(42, levelColor.lightness - levelCycle * 6);
   const levelRowStyle = {
-    "--gantt-level-row": `hsl(${levelHue} 68% 50% / ${stripeIndex % 2 === 0 ? 0.045 : 0.085})`,
-    "--gantt-level-hover": `hsl(${levelHue} 72% 52% / 0.14)`,
-    "--gantt-level-accent": `hsl(${levelHue} 72% 55% / 0.72)`,
+    "--gantt-level-row": `hsl(${levelColor.hue} ${levelColor.saturation}% ${levelLightness}% / 0.024)`,
+    "--gantt-level-hover": `hsl(${levelColor.hue} ${levelColor.saturation}% ${levelLightness}% / 0.08)`,
+    "--gantt-level-accent": `hsl(${levelColor.hue} ${levelColor.saturation}% ${levelLightness}% / 0.68)`,
   } as CSSProperties & Record<"--gantt-level-row" | "--gantt-level-hover" | "--gantt-level-accent", string>;
 
   const updateDraft = <K extends keyof GanttTaskDraft>(key: K, value: GanttTaskDraft[K]) => {
@@ -1220,7 +1209,7 @@ const EditableTaskRow = ({
         "bg-[var(--gantt-level-row)] hover:bg-[var(--gantt-level-hover)]",
         row.isCritical
           ? "shadow-[inset_3px_0_0_hsl(var(--destructive))]"
-          : "shadow-[inset_3px_0_0_var(--gantt-level-accent)]",
+          : "shadow-[inset_2px_0_0_var(--gantt-level-accent)]",
         selected && "!bg-primary/15 hover:!bg-primary/20",
         dragged && "scale-[0.995] opacity-45 shadow-lg",
         dropPosition && "!bg-primary/10"
@@ -1310,7 +1299,7 @@ const EditableTaskRow = ({
         ) : <span className="size-4 shrink-0" aria-hidden="true" />}
         {isChildTask && <span className="h-px w-2 shrink-0 bg-[var(--gantt-level-accent)]" />}
         <span
-          className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap pr-12 font-mono text-[11px] font-semibold text-muted-foreground"
+          className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap pr-12 font-mono text-[11px] font-semibold text-[var(--gantt-level-accent)]"
           title={row.taskCode || row.id}
         >
           {row.taskCode || `Task${index + 1}`}
