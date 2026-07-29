@@ -5,16 +5,30 @@ import { dirname, extname, basename } from "node:path";
 import type { AssistantActionRun } from "@prisma/client";
 
 import { userHasPermission, type AuthenticatedUser } from "@/lib/server-auth";
-import type { AssistantRuntimeConfig } from "@/lib/assistant-settings";
+import {
+  getAssistantToolDefinition,
+  loadAssistantRuntimeConfig,
+  validateAssistantToolArgs,
+  type AssistantRuntimeConfig,
+} from "@/lib/assistant-settings";
 import { prisma } from "@/lib/prisma";
 import { buildAssistantStoredName, getAssistantArtifactPath, getAssistantAttachmentPath } from "@/lib/assistant-artifact-storage";
 import { nextRiskCode } from "@/lib/risk-register-codes";
-import { mergeScheduleFiles, SCHEDULE_MERGE_EXTENSIONS } from "@/lib/schedule-file-merge";
+import {
+  convertScheduleFile,
+  mergeScheduleFiles,
+  SCHEDULE_CONVERT_EXTENSIONS,
+  SCHEDULE_MERGE_EXTENSIONS,
+} from "@/lib/schedule-file-merge";
 import {
   changeProjectGanttTaskHierarchy,
   getOrderedGanttTasks,
   renumberProjectGanttTaskCodes,
 } from "@/lib/gantt-task-service";
+import { parseGanttImportFile } from "@/lib/gantt-file-transfer";
+import { analyzeSchedule } from "@/lib/schedule-analysis";
+import { buildImportedScheduleSnapshot, getCurrentScheduleSnapshot } from "@/lib/schedule-snapshot";
+import { isDocumentRevisionRequest, reviseDocumentsWithSmallModel } from "@/lib/assistant-document-revision";
 
 export type AssistantActionView = {
   id: string;
@@ -25,6 +39,8 @@ export type AssistantActionView = {
   status: string;
   expiresAt: string;
   result?: Record<string, unknown>;
+  planId?: string;
+  planStepId?: string;
 };
 
 const parseJson = (value: string) => {
@@ -47,6 +63,8 @@ export const serializeAssistantAction = (action: AssistantActionRun): AssistantA
     status: action.status,
     expiresAt: action.expiresAt.toISOString(),
     result: action.resultJson && action.resultJson !== "{}" ? parseJson(action.resultJson) : undefined,
+    planId: action.planId || undefined,
+    planStepId: action.planStepId || undefined,
   };
 };
 
@@ -170,6 +188,19 @@ export const isScheduleMergeRequest = (message: string) => (
   && /(生成|制作|导出|下载|可导入|模板|文件|表格|计划)/u.test(message)
 );
 
+export const isScheduleConversionRequest = (message: string) => {
+  if (/(合并|整合|汇总|合成|合二为一|拼接)/u.test(message)) return false;
+  const asksForTransformation = /(输出|导出|下载|转换|转成|转为|整理成|做成|生成|制作)/u.test(message);
+  const mentionsScheduleInput = /(mpp|project\s*xml|\.xml|\.xlsx|excel|甘特|进度|计划|排期|附件|文件)/iu.test(message);
+  const mentionsSupportedOutput = /(系统.{0,12}(甘特|任务|进度|导入|excel)|甘特.{0,12}(任务|格式|文件|excel)|可导入.{0,12}(格式|文件|excel)|excel)/iu.test(message);
+  return asksForTransformation && mentionsScheduleInput && mentionsSupportedOutput;
+};
+
+export const isScheduleComparisonRequest = (message: string) => (
+  /(对比|比较|分析|检查|核对).{0,24}(当前|现有|实际|甘特|进度|计划)|(当前|现有|实际|甘特|进度|计划).{0,24}(差异|冲突|干涉|影响|偏差)/u.test(message)
+  && /(附件|文件|mpp|xml|xlsx|excel|进度|计划)/iu.test(message)
+);
+
 const ensureProjectAccess = async (user: AuthenticatedUser, projectId: string) => {
   if (user.assignedRoleNames.includes("管理员")) return true;
   return Boolean(await prisma.projectMember.findFirst({
@@ -178,26 +209,10 @@ const ensureProjectAccess = async (user: AuthenticatedUser, projectId: string) =
   }));
 };
 
-const ASSISTANT_TOOL_PERMISSION_KEYS: Record<string, string> = {
-  "gantt.progress.update": "project-gantt:edit",
-  "gantt.parent.wrap": "project-gantt:create",
-  "gantt.hierarchy.outdent": "project-gantt:edit",
-  "gantt.hierarchy.indent": "project-gantt:edit",
-  "weekly.status.update": "weekly-items:edit",
-  "risk.create": "risk-register:create",
-  "risk.create.from-analysis": "risk-register:create",
-  "risk.status.update": "risk-register:edit",
-  "document.revision.save": "project-documents:create",
-  "schedule.merge.files": "project-gantt:create",
-};
-
 const canUseAssistantTool = async (user: AuthenticatedUser, toolId: string) => {
-  if (toolId === "gantt.parent.wrap") {
-    return await userHasPermission(user, "project-gantt:create")
-      && await userHasPermission(user, "project-gantt:edit");
-  }
-  const permissionKey = ASSISTANT_TOOL_PERMISSION_KEYS[toolId];
-  return !permissionKey || await userHasPermission(user, permissionKey);
+  const tool = getAssistantToolDefinition(toolId);
+  if (!tool) return false;
+  return (await Promise.all(tool.permissions.map((permission) => userHasPermission(user, permission)))).every(Boolean);
 };
 
 const createProposal = async (params: {
@@ -210,6 +225,10 @@ const createProposal = async (params: {
   description: string;
   runtime: AssistantRuntimeConfig;
 }) => {
+  const contract = getAssistantToolDefinition(params.toolId);
+  if (!contract) throw new Error("不支持的 Agent 工具");
+  const validation = validateAssistantToolArgs(params.toolId, params.args);
+  if (!validation.ok) throw new Error(validation.error);
   const expiresAt = new Date(Date.now() + params.runtime.agentActionExpiryMinutes * 60_000);
   const action = await prisma.assistantActionRun.create({
     data: {
@@ -218,8 +237,8 @@ const createProposal = async (params: {
       displayName: params.user.displayName,
       projectId: params.projectId,
       toolId: params.toolId,
-      toolVersion: 1,
-      riskLevel: params.riskLevel,
+      toolVersion: contract.version,
+      riskLevel: contract.riskLevel,
       argsJson: JSON.stringify(params.args),
       previewJson: JSON.stringify({ title: params.title, description: params.description }),
       idempotencyKey: randomUUID(),
@@ -247,6 +266,49 @@ export const proposeAssistantAction = async (params: {
   })))).filter((item) => item.allowed).map((item) => item.toolId));
   const canUse = (toolId: string) => allowed.has(toolId) && (!params.expectedToolId || params.expectedToolId === toolId);
 
+  if (canUse("schedule.compare.file") && isScheduleComparisonRequest(params.message)) {
+    const requestedIds = Array.from(new Set((params.attachmentIds ?? []).map((id) => id.trim()).filter(Boolean)));
+    if (requestedIds.length === 1) {
+      const attachment = await prisma.assistantAttachment.findFirst({
+        where: { id: requestedIds[0], projectId: params.projectId, userId: params.user.userId, status: "READY" },
+        select: { id: true, originalName: true },
+      });
+      const extension = extname(attachment?.originalName || "").toLocaleLowerCase("en-US");
+      if (attachment && SCHEDULE_CONVERT_EXTENSIONS.includes(extension as typeof SCHEDULE_CONVERT_EXTENSIONS[number])) {
+        const statusDate = new Date().toISOString().slice(0, 10);
+        return createProposal({
+          ...params,
+          toolId: "schedule.compare.file",
+          riskLevel: "LOW",
+          args: { attachmentId: attachment.id, statusDate },
+          title: "对比上传计划与当前进度",
+          description: `解析「${attachment.originalName}」，与当前甘特任务对比并生成差异、冲突、干涉和影响链；不会修改当前计划`,
+        });
+      }
+    }
+  }
+
+  if (canUse("schedule.convert.file") && isScheduleConversionRequest(params.message)) {
+    const requestedIds = Array.from(new Set((params.attachmentIds ?? []).map((id) => id.trim()).filter(Boolean))).slice(0, 5);
+    if (requestedIds.length === 1) {
+      const attachment = await prisma.assistantAttachment.findFirst({
+        where: { id: requestedIds[0], projectId: params.projectId, userId: params.user.userId, status: "READY" },
+        select: { id: true, originalName: true },
+      });
+      const extension = extname(attachment?.originalName || "").toLocaleLowerCase("en-US");
+      if (attachment && SCHEDULE_CONVERT_EXTENSIONS.includes(extension as typeof SCHEDULE_CONVERT_EXTENSIONS[number])) {
+        return createProposal({
+          ...params,
+          toolId: "schedule.convert.file",
+          riskLevel: "LOW",
+          args: { attachmentId: attachment.id },
+          title: "转换进度计划文件",
+          description: `将「${attachment.originalName}」转换为系统可导入 Excel，并校验转换后的任务数量；不会直接写入项目进度`,
+        });
+      }
+    }
+  }
+
   if (canUse("schedule.merge.files") && isScheduleMergeRequest(params.message)) {
     const requestedIds = Array.from(new Set((params.attachmentIds ?? []).map((id) => id.trim()).filter(Boolean))).slice(0, 5);
     if (requestedIds.length >= 2) {
@@ -265,6 +327,28 @@ export const proposeAssistantAction = async (params: {
           args: { attachmentIds: requestedIds },
           title: "合并进度计划文件",
           description: `按原始顺序合并 ${supported.length} 个文件（${supported.map((attachment) => attachment.originalName).join("、")}），统一任务 ID 和依赖关系后生成可导入 Excel；不会直接写入项目进度`,
+        });
+      }
+    }
+  }
+
+  if (canUse("document.revision.generate") && isDocumentRevisionRequest(params.message)) {
+    const requestedIds = Array.from(new Set((params.attachmentIds ?? []).map((id) => id.trim()).filter(Boolean)));
+    if (requestedIds.length === 1) {
+      const attachment = await prisma.assistantAttachment.findFirst({
+        where: { id: requestedIds[0], projectId: params.projectId, userId: params.user.userId, status: "READY" },
+        select: { id: true, originalName: true },
+      });
+      const tool = getAssistantToolDefinition("document.revision.generate")!;
+      const extension = extname(attachment?.originalName || "").toLocaleLowerCase("en-US");
+      if (attachment && tool.attachments?.extensions.includes(extension)) {
+        return createProposal({
+          ...params,
+          toolId: "document.revision.generate",
+          riskLevel: "LOW",
+          args: { attachmentId: attachment.id, instruction: params.message.slice(0, 2000) },
+          title: "诊断并生成文档修订稿",
+          description: `读取「${attachment.originalName}」，在不编造事实的前提下梳理结构、细化内容并生成独立 Markdown 修订稿`,
         });
       }
     }
@@ -511,6 +595,66 @@ export const proposeAssistantAction = async (params: {
   return null;
 };
 
+const completeScheduleArtifactAction = async (params: {
+  action: AssistantActionRun;
+  user: AuthenticatedUser;
+  attachmentId?: string;
+  artifactType: "SCHEDULE_CONVERSION" | "SCHEDULE_MERGE";
+  fileName: string;
+  workbook: Buffer;
+  operationDetail: string;
+  result: Record<string, unknown>;
+}) => {
+  const artifactId = randomUUID();
+  const storedName = buildAssistantStoredName(artifactId, params.fileName);
+  const filePath = getAssistantArtifactPath(params.action.projectId, storedName);
+  await mkdir(dirname(filePath), { recursive: true });
+  await writeFile(filePath, params.workbook);
+  const artifact = await prisma.$transaction(async (tx) => {
+    const created = await tx.assistantArtifact.create({
+      data: {
+        id: artifactId,
+        projectId: params.action.projectId,
+        userId: params.user.userId,
+        attachmentId: params.attachmentId,
+        type: params.artifactType,
+        fileName: params.fileName,
+        storedName,
+        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        sizeBytes: params.workbook.length,
+      },
+    });
+    await tx.operationHistory.create({
+      data: {
+        projectId: params.action.projectId,
+        entityType: "ASSISTANT_ARTIFACT",
+        entityId: artifactId,
+        actionType: "CREATE",
+        operator: params.user.displayName,
+        detail: params.operationDetail,
+      },
+    });
+    return created;
+  }).catch(async (error) => {
+    await rm(filePath, { force: true }).catch(() => undefined);
+    throw error;
+  });
+  return prisma.assistantActionRun.update({
+    where: { id: params.action.id },
+    data: {
+      status: "SUCCEEDED",
+      confirmedAt: new Date(),
+      executedAt: new Date(),
+      resultJson: JSON.stringify({
+        ...params.result,
+        artifactId: artifact.id,
+        fileName: params.fileName,
+        downloadUrl: `/api/assistant/artifacts/${artifact.id}/download`,
+      }),
+    },
+  });
+};
+
 export const executeAssistantAction = async (action: AssistantActionRun, user: AuthenticatedUser) => {
   if (action.userId !== user.userId) throw new Error("无权执行该操作");
   if (action.status !== "PROPOSED") return action;
@@ -524,6 +668,10 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
   if (!(await ensureProjectAccess(user, action.projectId))) throw new Error("无权访问当前项目");
   if (!(await canUseAssistantTool(user, action.toolId))) throw new Error("当前账号没有执行该操作的模块权限");
 
+  const args = parseJson(action.argsJson);
+  const validation = validateAssistantToolArgs(action.toolId, args);
+  if (!validation.ok) throw new Error(validation.error);
+
   const claimed = await prisma.assistantActionRun.updateMany({
     where: { id: action.id, userId: user.userId, status: "PROPOSED" },
     data: { status: "EXECUTING", confirmedAt: new Date() },
@@ -531,8 +679,6 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
   if (claimed.count === 0) {
     return await prisma.assistantActionRun.findUniqueOrThrow({ where: { id: action.id } });
   }
-
-  const args = parseJson(action.argsJson);
 
   if (action.toolId === "todo.create") {
     const title = String(args.title || "").trim();
@@ -776,6 +922,127 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     });
   }
 
+  if (action.toolId === "schedule.compare.file") {
+    const attachmentId = String(args.attachmentId || "").trim();
+    const requestedStatusDate = String(args.statusDate || "");
+    const statusDate = /^\d{4}-\d{2}-\d{2}$/.test(requestedStatusDate)
+      ? requestedStatusDate
+      : new Date().toISOString().slice(0, 10);
+    const [project, attachment] = await Promise.all([
+      prisma.project.findUnique({ where: { id: action.projectId }, select: { startDate: true } }),
+      prisma.assistantAttachment.findFirst({
+        where: { id: attachmentId, projectId: action.projectId, userId: user.userId, status: "READY" },
+        select: { id: true, originalName: true, storedName: true },
+      }),
+    ]);
+    if (!project) throw new Error("当前项目不存在");
+    if (!attachment) throw new Error("源附件不存在、尚未解析完成或不属于当前项目");
+    const extension = extname(attachment.originalName).toLocaleLowerCase("en-US");
+    if (!SCHEDULE_CONVERT_EXTENSIONS.includes(extension as typeof SCHEDULE_CONVERT_EXTENSIONS[number])) {
+      throw new Error("计划对比仅支持 MPP、Project XML 和系统 Excel");
+    }
+    const bundle = await parseGanttImportFile(
+      attachment.originalName,
+      await readFile(getAssistantAttachmentPath(action.projectId, attachment.storedName)),
+      { fallbackStartDate: project.startDate },
+    );
+    const [currentSnapshot, incomingSnapshot] = await Promise.all([
+      getCurrentScheduleSnapshot(action.projectId, statusDate),
+      Promise.resolve(buildImportedScheduleSnapshot(attachment.originalName, bundle, statusDate)),
+    ]);
+    const analysis = analyzeSchedule(currentSnapshot, incomingSnapshot);
+    const issueCount = analysis.issues.length;
+    const persisted = await prisma.$transaction(async (tx) => {
+      const snapshot = await tx.projectScheduleSnapshot.create({
+        data: {
+          projectId: action.projectId,
+          sourceFileName: attachment.originalName,
+          schemaVersion: incomingSnapshot.schemaVersion,
+          normalizedJson: JSON.stringify(incomingSnapshot),
+          createdBy: user.displayName,
+        },
+      });
+      const run = await tx.scheduleAnalysisRun.create({
+        data: {
+          projectId: action.projectId,
+          snapshotId: snapshot.id,
+          sourceFileName: attachment.originalName,
+          statusDate,
+          resultJson: JSON.stringify(analysis),
+          createdBy: user.displayName,
+        },
+      });
+      await tx.operationHistory.create({
+        data: {
+          projectId: action.projectId,
+          entityType: "SCHEDULE_ANALYSIS",
+          entityId: run.id,
+          actionType: "CREATE",
+          operator: user.displayName,
+          detail: `通过智能助手对比「${attachment.originalName}」与当前计划，发现 ${issueCount} 个问题，未修改当前计划`,
+        },
+      });
+      return { snapshotId: snapshot.id, analysisRunId: run.id };
+    }, { maxWait: 10_000, timeout: 60_000 });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: {
+        status: "SUCCEEDED",
+        confirmedAt: new Date(),
+        executedAt: new Date(),
+        resultJson: JSON.stringify({
+          message: `计划对比完成：识别 ${analysis.summary.changedFields} 个字段变更、${issueCount} 个冲突或干涉问题`,
+          ...persisted,
+          issueCount,
+          summary: analysis.summary,
+          verification: { kind: "DATABASE_STATE", passed: true, analysisRunId: persisted.analysisRunId },
+        }),
+      },
+    });
+  }
+
+  if (action.toolId === "schedule.convert.file") {
+    const attachmentId = String(args.attachmentId || "").trim();
+    if (!attachmentId) throw new Error("请选择一个需要转换的进度计划附件");
+    const [project, attachment] = await Promise.all([
+      prisma.project.findUnique({ where: { id: action.projectId }, select: { startDate: true } }),
+      prisma.assistantAttachment.findFirst({
+        where: { id: attachmentId, projectId: action.projectId, userId: user.userId, status: "READY" },
+        select: { id: true, originalName: true, storedName: true },
+      }),
+    ]);
+    if (!project) throw new Error("当前项目不存在");
+    if (!attachment) throw new Error("源附件不存在、尚未解析完成或不属于当前项目");
+    const extension = extname(attachment.originalName).toLocaleLowerCase("en-US");
+    if (!SCHEDULE_CONVERT_EXTENSIONS.includes(extension as typeof SCHEDULE_CONVERT_EXTENSIONS[number])) {
+      throw new Error("单文件转换仅支持 MPP、Project XML 和系统 Excel");
+    }
+    const converted = await convertScheduleFile({
+      fileName: attachment.originalName,
+      buffer: await readFile(getAssistantAttachmentPath(action.projectId, attachment.storedName)),
+    }, project.startDate);
+    const sourceLabel = basename(attachment.originalName, extname(attachment.originalName))
+      .replace(/[\\/:*?"<>|]/g, "-")
+      .slice(0, 80) || "进度计划";
+    const fileName = `${sourceLabel}-系统甘特任务.xlsx`;
+    return completeScheduleArtifactAction({
+      action,
+      user,
+      attachmentId: attachment.id,
+      artifactType: "SCHEDULE_CONVERSION",
+      fileName,
+      workbook: converted.workbook,
+      operationDetail: `通过智能助手将「${attachment.originalName}」转换为系统甘特任务文件，生成 ${converted.tasks.length} 条任务、${converted.warnings.length} 条校验提示`,
+      result: {
+        message: `已将「${attachment.originalName}」转换为系统可导入 Excel，共 ${converted.tasks.length} 条任务${converted.warnings.length > 0 ? `，转换说明中有 ${converted.warnings.length} 条待核对提示` : ""}`,
+        sourceCount: 1,
+        taskCount: converted.tasks.length,
+        warningCount: converted.warnings.length,
+        verification: { kind: "SCHEDULE_REIMPORT", passed: true, expectedTaskCount: converted.tasks.length, actualTaskCount: converted.tasks.length },
+      },
+    });
+  }
+
   if (action.toolId === "schedule.merge.files") {
     const attachmentIds = Array.isArray(args.attachmentIds)
       ? Array.from(new Set(args.attachmentIds.map((value) => String(value || "").trim()).filter(Boolean))).slice(0, 5)
@@ -797,56 +1064,21 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
       buffer: await readFile(getAssistantAttachmentPath(action.projectId, attachment.storedName)),
     })));
     const merged = await mergeScheduleFiles(sources, project.startDate);
-    const artifactId = randomUUID();
     const projectLabel = (project.code || project.name || "项目").replace(/[\\/:*?"<>|]/g, "-").slice(0, 80);
     const fileName = `${projectLabel}-合并进度计划.xlsx`;
-    const storedName = buildAssistantStoredName(artifactId, fileName);
-    const filePath = getAssistantArtifactPath(action.projectId, storedName);
-    await mkdir(dirname(filePath), { recursive: true });
-    await writeFile(filePath, merged.workbook);
-    const artifact = await prisma.$transaction(async (tx) => {
-      const created = await tx.assistantArtifact.create({
-        data: {
-          id: artifactId,
-          projectId: action.projectId,
-          userId: user.userId,
-          type: "SCHEDULE_MERGE",
-          fileName,
-          storedName,
-          mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          sizeBytes: merged.workbook.length,
-        },
-      });
-      await tx.operationHistory.create({
-        data: {
-          projectId: action.projectId,
-          entityType: "ASSISTANT_ARTIFACT",
-          entityId: artifactId,
-          actionType: "CREATE",
-          operator: user.displayName,
-          detail: `通过智能助手合并 ${sources.length} 个进度计划文件，生成 ${merged.tasks.length} 条任务、${merged.warnings.length} 条校验提示`,
-        },
-      });
-      return created;
-    }).catch(async (error) => {
-      await rm(filePath, { force: true }).catch(() => undefined);
-      throw error;
-    });
-    return prisma.assistantActionRun.update({
-      where: { id: action.id },
-      data: {
-        status: "SUCCEEDED",
-        confirmedAt: new Date(),
-        executedAt: new Date(),
-        resultJson: JSON.stringify({
-          message: `已合并 ${sources.length} 个文件并生成 ${merged.tasks.length} 条任务${merged.warnings.length > 0 ? `，合并说明中有 ${merged.warnings.length} 条待核对提示` : ""}`,
-          artifactId: artifact.id,
-          fileName,
-          sourceCount: sources.length,
-          taskCount: merged.tasks.length,
-          warningCount: merged.warnings.length,
-          downloadUrl: `/api/assistant/artifacts/${artifact.id}/download`,
-        }),
+    return completeScheduleArtifactAction({
+      action,
+      user,
+      artifactType: "SCHEDULE_MERGE",
+      fileName,
+      workbook: merged.workbook,
+      operationDetail: `通过智能助手合并 ${sources.length} 个进度计划文件，生成 ${merged.tasks.length} 条任务、${merged.warnings.length} 条校验提示`,
+      result: {
+        message: `已合并 ${sources.length} 个文件并生成 ${merged.tasks.length} 条任务${merged.warnings.length > 0 ? `，合并说明中有 ${merged.warnings.length} 条待核对提示` : ""}`,
+        sourceCount: sources.length,
+        taskCount: merged.tasks.length,
+        warningCount: merged.warnings.length,
+        verification: { kind: "SCHEDULE_REIMPORT", passed: true, expectedTaskCount: merged.tasks.length, actualTaskCount: merged.tasks.length },
       },
     });
   }
@@ -886,7 +1118,77 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     });
     return prisma.assistantActionRun.update({
       where: { id: action.id },
-      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "修订稿已保存", artifactId: artifact.id, downloadUrl: `/api/assistant/artifacts/${artifact.id}/download` }) },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "修订稿已保存", revisionId, artifactId: artifact.id, downloadUrl: `/api/assistant/artifacts/${artifact.id}/download`, verification: { kind: "DOWNLOAD_AVAILABLE", passed: true } }) },
+    });
+  }
+
+  if (action.toolId === "document.revision.generate") {
+    const attachmentId = String(args.attachmentId || "");
+    const instruction = String(args.instruction || "").trim();
+    const attachment = await prisma.assistantAttachment.findFirst({
+      where: { id: attachmentId, projectId: action.projectId, userId: user.userId, status: "READY" },
+      include: { extraction: true },
+    });
+    if (!attachment?.extraction) throw new Error("来源附件不存在或尚未完成内容提取");
+    const diagnostics = (() => {
+      try {
+        const parsed = JSON.parse(attachment.extraction.diagnosticsJson || "[]");
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    })();
+    const blocking = diagnostics.filter((item) => item && typeof item === "object" && (item as { severity?: unknown }).severity === "ERROR");
+    if (blocking.some((item) => (item as { code?: unknown }).code === "PDF_OCR_REQUIRED")) {
+      throw new Error("PDF 未提取到可用文本，请先完成 OCR 后重新上传");
+    }
+    const structured = parseJson(attachment.extraction.structuredJson);
+    const runtime = await loadAssistantRuntimeConfig();
+    const content = await reviseDocumentsWithSmallModel({
+      message: instruction,
+      documents: [{
+        attachmentId: attachment.id,
+        fileName: attachment.originalName,
+        format: String(structured.format || extname(attachment.originalName).slice(1)),
+        diagnostics,
+        content: attachment.extraction.content,
+      }],
+      runtime,
+    });
+    if (!content) throw new Error("当前未配置可用的文档修订模型");
+    const revisionId = randomUUID();
+    const artifactId = randomUUID();
+    const originalBase = basename(attachment.originalName, extname(attachment.originalName)).slice(0, 120) || "文档";
+    const fileName = `${originalBase}-修订稿.md`;
+    const storedName = buildAssistantStoredName(artifactId, fileName);
+    const filePath = getAssistantArtifactPath(action.projectId, storedName);
+    const buffer = Buffer.from(content, "utf8");
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(filePath, buffer);
+    const artifact = await prisma.$transaction(async (tx) => {
+      await tx.documentRevision.create({ data: { id: revisionId, projectId: action.projectId, attachmentId, userId: user.userId, instruction, content, format: "md" } });
+      const created = await tx.assistantArtifact.create({ data: { id: artifactId, projectId: action.projectId, userId: user.userId, attachmentId, revisionId, fileName, storedName, mimeType: "text/markdown; charset=utf-8", sizeBytes: buffer.length } });
+      await tx.operationHistory.create({ data: { projectId: action.projectId, entityType: "DOCUMENT_REVISION", entityId: revisionId, actionType: "CREATE", operator: user.displayName, detail: `通过智能助手诊断、重写并生成「${attachment.originalName}」的独立修订稿` } });
+      return created;
+    }).catch(async (error) => {
+      await rm(filePath, { force: true }).catch(() => undefined);
+      throw error;
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: {
+        status: "SUCCEEDED",
+        confirmedAt: new Date(),
+        executedAt: new Date(),
+        resultJson: JSON.stringify({
+          message: `文档修订稿已生成${/## 待确认问题/u.test(content) ? "，末尾保留了待确认问题" : ""}`,
+          revisionId,
+          artifactId: artifact.id,
+          downloadUrl: `/api/assistant/artifacts/${artifact.id}/download`,
+          diagnosticCount: diagnostics.length,
+          verification: { kind: "DOWNLOAD_AVAILABLE", passed: true, bytes: buffer.length },
+        }),
+      },
     });
   }
 

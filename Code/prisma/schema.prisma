@@ -45,12 +45,14 @@ model Project {
   budgetItems          ProjectBudgetItem[]
   budgetSetting        ProjectBudgetSetting?
   weeklyItems          WeeklyItem[]
+  monthlyItems         MonthlyItem[]
   todos                TodoItem[]
   operationHistories   OperationHistory[]
   riskRegisterItems    RiskRegisterItem[]
   documentFiles        ProjectDocumentFile[]
   assistantAttachments AssistantAttachment[]
   assistantArtifacts   AssistantArtifact[]
+  assistantPlans       AssistantPlanRun[]
 }
 
 model ProjectGanttTask {
@@ -295,6 +297,33 @@ model WeeklyItem {
   riskItems RiskRegisterItem[]
 
   @@index([projectId, ganttTaskId])
+}
+
+// 保留旧版月度事项数据，避免结构同步删除仍有历史记录的表。
+model MonthlyItem {
+  id               String   @id
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  projectId        String
+  title            String
+  description      String   @default("")
+  dueDate          String
+  status           String   @default("PENDING")
+  owner            String
+  priority         String   @default("NORMAL")
+  plannedStartDate String   @default("")
+  actualStartDate  String   @default("")
+  plannedEndDate   String   @default("")
+  actualEndDate    String   @default("")
+  progress         Int      @default(0)
+  health           String   @default("UNKNOWN")
+  issueAndAction   String   @default("")
+  dependency       String   @default("")
+  risk             String   @default("")
+  riskStatus       String   @default("NONE")
+  remark           String   @default("")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 }
 
 model TodoItem {
@@ -597,6 +626,8 @@ model AssistantActionRun {
   displayName    String    @default("")
   projectId      String    @default("")
   messageId      String    @default("")
+  planId         String?
+  planStepId     String?   @unique
   toolId         String
   toolVersion    Int       @default(1)
   riskLevel      String
@@ -611,7 +642,69 @@ model AssistantActionRun {
   errorCode      String    @default("")
   errorMessage   String    @default("") @db.Text
 
+  plan     AssistantPlanRun?  @relation(fields: [planId], references: [id], onDelete: SetNull)
+  planStep AssistantPlanStep? @relation("AssistantPlanStepAction", fields: [planStepId], references: [id], onDelete: SetNull)
+
   @@index([userId, status, createdAt])
+  @@index([planId, status])
+}
+
+model AssistantPlanRun {
+  id               String    @id @default(cuid())
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  userId           String
+  username         String    @default("")
+  displayName      String    @default("")
+  projectId        String
+  messageId        String    @default("")
+  title            String
+  goal             String    @db.Text
+  status           String    @default("RUNNING")
+  currentStepIndex Int       @default(0)
+  inputJson        String    @default("{}") @db.Text
+  resultJson       String    @default("{}") @db.Text
+  traceJson        String    @default("[]") @db.Text
+  errorCode        String    @default("")
+  errorMessage     String    @default("") @db.Text
+  expiresAt        DateTime
+  completedAt      DateTime?
+
+  project Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  steps   AssistantPlanStep[]
+  actions AssistantActionRun[]
+
+  @@index([userId, status, createdAt])
+  @@index([projectId, createdAt])
+}
+
+model AssistantPlanStep {
+  id              String    @id @default(cuid())
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  planId          String
+  stepIndex       Int
+  toolId          String
+  title           String
+  command         String    @db.Text
+  status          String    @default("PENDING")
+  riskLevel       String
+  dependsOnJson   String    @default("[]") @db.Text
+  inputJson       String    @default("{}") @db.Text
+  outputJson      String    @default("{}") @db.Text
+  attemptCount    Int       @default(0)
+  maxAttempts     Int       @default(1)
+  verificationJson String   @default("{}") @db.Text
+  errorCode       String    @default("")
+  errorMessage    String    @default("") @db.Text
+  startedAt       DateTime?
+  completedAt     DateTime?
+
+  plan   AssistantPlanRun  @relation(fields: [planId], references: [id], onDelete: Cascade)
+  action AssistantActionRun? @relation("AssistantPlanStepAction")
+
+  @@unique([planId, stepIndex])
+  @@index([planId, status])
 }
 
 model PermissionTree {

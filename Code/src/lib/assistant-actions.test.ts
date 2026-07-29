@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isScheduleConversionRequest,
   isScheduleMergeRequest,
   parseRiskCreationName,
   parseRiskStatusUpdateIntent,
@@ -43,5 +44,12 @@ describe("assistant action intent parsing", () => {
     expect(isScheduleMergeRequest("把这两个进度计划文件合并成系统可导入的 Excel")).toBe(true);
     expect(isScheduleMergeRequest("把两个格式不一的进度计划文件合二为一，制作成可导入系统的进度计划")).toBe(true);
     expect(isScheduleMergeRequest("帮我分析这两个计划有什么差异")).toBe(false);
+  });
+
+  it("recognizes a single schedule file conversion request without confusing it with merge", () => {
+    const message = "我给你一个mpp文件，你能帮我按照系统的甘特任务格式输出文件吗";
+    expect(isScheduleConversionRequest(message)).toBe(true);
+    expect(isScheduleMergeRequest(message)).toBe(false);
+    expect(isScheduleConversionRequest("把这两个进度计划合并成系统可导入 Excel")).toBe(false);
   });
 });

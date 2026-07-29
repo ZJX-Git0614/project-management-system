@@ -9,6 +9,7 @@ import {
 } from "@/lib/gantt-file-transfer";
 
 export const SCHEDULE_MERGE_EXTENSIONS = [".mpp", ".xml", ".xlsx", ".csv", ".md", ".txt"] as const;
+export const SCHEDULE_CONVERT_EXTENSIONS = [".mpp", ".xml", ".xlsx"] as const;
 
 export type ScheduleMergeSource = {
   fileName: string;
@@ -396,6 +397,7 @@ const buildWorkbook = (
   tasks: ImportedGanttTask[],
   sources: Array<{ fileName: string; taskCount: number }>,
   warnings: ScheduleMergeWarning[],
+  mode: "CONVERT" | "MERGE",
 ) => {
   const rows = tasks.map((task) => ({
     任务ID: task.externalId,
@@ -428,9 +430,12 @@ const buildWorkbook = (
   ];
   taskSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
 
+  const actionLabel = mode === "CONVERT" ? "转换" : "合并";
   const noteRows: unknown[][] = [
-    ["合并结果", `共合并 ${sources.length} 个源文件、${tasks.length} 条任务`],
-    ["说明", "任务按源文件及源文件内原始顺序排列；任务 ID 已统一重排为 Task001、Task002……"],
+    [`${actionLabel}结果`, mode === "CONVERT"
+      ? `已将 ${sources[0]?.fileName || "源文件"} 转换为系统可导入格式，共 ${tasks.length} 条任务`
+      : `共合并 ${sources.length} 个源文件、${tasks.length} 条任务`],
+    ["说明", `任务按源文件及源文件内原始顺序排列；任务 ID 已统一重排为 Task001、Task002……`],
     ["说明", "未提供日期的任务使用当前项目开始日期；未提供计划完成和工期的任务按 1 天生成，具体项目事实未被自动补写"],
     [],
     ["源文件", "识别任务数"],
@@ -445,19 +450,35 @@ const buildWorkbook = (
 
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, taskSheet, "项目进度");
-  XLSX.utils.book_append_sheet(workbook, noteSheet, "合并说明");
+  XLSX.utils.book_append_sheet(workbook, noteSheet, `${actionLabel}说明`);
   return Buffer.from(XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }));
 };
 
-export const mergeScheduleFiles = async (sources: ScheduleMergeSource[], fallbackStartDate: string): Promise<ScheduleMergeResult> => {
-  if (sources.length < 2) throw new Error("请至少上传两个需要合并的进度计划文件");
+const buildScheduleResult = async (
+  sources: ScheduleMergeSource[],
+  fallbackStartDate: string,
+  mode: "CONVERT" | "MERGE",
+): Promise<ScheduleMergeResult> => {
   const warnings: ScheduleMergeWarning[] = [];
   const parsedBySource = await Promise.all(sources.map((source, index) => parseSource(source, index, fallbackStartDate, warnings)));
   const sourceSummaries = parsedBySource.map((tasks, index) => ({ fileName: sources[index].fileName, taskCount: tasks.length }));
   const tasks = mergeParsedTasks(parsedBySource.flat(), warnings);
-  if (tasks.length === 0) throw new Error("源文件中没有可合并的任务");
-  const workbook = buildWorkbook(tasks, sourceSummaries, warnings);
+  if (tasks.length === 0) throw new Error(`源文件中没有可${mode === "CONVERT" ? "转换" : "合并"}的任务`);
+  const workbook = buildWorkbook(tasks, sourceSummaries, warnings, mode);
   const verified = parseGanttExcel(workbook, fallbackStartDate);
-  if (verified.length !== tasks.length) throw new Error("合并文件生成后校验失败");
+  if (verified.length !== tasks.length) throw new Error(`${mode === "CONVERT" ? "转换" : "合并"}文件生成后校验失败`);
   return { tasks, warnings, sourceSummaries, workbook };
+};
+
+export const convertScheduleFile = async (source: ScheduleMergeSource, fallbackStartDate: string): Promise<ScheduleMergeResult> => {
+  const extension = path.extname(source.fileName).toLocaleLowerCase("en-US");
+  if (!SCHEDULE_CONVERT_EXTENSIONS.includes(extension as typeof SCHEDULE_CONVERT_EXTENSIONS[number])) {
+    throw new Error(`「${source.fileName}」不是可转换的甘特计划格式`);
+  }
+  return buildScheduleResult([source], fallbackStartDate, "CONVERT");
+};
+
+export const mergeScheduleFiles = async (sources: ScheduleMergeSource[], fallbackStartDate: string): Promise<ScheduleMergeResult> => {
+  if (sources.length < 2) throw new Error("请至少上传两个需要合并的进度计划文件");
+  return buildScheduleResult(sources, fallbackStartDate, "MERGE");
 };

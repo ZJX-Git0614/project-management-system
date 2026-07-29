@@ -19,15 +19,13 @@ const mocks = vi.hoisted(() => {
   return {
     requireUser: vi.fn(),
     loadAssistantRuntimeConfig: vi.fn(),
-    proposeAssistantAction: vi.fn(),
-    executeAssistantAction: vi.fn(),
+    resolveProjectAssistantAction: vi.fn(),
+    executeAssistantActionAndAdvancePlan: vi.fn(),
     serializeAssistantAction: vi.fn(),
     buildProjectAssistantContext: vi.fn(),
     buildDatabaseAssistantAnswer: vi.fn(),
     callProjectAssistantModel: vi.fn(),
-    planProjectAssistantActionWithModel: vi.fn(),
     planProjectAssistantQueryWithModel: vi.fn(),
-    shouldPlanProjectAssistantAction: vi.fn(),
     queryRagLite: vi.fn(),
     prisma,
   }
@@ -36,11 +34,20 @@ const mocks = vi.hoisted(() => {
 vi.mock("@/lib/server-auth", () => ({ requireUser: mocks.requireUser }))
 vi.mock("@/lib/assistant-settings", () => ({
   loadAssistantRuntimeConfig: mocks.loadAssistantRuntimeConfig,
+  ASSISTANT_TOOL_CATALOG: [{
+    id: "schedule.convert.file",
+    attachments: { min: 1, max: 1, extensions: [".mpp", ".xml", ".xlsx"] },
+  }],
 }))
 vi.mock("@/lib/assistant-actions", () => ({
-  executeAssistantAction: mocks.executeAssistantAction,
-  proposeAssistantAction: mocks.proposeAssistantAction,
   serializeAssistantAction: mocks.serializeAssistantAction,
+}))
+vi.mock("@/lib/assistant-plans", () => ({
+  executeAssistantActionAndAdvancePlan: mocks.executeAssistantActionAndAdvancePlan,
+  serializeAssistantPlan: vi.fn(),
+}))
+vi.mock("@/lib/project-assistant-agent", () => ({
+  resolveProjectAssistantAction: mocks.resolveProjectAssistantAction,
 }))
 vi.mock("@/lib/project-assistant", () => ({
   buildProjectAssistantContext: mocks.buildProjectAssistantContext,
@@ -48,9 +55,7 @@ vi.mock("@/lib/project-assistant", () => ({
 }))
 vi.mock("@/lib/project-assistant-model", () => ({
   callProjectAssistantModel: mocks.callProjectAssistantModel,
-  planProjectAssistantActionWithModel: mocks.planProjectAssistantActionWithModel,
   planProjectAssistantQueryWithModel: mocks.planProjectAssistantQueryWithModel,
-  shouldPlanProjectAssistantAction: mocks.shouldPlanProjectAssistantAction,
 }))
 vi.mock("@/lib/raglite-client", () => ({ queryRagLite: mocks.queryRagLite }))
 vi.mock("@/lib/prisma", () => ({ prisma: mocks.prisma }))
@@ -99,13 +104,15 @@ describe("POST /api/assistant/chat", () => {
       historyRetentionDays: 90,
       retrievalEnabled: false,
       agentEnabled: false,
+      agentEnabledToolIds: [],
       llmProvider: { id: "provider-1", name: "本地模型", model: "qwen3" },
       embeddingProvider: null,
     })
-    mocks.proposeAssistantAction.mockResolvedValue(null)
-    mocks.planProjectAssistantActionWithModel.mockResolvedValue(null)
+    mocks.resolveProjectAssistantAction.mockResolvedValue({
+      action: null,
+      trace: { requested: false, outcome: "NO_ACTION", steps: [] },
+    })
     mocks.planProjectAssistantQueryWithModel.mockResolvedValue(null)
-    mocks.shouldPlanProjectAssistantAction.mockReturnValue(false)
     mocks.buildProjectAssistantContext.mockResolvedValue(context)
     mocks.callProjectAssistantModel.mockResolvedValue(null)
     mocks.queryRagLite.mockResolvedValue(null)
@@ -142,15 +149,9 @@ describe("POST /api/assistant/chat", () => {
     }))
   })
 
-  it("binds a model-normalized command to the exact white-listed agent tool", async () => {
-    mocks.shouldPlanProjectAssistantAction.mockReturnValue(true)
-    mocks.planProjectAssistantActionWithModel.mockResolvedValue({
-      toolId: "weekly.status.update",
-      command: "将 Matter007 更新为进行中，当前进度 35%",
-    })
-    mocks.proposeAssistantAction
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
+  it("uses the domain agent resolution without asking the answer model to perform actions", async () => {
+    mocks.resolveProjectAssistantAction.mockResolvedValue({
+      action: {
         id: "action-1",
         toolId: "weekly.status.update",
         title: "更新项目事项",
@@ -158,15 +159,21 @@ describe("POST /api/assistant/chat", () => {
         riskLevel: "MEDIUM",
         status: "PROPOSED",
         expiresAt: "2026-07-28T00:00:00.000Z",
-      })
+      },
+      trace: {
+        requested: true,
+        outcome: "ACTION_READY",
+        toolId: "weekly.status.update",
+        steps: [{ stage: "PLAN_VALIDATION", outcome: "MATCHED", toolId: "weekly.status.update" }],
+      },
+    })
 
     const { POST } = await import("./route")
     const response = await POST(request("把第七个事项推进到百分之三十五并设为处理中"))
 
     expect(response.status).toBe(200)
-    expect(mocks.proposeAssistantAction).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      message: "将 Matter007 更新为进行中，当前进度 35%",
-      expectedToolId: "weekly.status.update",
+    expect(mocks.resolveProjectAssistantAction).toHaveBeenCalledWith(expect.objectContaining({
+      message: "把第七个事项推进到百分之三十五并设为处理中",
     }))
     expect(mocks.callProjectAssistantModel).not.toHaveBeenCalled()
   })
@@ -181,21 +188,24 @@ describe("POST /api/assistant/chat", () => {
       { id: "attachment-1", originalName: "计划一.md", extraction },
       { id: "attachment-2", originalName: "计划二.xlsx", extraction },
     ])
-    mocks.proposeAssistantAction.mockResolvedValue({
-      id: "action-merge",
-      toolId: "schedule.merge.files",
-      title: "合并进度计划文件",
-      description: "合并两个文件",
-      riskLevel: "LOW",
-      status: "PROPOSED",
-      expiresAt: "2026-07-28T00:00:00.000Z",
+    mocks.resolveProjectAssistantAction.mockResolvedValue({
+      action: {
+        id: "action-merge",
+        toolId: "schedule.merge.files",
+        title: "合并进度计划文件",
+        description: "合并两个文件",
+        riskLevel: "LOW",
+        status: "PROPOSED",
+        expiresAt: "2026-07-28T00:00:00.000Z",
+      },
+      trace: { requested: true, outcome: "ACTION_READY", toolId: "schedule.merge.files", steps: [] },
     })
 
     const { POST } = await import("./route")
     const response = await POST(request("合并这两个进度计划并生成可导入 Excel", ["attachment-1", "attachment-2"]))
 
     expect(response.status).toBe(200)
-    expect(mocks.proposeAssistantAction).toHaveBeenCalledWith(expect.objectContaining({
+    expect(mocks.resolveProjectAssistantAction).toHaveBeenCalledWith(expect.objectContaining({
       attachmentIds: ["attachment-1", "attachment-2"],
     }))
     expect(mocks.callProjectAssistantModel).not.toHaveBeenCalled()
@@ -212,6 +222,30 @@ describe("POST /api/assistant/chat", () => {
     expect(mocks.callProjectAssistantModel).toHaveBeenCalledWith(expect.objectContaining({
       manualContext: expect.stringContaining("上一条同级任务"),
     }))
+  })
+
+  it("answers the exact MPP conversion capability question from server capabilities", async () => {
+    mocks.loadAssistantRuntimeConfig.mockResolvedValue({
+      ...(await mocks.loadAssistantRuntimeConfig()),
+      agentEnabled: true,
+      agentEnabledToolIds: ["schedule.convert.file"],
+    })
+
+    const { POST } = await import("./route")
+    const response = await POST(request("我给你一个mpp文件，你能帮我按照系统的甘特任务格式输出文件吗"))
+    const payload = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(payload.data.source).toBe("SYSTEM")
+    expect(payload.data.answer).toContain("请上传一个 MPP")
+    expect(payload.data.answer).not.toContain("不支持解析 mpp")
+    expect(mocks.resolveProjectAssistantAction).toHaveBeenCalledWith(expect.objectContaining({
+      allowModelPlanning: false,
+    }))
+    expect(payload.data.assistantMessage.trace.evidence).toContainEqual(expect.objectContaining({
+      source: "佳佳服务端能力目录",
+    }))
+    expect(mocks.callProjectAssistantModel).not.toHaveBeenCalled()
   })
 
   it("auto executes medium-risk actions in auto-approve mode", async () => {
@@ -232,23 +266,24 @@ describe("POST /api/assistant/chat", () => {
       expiresAt: "2026-07-29T00:00:00.000Z",
     }
     const rawAction = { id: "action-1", userId: "user-1", status: "PROPOSED" }
-    const executedAction = { ...rawAction, status: "SUCCEEDED" }
     const result = {
       ...proposal,
       status: "SUCCEEDED",
       result: { message: "事项状态已更新" },
     }
-    mocks.proposeAssistantAction.mockResolvedValue(proposal)
+    mocks.resolveProjectAssistantAction.mockResolvedValue({
+      action: proposal,
+      trace: { requested: true, outcome: "ACTION_READY", toolId: proposal.toolId, steps: [] },
+    })
     mocks.prisma.assistantActionRun.findFirst.mockResolvedValue(rawAction)
-    mocks.executeAssistantAction.mockResolvedValue(executedAction)
-    mocks.serializeAssistantAction.mockReturnValue(result)
+    mocks.executeAssistantActionAndAdvancePlan.mockResolvedValue({ action: result })
 
     const { POST } = await import("./route")
     const response = await POST(request("将 Matter007 更新为进行中，当前进度 35%"))
     const payload = await response.json()
 
     expect(response.status).toBe(200)
-    expect(mocks.executeAssistantAction).toHaveBeenCalledWith(rawAction, expect.objectContaining({ userId: "user-1" }))
+    expect(mocks.executeAssistantActionAndAdvancePlan).toHaveBeenCalledWith(rawAction, expect.objectContaining({ userId: "user-1" }))
     expect(payload.data.answer).toContain("已执行")
     expect(payload.data.assistantMessage.blocks[0]).toMatchObject({
       type: "action-result",

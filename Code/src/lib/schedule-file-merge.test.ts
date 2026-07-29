@@ -2,7 +2,7 @@ import * as XLSX from "@e965/xlsx";
 import { describe, expect, it } from "vitest";
 
 import { parseGanttExcel } from "@/lib/gantt-file-transfer";
-import { mergeScheduleFiles } from "@/lib/schedule-file-merge";
+import { convertScheduleFile, mergeScheduleFiles } from "@/lib/schedule-file-merge";
 
 const buildFrontendWorkbook = () => {
   const workbook = XLSX.utils.book_new();
@@ -17,6 +17,25 @@ const buildFrontendWorkbook = () => {
 };
 
 describe("schedule file merge", () => {
+  it("converts one supported schedule file into a verified system import workbook", async () => {
+    const result = await convertScheduleFile({
+      fileName: "前端任务列表.xlsx",
+      buffer: buildFrontendWorkbook(),
+    }, "2026-07-01");
+
+    expect(result.tasks.map((task) => task.taskName)).toEqual(["登录页面", "项目看板"]);
+    const workbook = XLSX.read(result.workbook, { type: "buffer" });
+    expect(workbook.SheetNames).toEqual(["项目进度", "转换说明"]);
+    expect(parseGanttExcel(result.workbook, "2026-07-01")).toHaveLength(2);
+  });
+
+  it("rejects formats outside the single-file gantt conversion contract", async () => {
+    await expect(convertScheduleFile({
+      fileName: "计划.md",
+      buffer: Buffer.from("# 计划"),
+    }, "2026-07-01")).rejects.toThrow("不是可转换的甘特计划格式");
+  });
+
   it("merges Markdown and generic Excel tasks into a verified system import workbook", async () => {
     const markdown = [
       "# 后端任务",

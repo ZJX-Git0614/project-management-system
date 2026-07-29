@@ -6,7 +6,12 @@ import {
   normalizeAssistantPersonaPreset,
 } from "@/lib/assistant-persona";
 import { decryptAssistantSecret, encryptAssistantSecret } from "@/lib/assistant-secrets";
-import { ASSISTANT_TOOL_CATALOG, DEFAULT_ASSISTANT_SYSTEM_PROMPT, defaultAssistantSettingsData } from "@/lib/assistant-settings";
+import {
+  ASSISTANT_TOOL_CATALOG,
+  DEFAULT_ASSISTANT_SYSTEM_PROMPT,
+  defaultAssistantSettingsData,
+  validateAssistantToolArgs,
+} from "@/lib/assistant-settings";
 
 describe("assistant settings foundations", () => {
   const originalSecret = process.env.ASSISTANT_CONFIG_ENCRYPTION_KEY;
@@ -42,7 +47,32 @@ describe("assistant settings foundations", () => {
       "weekly.status.update",
       "risk.create",
       "risk.status.update",
+      "schedule.compare.file",
+      "schedule.convert.file",
       "schedule.merge.files",
+      "document.revision.generate",
     ]));
+    expect(ASSISTANT_TOOL_CATALOG.find((tool) => tool.id === "schedule.convert.file")).toMatchObject({
+      attachments: { min: 1, max: 1, extensions: [".mpp", ".xml", ".xlsx"] },
+      output: "FILE",
+    });
+  });
+
+  it("publishes a complete executable contract for every tool", () => {
+    for (const tool of ASSISTANT_TOOL_CATALOG) {
+      expect(tool.version).toBeGreaterThan(0);
+      expect(Array.isArray(tool.permissions)).toBe(true);
+      expect(tool.inputSchema.additionalProperties).toBe(false);
+      expect(tool.outputSchema.required.length).toBeGreaterThan(0);
+      expect(tool.retryPolicy.maxAttempts).toBeGreaterThan(0);
+      expect(tool.verifier).toBeTruthy();
+    }
+  });
+
+  it("rejects undeclared or invalid tool arguments before execution", () => {
+    expect(validateAssistantToolArgs("gantt.progress.update", { taskId: "task-1", progress: 35 })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("gantt.progress.update", { taskId: "task-1", progress: 101 })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("todo.create", { title: "核对计划", targetPersonName: "张三", injected: true })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("schedule.merge.files", { attachmentIds: ["only-one"] })).toMatchObject({ ok: false });
   });
 });

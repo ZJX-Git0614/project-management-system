@@ -63,6 +63,22 @@ type AssistantAction = {
   status: string
   expiresAt: string
   result?: { message?: string; downloadUrl?: string; navigateUrl?: string; navigateLabel?: string }
+  plan?: {
+    id: string
+    title: string
+    goal: string
+    status: string
+    currentStepIndex: number
+    steps: Array<{
+      id: string
+      stepIndex: number
+      toolId: string
+      title: string
+      status: string
+      riskLevel: string
+      errorMessage?: string
+    }>
+  }
 }
 
 type AssistantAttachment = {
@@ -598,12 +614,19 @@ export function ProjectAssistant({
     notify("已停止本次处理", "info")
   }
 
-  const updateActionBlock = (action: AssistantAction) => {
+  const updateActionBlock = (action: AssistantAction, nextAction?: AssistantAction) => {
     setMessages((current) => current.map((message) => ({
       ...message,
-      blocks: message.blocks?.map((block) => block.type !== "attachment" && block.action.id === action.id
+      blocks: (() => {
+        const updated = message.blocks?.map((block) => block.type !== "attachment" && block.action.id === action.id
         ? { ...block, type: action.status === "PROPOSED" ? "action-proposal" : "action-result", action }
-        : block),
+        : block) as AssistantBlock[] | undefined
+        if (!updated || !nextAction || !updated.some((block) => block.type !== "attachment" && block.action.id === action.id)) return updated
+        if (!updated.some((block) => block.type !== "attachment" && block.action.id === nextAction.id)) {
+          updated.push({ type: nextAction.status === "PROPOSED" ? "action-proposal" : "action-result", action: nextAction })
+        }
+        return updated
+      })(),
     })))
   }
 
@@ -619,8 +642,10 @@ export function ProjectAssistant({
 
   const handleAction = async (action: AssistantAction, command: "confirm" | "cancel") => {
     try {
-      const result = await api.post<{ action: AssistantAction }>(`/api/assistant/actions/${action.id}/${command}`)
-      updateActionBlock(result.action)
+      const result = await api.post<{ action: AssistantAction; nextAction?: AssistantAction; plan?: AssistantAction["plan"] }>(`/api/assistant/actions/${action.id}/${command}`)
+      const completedAction = result.plan ? { ...result.action, plan: result.plan } : result.action
+      const nextAction = result.nextAction && result.plan ? { ...result.nextAction, plan: result.plan } : result.nextAction
+      updateActionBlock(completedAction, nextAction)
       const message = result.action.result?.message || (command === "cancel" ? "操作已取消" : "操作已执行")
       notify(message, command === "cancel" ? "info" : "success")
       if (["todo.create", "todo.create.batch", "todo.complete"].includes(result.action.toolId) && result.action.status === "SUCCEEDED") {
@@ -785,6 +810,38 @@ export function ProjectAssistant({
                             </div>
                             <Badge variant={block.action.riskLevel === "LOW" ? "secondary" : "warning"}>{block.action.riskLevel === "LOW" ? "低风险" : "需确认"}</Badge>
                           </div>
+                          {block.action.plan && (
+                            <div className="mt-3 border-t border-border/70 pt-2.5">
+                              <div className="flex items-center justify-between gap-2 text-[11px]">
+                                <span className="font-medium">{block.action.plan.title}</span>
+                                <span className="text-muted-foreground">{block.action.plan.steps.filter((step) => step.status === "SUCCEEDED").length}/{block.action.plan.steps.length}</span>
+                              </div>
+                              <div className="mt-2 grid gap-1.5">
+                                {block.action.plan.steps.map((step) => (
+                                  <div key={step.id} className="flex min-w-0 items-center gap-2 text-[11px]">
+                                    <span className={cn(
+                                      "flex size-4 shrink-0 items-center justify-center rounded-full border text-[9px]",
+                                      step.status === "SUCCEEDED" && "border-emerald-500/60 bg-emerald-500/10 text-emerald-400",
+                                      ["PROPOSED", "EXECUTING"].includes(step.status) && "border-primary/60 bg-primary/10 text-primary",
+                                      ["FAILED", "BLOCKED"].includes(step.status) && "border-destructive/60 bg-destructive/10 text-destructive",
+                                    )}>
+                                      {step.status === "SUCCEEDED" ? <Check className="size-2.5" /> : step.stepIndex + 1}
+                                    </span>
+                                    <span className={cn("min-w-0 flex-1 truncate", step.status === "PENDING" && "text-muted-foreground")}>{step.title}</span>
+                                    <span className="shrink-0 text-[10px] text-muted-foreground">{{
+                                      PENDING: "待执行",
+                                      PROPOSED: "待确认",
+                                      EXECUTING: "执行中",
+                                      SUCCEEDED: "已完成",
+                                      FAILED: "失败",
+                                      BLOCKED: "待补充",
+                                      CANCELLED: "已取消",
+                                    }[step.status] || step.status}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                           {block.action.status === "PROPOSED" ? (
                             <div className="mt-3 flex justify-end gap-2">
                               <Button variant="ghost" size="sm" onClick={() => void handleAction(block.action, "cancel")}>取消</Button>

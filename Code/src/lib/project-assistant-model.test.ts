@@ -10,9 +10,12 @@ import type { AssistantRuntimeConfig } from "@/lib/assistant-settings"
 import type { ProjectAssistantContext } from "@/lib/project-assistant"
 import {
   callProjectAssistantModel,
+  parseActionWorkflowPlannerResponse,
   planProjectAssistantActionWithModel,
+  planProjectAssistantWorkflowWithModel,
   planProjectAssistantQueryWithModel,
   shouldPlanProjectAssistantAction,
+  shouldPlanProjectAssistantWorkflow,
 } from "@/lib/project-assistant-model"
 import { detectProjectAssistantQueryIntent } from "@/lib/project-assistant-query"
 
@@ -145,8 +148,49 @@ describe("project assistant model routing", () => {
     expect(shouldPlanProjectAssistantAction("有哪些延期事项")).toBe(false)
     expect(shouldPlanProjectAssistantAction("更新 Matter007 的进度")).toBe(true)
     expect(shouldPlanProjectAssistantAction("把两个进度计划合并成可导入文件")).toBe(true)
+    expect(shouldPlanProjectAssistantAction("把这个 MPP 按系统格式输出文件")).toBe(true)
     const request = callAssistantProviderModel.mock.calls[0][0]
     expect(request.messages[0].content).toContain("白名单工具")
     expect(request.messages[0].content).toContain("不得生成数据库 ID")
+  })
+
+  it("accepts at most six acyclic white-listed workflow steps", async () => {
+    callAssistantProviderModel.mockResolvedValue(JSON.stringify({
+      title: "分析并处置计划冲突",
+      steps: [
+        { id: "s1", toolId: "schedule.compare.file", command: "对比附件与当前计划", dependsOn: [] },
+        { id: "s2", toolId: "schedule.analysis.export", command: "导出最新计划冲突报告", dependsOn: ["s1"] },
+        { id: "s3", toolId: "risk.create.from-analysis", command: "将最严重冲突创建为风险", dependsOn: ["s1"] },
+      ],
+    }))
+
+    const plan = await planProjectAssistantWorkflowWithModel({
+      message: "先对比这份计划，再导出报告并把严重冲突创建为风险",
+      history: [],
+      runtime: {
+        ...runtime,
+        agentEnabledToolIds: ["schedule.compare.file", "schedule.analysis.export", "risk.create.from-analysis"],
+      },
+    })
+
+    expect(plan?.steps.map((step) => ({ toolId: step.toolId, dependsOn: step.dependsOn }))).toEqual([
+      { toolId: "schedule.compare.file", dependsOn: [] },
+      { toolId: "schedule.analysis.export", dependsOn: [0] },
+      { toolId: "risk.create.from-analysis", dependsOn: [0] },
+    ])
+    expect(shouldPlanProjectAssistantWorkflow("更新一个事项")).toBe(false)
+    expect(shouldPlanProjectAssistantWorkflow("更新事项并导出风险登记册")).toBe(true)
+  })
+
+  it("rejects workflow cycles and tools outside the enabled catalog", () => {
+    const enabled = new Set(["schedule.compare.file", "schedule.analysis.export"])
+    expect(parseActionWorkflowPlannerResponse(JSON.stringify({ steps: [
+      { id: "s1", toolId: "schedule.compare.file", command: "对比计划", dependsOn: ["s2"] },
+      { id: "s2", toolId: "schedule.analysis.export", command: "导出报告", dependsOn: ["s1"] },
+    ] }), enabled)).toBeNull()
+    expect(parseActionWorkflowPlannerResponse(JSON.stringify({ steps: [
+      { id: "s1", toolId: "shell.exec", command: "执行命令", dependsOn: [] },
+      { id: "s2", toolId: "schedule.analysis.export", command: "导出报告", dependsOn: ["s1"] },
+    ] }), enabled)).toBeNull()
   })
 })
