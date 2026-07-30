@@ -2,15 +2,14 @@ import { NextRequest } from "next/server";
 
 import { err, ok } from "@/lib/api-utils";
 import {
-  executeAssistantAction,
-  proposeAssistantAction,
   serializeAssistantAction,
 } from "@/lib/assistant-actions";
+import { executeAssistantActionAndAdvancePlan, serializeAssistantPlan } from "@/lib/assistant-plans";
 import {
   normalizeAssistantAccessMode,
   shouldAutoExecuteAssistantAction,
 } from "@/lib/assistant-access";
-import { searchAssistantManual } from "@/lib/assistant-manual";
+import { buildAssistantCapabilityAnswer, searchAssistantManual } from "@/lib/assistant-manual";
 import { loadAssistantRuntimeConfig } from "@/lib/assistant-settings";
 import { prisma } from "@/lib/prisma";
 import {
@@ -19,10 +18,9 @@ import {
 } from "@/lib/project-assistant";
 import {
   callProjectAssistantModel,
-  planProjectAssistantActionWithModel,
   planProjectAssistantQueryWithModel,
-  shouldPlanProjectAssistantAction,
 } from "@/lib/project-assistant-model";
+import { resolveProjectAssistantAction } from "@/lib/project-assistant-agent";
 import {
   buildProjectAssistantAnswerTrace,
   buildProjectAssistantFallbackAnswer,
@@ -100,6 +98,7 @@ export async function GET(req: NextRequest) {
   await prisma.$transaction([
     prisma.assistantChatMessage.deleteMany({ where: { createdAt: { lt: cutoff } } }),
     prisma.assistantActionRun.deleteMany({ where: { createdAt: { lt: cutoff } } }),
+    prisma.assistantPlanRun.deleteMany({ where: { createdAt: { lt: cutoff } } }),
   ]);
   const messages = await prisma.assistantChatMessage.findMany({
     where: { userId: user.userId, projectId },
@@ -115,7 +114,15 @@ export async function GET(req: NextRequest) {
   const actions = actionIds.length
     ? await prisma.assistantActionRun.findMany({ where: { id: { in: actionIds }, userId: user.userId } })
     : [];
-  const actionById = new Map(actions.map((action) => [action.id, serializeAssistantAction(action)]));
+  const planIds = Array.from(new Set(actions.map((action) => action.planId).filter((id): id is string => Boolean(id))));
+  const plans = planIds.length
+    ? await prisma.assistantPlanRun.findMany({ where: { id: { in: planIds }, userId: user.userId }, include: { steps: true } })
+    : [];
+  const planById = new Map(plans.map((plan) => [plan.id, serializeAssistantPlan(plan)]));
+  const actionById = new Map(actions.map((action) => [action.id, {
+    ...serializeAssistantAction(action),
+    plan: action.planId ? planById.get(action.planId) : undefined,
+  }]));
   const serializedMessages = [...messages].reverse().map(serializeMessage).map((message) => ({
     ...message,
     blocks: message.blocks.map((block) => {
@@ -194,14 +201,23 @@ export async function POST(req: NextRequest) {
   let retrievedChunks: Array<{ content: string; metadata?: Record<string, unknown> }> = [];
   const assistantAccessMode = normalizeAssistantAccessMode(user.assistantAccessMode);
   const manualContext = searchAssistantManual(message);
+  const capabilityAnswer = buildAssistantCapabilityAnswer({
+    message,
+    runtime,
+    attachments: attachments.map((attachment) => ({ fileName: attachment.originalName })),
+  });
 
-  let action = await proposeAssistantAction({ message, projectId, user, runtime, history, attachmentIds });
-  if (!action && shouldPlanProjectAssistantAction(message)) {
-    const actionPlan = await planProjectAssistantActionWithModel({ message, history, runtime, signal: req.signal });
-    if (actionPlan) {
-      action = await proposeAssistantAction({ message: actionPlan.command, projectId, user, runtime, history, attachmentIds, expectedToolId: actionPlan.toolId });
-    }
-  }
+  const agentResolution = await resolveProjectAssistantAction({
+    message,
+    projectId,
+    user,
+    runtime,
+    history,
+    attachmentIds,
+    allowModelPlanning: !capabilityAnswer,
+    signal: req.signal,
+  });
+  let action = agentResolution.action;
   if (req.signal.aborted) return err("本次回答已终止", 499);
   const ruleIntent = detectProjectAssistantQueryIntent(message);
   const modelIntent = !action && shouldPlanProjectAssistantQuery(ruleIntent, message)
@@ -221,15 +237,9 @@ export async function POST(req: NextRequest) {
       });
       if (pendingAction) {
         try {
-          action = serializeAssistantAction(await executeAssistantAction(pendingAction, user));
-        } catch (error) {
-          await prisma.assistantActionRun.updateMany({
-            where: { id: pendingAction.id, userId: user.userId, status: "EXECUTING" },
-            data: {
-              status: "FAILED",
-              errorMessage: error instanceof Error ? error.message : "执行失败",
-            },
-          });
+          const execution = await executeAssistantActionAndAdvancePlan(pendingAction, user);
+          action = execution.nextAction ?? execution.action;
+        } catch {
           const failedAction = await prisma.assistantActionRun.findUniqueOrThrow({
             where: { id: pendingAction.id },
           });
@@ -257,7 +267,7 @@ export async function POST(req: NextRequest) {
     retrievedChunks = ragResult?.chunks ?? [];
     if (req.signal.aborted) return err("本次回答已终止", 499);
 
-    answer = attachmentContexts.length > 0 && isDocumentRevisionRequest(message)
+    answer = capabilityAnswer || (attachmentContexts.length > 0 && isDocumentRevisionRequest(message)
       ? await reviseDocumentsWithSmallModel({
           message,
           documents: attachmentContexts.map((attachment) => ({
@@ -280,9 +290,9 @@ export async function POST(req: NextRequest) {
           attachments: attachmentContexts,
           manualContext,
           signal: req.signal,
-        }) || "";
+        }) || "");
     if (req.signal.aborted) return err("本次回答已终止", 499);
-    if (answer) source = retrievedChunks.length ? "MODEL_RAG" : "MODEL";
+    if (answer) source = capabilityAnswer ? "SYSTEM" : retrievedChunks.length ? "MODEL_RAG" : "MODEL";
     if (!answer && ragResult?.answer) {
       answer = ragResult.answer.trim();
       if (answer) source = "RAG";
@@ -313,12 +323,29 @@ export async function POST(req: NextRequest) {
   });
   const trace = {
     ...baseTrace,
-    evidence: manualContext
-      ? [...(baseTrace.evidence ?? []), { source: "佳佳本地使用手册", detail: "操作说明优先依据本地能力手册" }]
-      : baseTrace.evidence,
+    evidence: [
+      ...(baseTrace.evidence ?? []),
+      ...(manualContext ? [{ source: "佳佳本地使用手册", detail: "操作说明优先依据本地能力手册" }] : []),
+      ...(capabilityAnswer ? [{ source: "佳佳服务端能力目录", detail: "能力结论来自当前已启用工具和附件约束" }] : []),
+    ],
     projectId: context.project?.id ?? null,
     projectName: context.project?.name ?? null,
     source,
+    agent: {
+      ...agentResolution.trace,
+      plan: agentResolution.plan ? {
+        id: agentResolution.plan.id,
+        title: agentResolution.plan.title,
+        status: agentResolution.plan.status,
+        stepCount: agentResolution.plan.steps.length,
+      } : undefined,
+      action: action ? {
+        id: action.id,
+        toolId: action.toolId,
+        riskLevel: action.riskLevel,
+        status: action.status,
+      } : undefined,
+    },
     durationMs: Date.now() - requestStartedAt,
   };
 

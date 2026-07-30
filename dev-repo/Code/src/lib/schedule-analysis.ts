@@ -445,6 +445,8 @@ export const analyzeSchedule = (current: ScheduleSnapshot, incoming: ScheduleSna
     projectId: "",
     predecessorTask: "",
     predecessorTaskIds: task.dependencies.map((dependency) => dependency.predecessorTaskId),
+    taskDescription: "",
+    remark: "",
     sortOrder: 0,
   })) )];
   return {

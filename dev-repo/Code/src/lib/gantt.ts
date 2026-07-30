@@ -8,6 +8,7 @@ export interface GanttDateRange {
 
 export interface GanttRow extends ProjectGanttTask {
   endDate: string;
+  spanDays: number;
   offsetDays: number;
   leftPercent: number;
   widthPercent: number;
@@ -43,8 +44,9 @@ export const diffDays = (startDate: string, endDate: string): number => {
 };
 
 export const addDaysInclusive = (startDate: string, durationDays: number): string => {
+  if (!startDate || !Number.isFinite(durationDays) || durationDays <= 0) return "";
   const start = parseGanttDate(startDate);
-  const end = new Date(start.getTime() + (Math.max(1, durationDays) - 1) * MS_PER_DAY);
+  const end = new Date(start.getTime() + (Math.ceil(durationDays) - 1) * MS_PER_DAY);
   return formatGanttDate(end);
 };
 
@@ -56,10 +58,13 @@ export const addCalendarDays = (startDate: string, days: number): string => {
 export const getGanttDateRange = (tasks: ProjectGanttTask[]): GanttDateRange | null => {
   if (tasks.length === 0) return null;
 
-  const datePairs = tasks.map((task) => ({
-    startDate: task.startDate,
-    endDate: task.finishDate || addDaysInclusive(task.startDate, task.durationDays),
-  }));
+  const datePairs = tasks
+    .filter((task) => /^\d{4}-\d{2}-\d{2}$/.test(task.startDate))
+    .map((task) => ({
+      startDate: task.startDate,
+      endDate: task.finishDate || addDaysInclusive(task.startDate, task.durationDays) || task.startDate,
+    }));
+  if (datePairs.length === 0) return null;
   const startDate = datePairs.map((item) => item.startDate).sort()[0];
   const endDate = datePairs.map((item) => item.endDate).sort().at(-1) ?? startDate;
 
@@ -108,7 +113,7 @@ export const findGanttCriticalTaskIds = (tasks: ProjectGanttTask[]): Set<string>
   if (tasks.length === 0) return new Set();
 
   const links = buildGanttDependencyLinks(tasks);
-  const durationById = new Map(tasks.map((task) => [task.id, Math.max(1, task.durationDays)]));
+  const durationById = new Map(tasks.map((task) => [task.id, Math.max(0, task.durationDays)]));
   const incoming = new Map<string, string[]>();
   const outgoing = new Map<string, string[]>();
   const inDegree = new Map(tasks.map((task) => [task.id, 0]));
@@ -147,7 +152,7 @@ export const findGanttCriticalTaskIds = (tasks: ProjectGanttTask[]): Set<string>
         bestPredecessor.set(id, predecessorId);
       }
     }
-    longestDuration.set(id, bestBefore + (durationById.get(id) ?? 1));
+    longestDuration.set(id, bestBefore + (durationById.get(id) ?? 0));
   }
 
   const endId = order.reduce((bestId, id) => (
@@ -170,17 +175,17 @@ export const buildGanttRows = (tasks: ProjectGanttTask[]): GanttRow[] => {
   const criticalIds = findGanttCriticalTaskIds(tasks);
 
   return tasks.map((task) => {
-    const endDate = task.finishDate || addDaysInclusive(task.startDate, task.durationDays);
+    const endDate = task.finishDate || addDaysInclusive(task.startDate, task.durationDays) || task.startDate;
     const offsetDays = diffDaysInclusive(range.startDate, task.startDate) - 1;
-    const durationDays = Math.max(1, diffDaysInclusive(task.startDate, endDate));
+    const spanDays = Math.max(0, task.durationDays || 0);
 
     return {
       ...task,
-      durationDays,
       endDate,
+      spanDays,
       offsetDays,
       leftPercent: Math.round((offsetDays / range.totalDays) * 100),
-      widthPercent: Math.max(4, Math.round((durationDays / range.totalDays) * 100)),
+      widthPercent: spanDays > 0 ? Math.max(4, Math.round((spanDays / range.totalDays) * 100)) : 0,
       isCritical: criticalIds.has(task.id),
     };
   });

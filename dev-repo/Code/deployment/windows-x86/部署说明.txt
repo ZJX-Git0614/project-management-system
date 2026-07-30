@@ -62,3 +62,11 @@ PMS_BACKUP_HOST_DIR=D:/Ceastar-PMS-Backups
 查看服务状态：docker compose ps
 查看系统日志：docker compose logs --tail 200 pms
 查看数据库日志：docker compose logs --tail 200 postgres
+
+八、可选 MPP 导出服务
+
+系统安装和更新不会自动启动 Microsoft Project，也不会自动注册 MPP 导出服务，避免 Project 的自动化或
+管理员授权窗口阻塞部署。Excel 和 Project XML 导出不受影响。
+
+如需导出 Microsoft Project 的二进制 MPP 文件，请在系统安装完成并可正常登录后，右键
+repair-mpp-export-service.bat，选择“以管理员身份运行”。

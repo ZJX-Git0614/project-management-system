@@ -20,11 +20,19 @@ ALTER TABLE "ProjectGanttTask"
 UPDATE "ProjectGanttTask"
 SET
   "finishDate" = CASE
-    WHEN "finishDate" = '' THEN TO_CHAR(("startDate"::date + GREATEST("durationDays", 1) - 1), 'YYYY-MM-DD')
+    WHEN "finishDate" = ''
+      AND "startDate" ~ '^\d{4}-\d{2}-\d{2}$'
+      AND "durationDays" > 0
+      THEN TO_CHAR(
+        "startDate"::date
+          + (CEIL("durationDays"::numeric)::integer - 1),
+        'YYYY-MM-DD'
+      )
     ELSE "finishDate"
   END,
   "durationMinutes" = CASE
-    WHEN "durationMinutes" <= 0 THEN GREATEST("durationDays", 1) * 480
+    WHEN "durationMinutes" <= 0 AND "durationDays" > 0
+      THEN ROUND("durationDays"::numeric * 450)::integer
     ELSE "durationMinutes"
   END;
 

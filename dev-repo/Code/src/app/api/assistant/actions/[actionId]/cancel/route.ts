@@ -4,6 +4,7 @@ import { notFound, ok } from "@/lib/api-utils";
 import { serializeAssistantAction } from "@/lib/assistant-actions";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
+import { cancelAssistantPlanAction } from "@/lib/assistant-plans";
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ actionId: string }> }) {
   const user = await requireUser(req);
@@ -14,5 +15,6 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ act
   const updated = action.status === "PROPOSED"
     ? await prisma.assistantActionRun.update({ where: { id: actionId }, data: { status: "CANCELLED" } })
     : action;
+  if (updated.status === "CANCELLED") await cancelAssistantPlanAction(updated);
   return ok({ action: serializeAssistantAction(updated) });
 }

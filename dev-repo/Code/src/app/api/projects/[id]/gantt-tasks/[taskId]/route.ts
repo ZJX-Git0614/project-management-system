@@ -3,10 +3,20 @@ import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getUserFromRequest } from "@/lib/auth";
 import { ensureMutableProject, err, notFound, ok, unauthorized } from "@/lib/api-utils";
-import { addDaysInclusive } from "@/lib/gantt";
 import {
+  calculateTaskFinishDate,
+  estimatedHoursForDuration,
+  isValidGanttDurationDays,
+  normalizeTaskStartDate,
+  roundGanttHours,
+} from "@/lib/gantt-calendar";
+import {
+  deleteGanttTaskSubtrees,
+  GanttRevisionConflictError,
+  getProjectGanttCalendarMode,
   getOrderedGanttTasks,
   parseGanttDependencyInput,
+  recalculateProjectGanttSchedule,
   renumberProjectGanttTaskCodes,
   replaceGanttTaskDependencies,
   serializeGanttTask,
@@ -29,33 +39,44 @@ export async function PUT(
   const body = await req.json() as Record<string, unknown>;
   const taskCategory = String(body.taskCategory ?? "").trim();
   const taskName = String(body.taskName ?? "").trim();
-  const startDate = String(body.startDate ?? "").trim();
-  const durationDays = Number(body.durationDays);
-  const finishDate = String(body.endDate ?? body.finishDate ?? "").trim() || addDaysInclusive(startDate, durationDays);
+  const taskDescription = String(body.taskDescription ?? existing.taskDescription ?? "").trim();
+  const requestedStartDate = String(body.startDate ?? "").trim();
+  const durationDays = Number(body.durationDays ?? 0);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(requestedStartDate)) return err("计划开始时间格式应为 YYYY-MM-DD");
+  if (!isValidGanttDurationDays(durationDays)) return err("工期只能为空或以 0.5 天为单位填写");
+  const calendarMode = await getProjectGanttCalendarMode(id);
+  const startDate = normalizeTaskStartDate(requestedStartDate, calendarMode);
+  const finishDate = calculateTaskFinishDate(startDate, durationDays, calendarMode);
   const actualStartDate = String(body.actualStartDate ?? "").trim();
   const actualEndDate = String(body.actualEndDate ?? "").trim();
-  const estimatedWorkHours = Number(body.estimatedWorkHours ?? existing.estimatedWorkHours);
-  const actualWorkHours = Number(body.actualWorkHours ?? existing.actualWorkHours);
+  const estimatedWorkHours = estimatedHoursForDuration(durationDays);
+  const requestedActualWorkHours = Number(body.actualWorkHours ?? existing.actualWorkHours);
+  const actualWorkHours = roundGanttHours(requestedActualWorkHours);
   const progress = Number(body.progress ?? 0);
   const predecessorTask = String(body.predecessorTask ?? "").trim();
+  const remark = String(body.remark ?? existing.remark ?? "").trim();
   const dependencies = parseGanttDependencyInput(body);
   const hasDependencyInput = "predecessorDependencies" in body || "predecessorTaskIds" in body || "predecessorTaskId" in body;
   const budgetItemId = "budgetItemId" in body
     ? (body.budgetItemId ? String(body.budgetItemId) : null)
     : existing.budgetItemId;
+  const ownerMemberId = "ownerMemberId" in body
+    ? (body.ownerMemberId ? String(body.ownerMemberId) : null)
+    : existing.ownerMemberId;
 
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return err("计划开始时间格式应为 YYYY-MM-DD");
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(finishDate)) return err("计划完成时间格式应为 YYYY-MM-DD");
-  if (finishDate < startDate) return err("计划完成时间不能早于计划开始时间");
+  if (durationDays > 0 && !/^\d{4}-\d{2}-\d{2}$/.test(finishDate)) return err("计划完成时间格式应为 YYYY-MM-DD");
+  if (finishDate && finishDate < startDate) return err("计划完成时间不能早于计划开始时间");
   if (actualStartDate && !/^\d{4}-\d{2}-\d{2}$/.test(actualStartDate)) return err("实际开始时间格式应为 YYYY-MM-DD");
   if (actualEndDate && !/^\d{4}-\d{2}-\d{2}$/.test(actualEndDate)) return err("实际完成时间格式应为 YYYY-MM-DD");
-  if (!Number.isInteger(durationDays) || durationDays <= 0) return err("任务周期必须为大于 0 的整数天数");
-  if (!Number.isFinite(estimatedWorkHours) || estimatedWorkHours < 0) return err("预计工时必须为大于或等于 0 的数字");
-  if (!Number.isFinite(actualWorkHours) || actualWorkHours < 0) return err("实际工时必须为大于或等于 0 的数字");
+  if (!Number.isFinite(requestedActualWorkHours) || requestedActualWorkHours < 0) return err("实际工时必须为大于或等于 0 的数字");
   if (!Number.isInteger(progress) || progress < 0 || progress > 100) return err("当前进度必须为 0-100 的整数");
   if (budgetItemId) {
     const budgetItem = await prisma.projectBudgetItem.findFirst({ where: { id: budgetItemId, projectId: id }, select: { id: true } });
     if (!budgetItem) return notFound("预算条目");
+  }
+  if (ownerMemberId) {
+    const owner = await prisma.projectMember.findFirst({ where: { id: ownerMemberId, projectId: id }, select: { id: true } });
+    if (!owner) return err("负责人必须来自当前项目组成员");
   }
 
   const shouldRegroupByCategory = Boolean(taskCategory && taskCategory !== existing.taskCategory);
@@ -64,10 +85,12 @@ export async function PUT(
     const baseData = {
       taskCategory,
       taskName,
+      taskDescription,
+      ownerMemberId,
       startDate,
       finishDate,
       durationDays,
-      durationMinutes: durationDays * 480,
+      durationMinutes: Math.round(durationDays * 450),
       actualStartDate,
       actualEndDate,
       estimatedWorkHours,
@@ -75,6 +98,7 @@ export async function PUT(
       progress,
       budgetItemId,
       predecessorTask,
+      remark,
     };
 
     if (!shouldRegroupByCategory) {
@@ -127,6 +151,7 @@ export async function PUT(
   if (shouldRegroupByCategory) {
     await renumberProjectGanttTaskCodes(id);
   }
+  await recalculateProjectGanttSchedule(id, calendarMode);
   const normalizedTask = (await getOrderedGanttTasks(id)).find((item) => item.id === taskId);
 
   return ok(normalizedTask ? serializeGanttTask(normalizedTask) : task);
@@ -146,6 +171,18 @@ export async function DELETE(
   const existing = await prisma.projectGanttTask.findFirst({ where: { id: taskId, projectId: id } });
   if (!existing) return notFound("甘特任务");
 
-  await prisma.projectGanttTask.delete({ where: { id: taskId } });
-  return ok({ message: "甘特任务已删除" });
+  try {
+    const result = await deleteGanttTaskSubtrees({
+      projectId: id,
+      rootTaskIds: [taskId],
+      operator: user.displayName,
+      operatorUserId: user.userId,
+    });
+    return ok({ message: "甘特任务已删除", ...result });
+  } catch (error) {
+    if (error instanceof GanttRevisionConflictError) {
+      return err(error.message, 409, error.code);
+    }
+    return err(error instanceof Error ? error.message : "删除失败");
+  }
 }

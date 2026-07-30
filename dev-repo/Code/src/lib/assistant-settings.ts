@@ -66,22 +66,143 @@ export type AssistantRuntimeConfig = {
   embeddingProvider: AssistantRuntimeProvider | null;
 };
 
-export const ASSISTANT_TOOL_CATALOG = [
-  { id: "todo.create", label: "创建项目待办", description: "确认后为当前项目创建待办事项", riskLevel: "MEDIUM" },
-  { id: "todo.complete", label: "完成项目待办", description: "按待办标题定位并确认完成", riskLevel: "MEDIUM" },
-  { id: "gantt.progress.update", label: "更新任务进度", description: "确认后更新当前项目任务进度", riskLevel: "MEDIUM" },
-  { id: "gantt.hierarchy.outdent", label: "上移任务层级", description: "将指定任务及其子任务上移一个层级", riskLevel: "MEDIUM" },
-  { id: "gantt.hierarchy.indent", label: "下移任务层级", description: "将指定任务及其子任务下移到上一条同级任务下", riskLevel: "MEDIUM" },
-  { id: "weekly.status.update", label: "更新事项状态", description: "按事项 ID 更新状态或当前进度", riskLevel: "MEDIUM" },
-  { id: "risk.create", label: "登记项目风险", description: "根据明确的风险名称创建风险登记", riskLevel: "MEDIUM" },
-  { id: "risk.status.update", label: "更新风险状态", description: "按风险 ID 更新跟踪状态", riskLevel: "MEDIUM" },
-  { id: "project.export", label: "导出项目数据", description: "导出任务、事项、风险或预算 CSV", riskLevel: "LOW" },
-  { id: "schedule.analysis.export", label: "导出计划分析", description: "导出最新计划差异、冲突和影响链", riskLevel: "LOW" },
-  { id: "schedule.merge.files", label: "合并进度计划", description: "合并多个异构进度文件并生成系统可导入 Excel", riskLevel: "LOW" },
-  { id: "document.revision.save", label: "保存文档修订稿", description: "将助手生成的文档内容保存为独立修订稿", riskLevel: "LOW" },
-  { id: "risk.create.from-analysis", label: "分析结论转风险", description: "将计划分析中选定的严重冲突创建为风险", riskLevel: "MEDIUM" },
-  { id: "todo.create.batch", label: "批量创建整改待办", description: "将计划冲突处理建议转为本人待办", riskLevel: "MEDIUM" },
-] as const;
+export type AssistantToolDefinition = {
+  id: string;
+  version: number;
+  label: string;
+  description: string;
+  routingHints?: readonly string[];
+  riskLevel: "LOW" | "MEDIUM" | "HIGH";
+  permissions: readonly string[];
+  inputSchema: {
+    additionalProperties: false;
+    properties: Readonly<Record<string, {
+      type: "string" | "number" | "string[]" | "object" | "object[]";
+      required?: boolean;
+      minLength?: number;
+      maxLength?: number;
+      minimum?: number;
+      maximum?: number;
+      minItems?: number;
+      maxItems?: number;
+      enum?: readonly string[];
+    }>>;
+  };
+  outputSchema: {
+    kind: "DATA" | "FILE" | "NAVIGATION";
+    required: readonly string[];
+  };
+  idempotency: "REPLAY_SAFE" | "KEYED_WRITE" | "NON_IDEMPOTENT";
+  retryPolicy: {
+    maxAttempts: number;
+    retryableErrorCodes: readonly string[];
+  };
+  verifier: "RESULT_PRESENT" | "DOWNLOAD_AVAILABLE" | "DATABASE_STATE" | "SCHEDULE_REIMPORT";
+  attachments?: {
+    min: number;
+    max: number;
+    extensions: readonly string[];
+  };
+  output?: "DATA" | "FILE" | "NAVIGATION";
+};
+
+export const ASSISTANT_TOOL_CATALOG: readonly AssistantToolDefinition[] = [
+  { id: "todo.create", version: 1, label: "创建项目待办", description: "确认后为当前项目创建待办事项", riskLevel: "MEDIUM", permissions: [], inputSchema: { additionalProperties: false, properties: { title: { type: "string", required: true, minLength: 1, maxLength: 200 }, targetPersonName: { type: "string", required: true, minLength: 1, maxLength: 100 } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "todoId"] }, idempotency: "KEYED_WRITE", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "todo.complete", version: 1, label: "完成项目待办", description: "按待办标题定位并确认完成", riskLevel: "MEDIUM", permissions: [], inputSchema: { additionalProperties: false, properties: { todoId: { type: "string", required: true, minLength: 1 } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "todoId"] }, idempotency: "KEYED_WRITE", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "todo.delete", version: 1, label: "删除项目待办", description: "按待办标题定位并删除一条项目待办", riskLevel: "HIGH", permissions: [], inputSchema: { additionalProperties: false, properties: { todoId: { type: "string", required: true, minLength: 1 } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "todoId"] }, idempotency: "NON_IDEMPOTENT", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "gantt.task.create", version: 1, label: "新增甘特任务", description: "使用用户明确提供的名称、类别、计划开始和工期新增任务", riskLevel: "MEDIUM", permissions: ["project-gantt:create"], inputSchema: { additionalProperties: false, properties: { taskName: { type: "string", required: true, minLength: 1, maxLength: 100 }, taskCategory: { type: "string", required: true, minLength: 1, maxLength: 200 }, startDate: { type: "string", required: true, minLength: 10, maxLength: 10 }, durationDays: { type: "number", required: true, minimum: 0, maximum: 10000 }, parentTaskId: { type: "string", minLength: 1 } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "taskId"] }, idempotency: "NON_IDEMPOTENT", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "gantt.task.update", version: 1, label: "修改甘特任务文本", description: "修改指定任务的名称、描述或备注，不补造未提供字段", riskLevel: "MEDIUM", permissions: ["project-gantt:edit"], inputSchema: { additionalProperties: false, properties: { taskId: { type: "string", required: true, minLength: 1 }, taskName: { type: "string", minLength: 1, maxLength: 100 }, taskDescription: { type: "string", maxLength: 2000 }, remark: { type: "string", maxLength: 2000 } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "taskId"] }, idempotency: "KEYED_WRITE", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "gantt.task.delete", version: 1, label: "删除甘特任务", description: "删除指定任务及其全部子任务，并解除被删任务的事项、风险和依赖关联", riskLevel: "HIGH", permissions: ["project-gantt:delete"], inputSchema: { additionalProperties: false, properties: { taskIds: { type: "string[]", required: true, minItems: 1, maxItems: 5000 } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "taskIds"] }, idempotency: "NON_IDEMPOTENT", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "gantt.depth.prune", version: 1, label: "按层级清理甘特任务", description: "删除指定层级及更深的全部甘特任务，保留更高层级", riskLevel: "HIGH", permissions: ["project-gantt:delete"], inputSchema: { additionalProperties: false, properties: { minimumDepth: { type: "number", required: true, minimum: 1, maximum: 20 } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "deletedTaskCount"] }, idempotency: "NON_IDEMPOTENT", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "gantt.progress.update", version: 1, label: "更新任务进度", description: "确认后更新当前项目任务进度", routingHints: ["出现 Task 编号并修改进度时使用本工具，不得选择事项工具"], riskLevel: "MEDIUM", permissions: ["project-gantt:edit"], inputSchema: { additionalProperties: false, properties: { taskId: { type: "string", required: true, minLength: 1 }, progress: { type: "number", required: true, minimum: 0, maximum: 100 } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "taskId", "progress"] }, idempotency: "KEYED_WRITE", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "gantt.parent.wrap", version: 1, label: "创建任务总父级", description: "创建新的一级父任务，并将当前一级任务整体纳入其下", riskLevel: "MEDIUM", permissions: ["project-gantt:create", "project-gantt:edit"], inputSchema: { additionalProperties: false, properties: { taskName: { type: "string", required: true, minLength: 1, maxLength: 100 }, childTaskIds: { type: "string[]", required: true, minItems: 1, maxItems: 5000 } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "taskId"] }, idempotency: "NON_IDEMPOTENT", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "gantt.hierarchy.outdent", version: 1, label: "上移任务层级", description: "将指定任务及其子任务上移一个层级", riskLevel: "MEDIUM", permissions: ["project-gantt:edit"], inputSchema: { additionalProperties: false, properties: { taskIds: { type: "string[]", required: true, minItems: 1, maxItems: 5000 } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "taskIds"] }, idempotency: "NON_IDEMPOTENT", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "gantt.hierarchy.indent", version: 1, label: "下移任务层级", description: "将指定任务及其子任务下移到上一条同级任务下", riskLevel: "MEDIUM", permissions: ["project-gantt:edit"], inputSchema: { additionalProperties: false, properties: { taskIds: { type: "string[]", required: true, minItems: 1, maxItems: 5000 } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "taskIds"] }, idempotency: "NON_IDEMPOTENT", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "weekly.status.update", version: 1, label: "更新事项状态", description: "按事项 ID 更新状态或当前进度", routingHints: ["出现 Matter 编号时使用本工具；Task 编号属于甘特任务，不得使用本工具"], riskLevel: "MEDIUM", permissions: ["weekly-items:edit"], inputSchema: { additionalProperties: false, properties: { weeklyItemId: { type: "string", required: true, minLength: 1 }, status: { type: "string", required: true, enum: ["PENDING", "IN_PROGRESS", "DONE", "CANCELED"] }, progress: { type: "number", required: true, minimum: 0, maximum: 100 } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "weeklyItemId"] }, idempotency: "KEYED_WRITE", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "weekly.item.create", version: 1, label: "新增项目事项", description: "使用用户明确提供的事项名称和负责人创建项目事项", riskLevel: "MEDIUM", permissions: ["weekly-items:create"], inputSchema: { additionalProperties: false, properties: { title: { type: "string", required: true, minLength: 1, maxLength: 200 }, owner: { type: "string", required: true, minLength: 1, maxLength: 100 }, description: { type: "string", maxLength: 2000 } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "weeklyItemId"] }, idempotency: "NON_IDEMPOTENT", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "weekly.item.delete", version: 1, label: "删除项目事项", description: "删除指定事项并按当前排序重新编号", riskLevel: "HIGH", permissions: ["weekly-items:delete"], inputSchema: { additionalProperties: false, properties: { weeklyItemId: { type: "string", required: true, minLength: 1 } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "weeklyItemId"] }, idempotency: "NON_IDEMPOTENT", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "risk.create", version: 1, label: "登记项目风险", description: "根据明确的风险名称创建风险登记", riskLevel: "MEDIUM", permissions: ["risk-register:create"], inputSchema: { additionalProperties: false, properties: { riskName: { type: "string", required: true, minLength: 1, maxLength: 200 } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "riskId", "riskCode"] }, idempotency: "KEYED_WRITE", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "risk.status.update", version: 1, label: "更新风险状态", description: "按风险 ID 更新跟踪状态", riskLevel: "MEDIUM", permissions: ["risk-register:edit"], inputSchema: { additionalProperties: false, properties: { riskId: { type: "string", required: true, minLength: 1 }, status: { type: "string", required: true, enum: ["识别中", "跟踪中", "处理中", "已关闭"] } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "riskId"] }, idempotency: "KEYED_WRITE", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "risk.delete", version: 1, label: "删除项目风险", description: "删除指定风险并按当前排序重新编号", riskLevel: "HIGH", permissions: ["risk-register:delete"], inputSchema: { additionalProperties: false, properties: { riskId: { type: "string", required: true, minLength: 1 } } }, outputSchema: { kind: "NAVIGATION", required: ["message", "riskId"] }, idempotency: "NON_IDEMPOTENT", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "project.export", version: 2, label: "筛选并导出项目数据", description: "按用户指定的任务层级、任务进度、事项优先级或事项状态导出 CSV，并保持任务原始层级顺序", routingHints: ["明确要求导出或下载风险登记册、任务、事项、预算时直接使用本工具；必须保留一级/二级等层级及紧急/高优先级/状态等限定词"], riskLevel: "LOW", permissions: [], inputSchema: { additionalProperties: false, properties: { exportType: { type: "string", required: true, enum: ["gantt", "weekly", "risk", "budget"] }, taskDepth: { type: "number", minimum: 1, maximum: 20 }, taskProgress: { type: "string", enum: ["NOT_STARTED", "IN_PROGRESS", "COMPLETED", "INCOMPLETE"] }, weeklyPriority: { type: "string", enum: ["LOW", "NORMAL", "HIGH", "URGENT"] }, weeklyStatus: { type: "string", enum: ["PENDING", "IN_PROGRESS", "DONE", "CANCELED"] } } }, outputSchema: { kind: "FILE", required: ["message", "downloadUrl"] }, idempotency: "REPLAY_SAFE", retryPolicy: { maxAttempts: 2, retryableErrorCodes: ["TEMPORARY_DEPENDENCY"] }, verifier: "DOWNLOAD_AVAILABLE", output: "FILE" },
+  { id: "schedule.analysis.export", version: 1, label: "导出计划分析", description: "导出最新计划差异、冲突和影响链", routingHints: ["只用于导出已经生成的计划分析；上传附件并要求对比时不得使用本工具"], riskLevel: "LOW", permissions: [], inputSchema: { additionalProperties: false, properties: { analysisRunId: { type: "string", required: true, minLength: 1 } } }, outputSchema: { kind: "FILE", required: ["message", "downloadUrl"] }, idempotency: "REPLAY_SAFE", retryPolicy: { maxAttempts: 2, retryableErrorCodes: ["TEMPORARY_DEPENDENCY"] }, verifier: "DOWNLOAD_AVAILABLE", output: "FILE" },
+  { id: "schedule.compare.file", version: 1, label: "对比上传计划", description: "解析上传计划并与当前甘特任务对比，生成差异、冲突和干涉分析", routingHints: ["用户上传计划附件并要求与当前进度或甘特对比时使用本工具"], riskLevel: "LOW", permissions: ["project-gantt:create"], inputSchema: { additionalProperties: false, properties: { attachmentId: { type: "string", required: true, minLength: 1 }, statusDate: { type: "string", required: true, minLength: 10, maxLength: 10 } } }, outputSchema: { kind: "DATA", required: ["message", "analysisRunId", "issueCount"] }, idempotency: "KEYED_WRITE", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE", attachments: { min: 1, max: 1, extensions: [".mpp", ".xml", ".xlsx"] }, output: "DATA" },
+  {
+    id: "schedule.convert.file",
+    version: 1,
+    label: "转换进度计划",
+    description: "将单个 MPP、Project XML 或系统 Excel 转换为系统可导入 Excel",
+    riskLevel: "LOW",
+    permissions: ["project-gantt:create"],
+    inputSchema: { additionalProperties: false, properties: { attachmentId: { type: "string", required: true, minLength: 1 } } },
+    outputSchema: { kind: "FILE", required: ["message", "downloadUrl", "taskCount"] },
+    idempotency: "KEYED_WRITE",
+    retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] },
+    verifier: "SCHEDULE_REIMPORT",
+    attachments: { min: 1, max: 1, extensions: [".mpp", ".xml", ".xlsx"] },
+    output: "FILE",
+  },
+  {
+    id: "schedule.merge.files",
+    version: 1,
+    label: "合并进度计划",
+    description: "合并多个异构进度文件并生成系统可导入 Excel",
+    riskLevel: "LOW",
+    permissions: ["project-gantt:create"],
+    inputSchema: { additionalProperties: false, properties: { attachmentIds: { type: "string[]", required: true, minItems: 2, maxItems: 5 } } },
+    outputSchema: { kind: "FILE", required: ["message", "downloadUrl", "taskCount"] },
+    idempotency: "KEYED_WRITE",
+    retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] },
+    verifier: "SCHEDULE_REIMPORT",
+    attachments: { min: 2, max: 5, extensions: [".mpp", ".xml", ".xlsx", ".csv", ".md", ".txt"] },
+    output: "FILE",
+  },
+  { id: "document.revision.generate", version: 1, label: "生成文档修订稿", description: "读取附件、诊断结构、按要求重写并生成经过缺失项检查的独立修订稿", riskLevel: "LOW", permissions: ["project-documents:create"], inputSchema: { additionalProperties: false, properties: { attachmentId: { type: "string", required: true, minLength: 1 }, instruction: { type: "string", required: true, minLength: 1, maxLength: 2000 } } }, outputSchema: { kind: "FILE", required: ["message", "downloadUrl", "revisionId", "artifactId"] }, idempotency: "KEYED_WRITE", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DOWNLOAD_AVAILABLE", attachments: { min: 1, max: 1, extensions: [".docx", ".xlsx", ".csv", ".pdf", ".txt", ".md"] }, output: "FILE" },
+  { id: "document.revision.save", version: 1, label: "保存文档修订稿", description: "将助手生成的文档内容保存为独立修订稿", riskLevel: "LOW", permissions: ["project-documents:create"], inputSchema: { additionalProperties: false, properties: { attachmentId: { type: "string", required: true, minLength: 1 }, content: { type: "string", required: true, minLength: 1 }, instruction: { type: "string", required: true, minLength: 1 } } }, outputSchema: { kind: "FILE", required: ["message", "downloadUrl", "revisionId", "artifactId"] }, idempotency: "KEYED_WRITE", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DOWNLOAD_AVAILABLE", output: "FILE" },
+  { id: "risk.create.from-analysis", version: 1, label: "分析结论转风险", description: "将计划分析中选定的严重冲突创建为风险", riskLevel: "MEDIUM", permissions: ["risk-register:create"], inputSchema: { additionalProperties: false, properties: { analysisRunId: { type: "string", required: true, minLength: 1 }, issue: { type: "object", required: true } } }, outputSchema: { kind: "DATA", required: ["message", "riskId", "riskCode"] }, idempotency: "KEYED_WRITE", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+  { id: "todo.create.batch", version: 1, label: "批量创建整改待办", description: "将计划冲突处理建议转为本人待办", riskLevel: "MEDIUM", permissions: [], inputSchema: { additionalProperties: false, properties: { analysisRunId: { type: "string", required: true, minLength: 1 }, items: { type: "object[]", required: true, minItems: 1, maxItems: 50 } } }, outputSchema: { kind: "DATA", required: ["message", "todoIds"] }, idempotency: "KEYED_WRITE", retryPolicy: { maxAttempts: 1, retryableErrorCodes: [] }, verifier: "DATABASE_STATE" },
+];
+
+export const getAssistantToolDefinition = (toolId: string) => (
+  ASSISTANT_TOOL_CATALOG.find((tool) => tool.id === toolId) ?? null
+);
+
+const matchesFieldType = (type: AssistantToolDefinition["inputSchema"]["properties"][string]["type"], value: unknown) => {
+  if (type === "string") return typeof value === "string";
+  if (type === "number") return typeof value === "number" && Number.isFinite(value);
+  if (type === "string[]") return Array.isArray(value) && value.every((item) => typeof item === "string");
+  if (type === "object[]") return Array.isArray(value) && value.every((item) => item !== null && typeof item === "object" && !Array.isArray(item));
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+};
+
+export const validateAssistantToolArgs = (toolId: string, args: Record<string, unknown>) => {
+  const tool = getAssistantToolDefinition(toolId);
+  if (!tool) return { ok: false as const, error: "不支持的 Agent 工具" };
+  const unknownKeys = Object.keys(args).filter((key) => !Object.hasOwn(tool.inputSchema.properties, key));
+  if (unknownKeys.length > 0) return { ok: false as const, error: `工具参数包含未声明字段：${unknownKeys.join("、")}` };
+  for (const [name, field] of Object.entries(tool.inputSchema.properties)) {
+    const value = args[name];
+    if (value === undefined || value === null) {
+      if (field.required) return { ok: false as const, error: `工具参数缺少必填字段：${name}` };
+      continue;
+    }
+    if (!matchesFieldType(field.type, value)) return { ok: false as const, error: `工具参数 ${name} 类型无效` };
+    if (typeof value === "string") {
+      if (field.minLength !== undefined && value.length < field.minLength) return { ok: false as const, error: `工具参数 ${name} 内容过短` };
+      if (field.maxLength !== undefined && value.length > field.maxLength) return { ok: false as const, error: `工具参数 ${name} 内容过长` };
+      if (field.enum && !field.enum.includes(value)) return { ok: false as const, error: `工具参数 ${name} 不在允许范围内` };
+    }
+    if (typeof value === "number") {
+      if (field.minimum !== undefined && value < field.minimum) return { ok: false as const, error: `工具参数 ${name} 小于允许值` };
+      if (field.maximum !== undefined && value > field.maximum) return { ok: false as const, error: `工具参数 ${name} 大于允许值` };
+    }
+    if (Array.isArray(value)) {
+      if (field.minItems !== undefined && value.length < field.minItems) return { ok: false as const, error: `工具参数 ${name} 数量不足` };
+      if (field.maxItems !== undefined && value.length > field.maxItems) return { ok: false as const, error: `工具参数 ${name} 数量过多` };
+    }
+  }
+  return { ok: true as const, tool };
+};
 
 const DEFAULT_TOOL_IDS = ASSISTANT_TOOL_CATALOG.map((item) => item.id);
 const LEGACY_DEFAULT_TOOL_IDS = [
@@ -93,7 +214,27 @@ const LEGACY_DEFAULT_TOOL_IDS = [
   "risk.create.from-analysis",
   "todo.create.batch",
 ] as const;
-const NEW_DEFAULT_TOOL_IDS = ["todo.complete", "weekly.status.update", "risk.create", "risk.status.update", "schedule.merge.files", "gantt.hierarchy.outdent", "gantt.hierarchy.indent"] as const;
+const NEW_DEFAULT_TOOL_IDS = [
+  "todo.complete",
+  "todo.delete",
+  "gantt.task.create",
+  "gantt.task.update",
+  "gantt.task.delete",
+  "gantt.depth.prune",
+  "weekly.status.update",
+  "weekly.item.create",
+  "weekly.item.delete",
+  "risk.create",
+  "risk.status.update",
+  "risk.delete",
+  "schedule.compare.file",
+  "schedule.convert.file",
+  "schedule.merge.files",
+  "document.revision.generate",
+  "gantt.parent.wrap",
+  "gantt.hierarchy.outdent",
+  "gantt.hierarchy.indent",
+] as const;
 
 const parseToolIds = (value: string) => {
   try {

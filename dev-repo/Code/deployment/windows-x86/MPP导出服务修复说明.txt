@@ -1,0 +1,23 @@
+﻿Ceastar PMS MPP 导出服务 401 修复说明
+
+适用情况
+
+更新主系统成功，但更新窗口出现：
+MPP export service was not enabled: 远程服务器返回错误: (401) 未经授权。
+
+该提示不代表主系统更新失败。它表示旧的 MPP 转换进程仍使用旧令牌，而更新脚本使用新令牌检查服务，导致鉴权不一致。Excel 和 Project XML 导出不受影响。
+
+修复步骤
+
+1. Windows 必须已安装 Microsoft Project；未安装时无法生成真实 MPP 文件。
+2. 将整个“Ceastar-PMS-MPP导出服务修复-20260729-2a”文件夹放到 Ceastar PMS 原部署目录内，即该文件夹的上一级应能看到 docker-compose.yml。
+3. 双击 repair-mpp-export-service.bat。
+4. 弹出管理员授权窗口时选择“是”。
+5. 等待窗口显示：The MPP export service repair completed successfully.
+6. 打开项目进度管理，重新执行一次 MPP 导出进行验证。
+
+注意
+
+1. 修复脚本会复用原有服务令牌，停止旧计划任务后重新注册并启动服务，再重建 pms 应用容器以载入一致的配置。
+2. 修复过程不会修改 PostgreSQL 数据库、项目文档、Ollama 模型或备份文件。
+3. 直接在浏览器打开 http://localhost:3210/health 会因为没有携带服务令牌而显示 401，这是正常的；应在 Ceastar PMS 中执行 MPP 导出验证。

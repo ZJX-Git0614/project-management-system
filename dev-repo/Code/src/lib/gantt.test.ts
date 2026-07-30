@@ -17,12 +17,14 @@ const baseTask = (overrides: Partial<ProjectGanttTask>): ProjectGanttTask => ({
   taskCode: "Task1",
   taskCategory: "设计",
   taskName: "方案设计",
+  taskDescription: "",
   startDate: "2026-06-01",
   durationDays: 10,
   actualStartDate: "",
   actualEndDate: "",
   progress: 0,
   predecessorTask: "",
+  remark: "",
   sortOrder: 1,
   project: undefined,
   ...overrides,
@@ -34,6 +36,14 @@ describe("gantt helpers", () => {
 
     expect(row.endDate).toBe("2026-06-10");
     expect(row.durationDays).toBe(10);
+  });
+
+  it("keeps unscheduled tasks in the grid without giving them a task bar", () => {
+    const [row] = buildGanttRows([baseTask({ durationDays: 0, finishDate: "" })]);
+
+    expect(row.endDate).toBe("2026-06-01");
+    expect(row.spanDays).toBe(0);
+    expect(row.widthPercent).toBe(0);
   });
 
   it("builds proportional timeline offsets for multiple tasks", () => {

@@ -99,8 +99,8 @@ git status --short
 每次更新使用两个版本变量：
 
 ```bash
-RELEASE_VERSION=2026.07.28.4
-RELEASE_STAMP=20260728-4
+RELEASE_VERSION=2026.07.29.3
+RELEASE_STAMP=20260729-3
 IMAGE_NAME=ceastar-project-management:${RELEASE_VERSION}-amd64
 PACKAGE_NAME=Ceastar-PMS-更新包-${RELEASE_STAMP}
 ```
@@ -189,7 +189,7 @@ docker buildx build \
 PowerShell 等价命令：
 
 ```powershell
-$ReleaseVersion = "2026.07.28.4"
+$ReleaseVersion = "2026.07.29.3"
 $ImageName = "ceastar-project-management:$ReleaseVersion-amd64"
 docker buildx build --platform linux/amd64 --tag $ImageName --load .
 ```
@@ -300,13 +300,13 @@ image.sha256
 Windows PowerShell：
 
 ```powershell
-(Get-FileHash ".\images\ceastar-pms-2026.07.28.4-amd64.tar" -Algorithm SHA256).Hash.ToLowerInvariant()
+(Get-FileHash ".\images\ceastar-pms-2026.07.29.3-amd64.tar" -Algorithm SHA256).Hash.ToLowerInvariant()
 ```
 
 同时创建 `image-name.txt`，内容必须与构建时的镜像标签完全一致：
 
 ```text
-ceastar-project-management:2026.07.28.4-amd64
+ceastar-project-management:2026.07.29.3-amd64
 ```
 
 ## 13. 组装更新包

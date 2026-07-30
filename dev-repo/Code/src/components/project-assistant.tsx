@@ -15,11 +15,13 @@ import {
   Database,
   Download,
   FileSearch,
+  Hand,
   Maximize2,
   Minimize2,
   Paperclip,
   Send,
   ShieldCheck,
+  ShieldAlert,
   Sparkles,
   Square,
   Timer,
@@ -61,6 +63,22 @@ type AssistantAction = {
   status: string
   expiresAt: string
   result?: { message?: string; downloadUrl?: string; navigateUrl?: string; navigateLabel?: string }
+  plan?: {
+    id: string
+    title: string
+    goal: string
+    status: string
+    currentStepIndex: number
+    steps: Array<{
+      id: string
+      stepIndex: number
+      toolId: string
+      title: string
+      status: string
+      riskLevel: string
+      errorMessage?: string
+    }>
+  }
 }
 
 type AssistantAttachment = {
@@ -359,10 +377,13 @@ export function ProjectAssistant({
   }, [sending, thinkingStartedAt])
 
   useEffect(() => {
-    if (!open) return
+    if (!open || loadingHistory) return
+    // Enter the conversation at the latest message. Smooth scrolling would visibly replay
+    // the full history whenever the panel opens, which is distracting for long sessions.
     const frame = window.requestAnimationFrame(() => {
       const container = messagesRef.current
-      if (container) container.scrollTo({ top: container.scrollHeight, behavior: "smooth" })
+      if (!container) return
+      container.scrollTop = container.scrollHeight
     })
     return () => window.cancelAnimationFrame(frame)
   }, [messages, open, sending, loadingHistory])
@@ -596,12 +617,19 @@ export function ProjectAssistant({
     notify("已停止本次处理", "info")
   }
 
-  const updateActionBlock = (action: AssistantAction) => {
+  const updateActionBlock = (action: AssistantAction, nextAction?: AssistantAction) => {
     setMessages((current) => current.map((message) => ({
       ...message,
-      blocks: message.blocks?.map((block) => block.type !== "attachment" && block.action.id === action.id
+      blocks: (() => {
+        const updated = message.blocks?.map((block) => block.type !== "attachment" && block.action.id === action.id
         ? { ...block, type: action.status === "PROPOSED" ? "action-proposal" : "action-result", action }
-        : block),
+        : block) as AssistantBlock[] | undefined
+        if (!updated || !nextAction || !updated.some((block) => block.type !== "attachment" && block.action.id === action.id)) return updated
+        if (!updated.some((block) => block.type !== "attachment" && block.action.id === nextAction.id)) {
+          updated.push({ type: nextAction.status === "PROPOSED" ? "action-proposal" : "action-result", action: nextAction })
+        }
+        return updated
+      })(),
     })))
   }
 
@@ -617,11 +645,13 @@ export function ProjectAssistant({
 
   const handleAction = async (action: AssistantAction, command: "confirm" | "cancel") => {
     try {
-      const result = await api.post<{ action: AssistantAction }>(`/api/assistant/actions/${action.id}/${command}`)
-      updateActionBlock(result.action)
+      const result = await api.post<{ action: AssistantAction; nextAction?: AssistantAction; plan?: AssistantAction["plan"] }>(`/api/assistant/actions/${action.id}/${command}`)
+      const completedAction = result.plan ? { ...result.action, plan: result.plan } : result.action
+      const nextAction = result.nextAction && result.plan ? { ...result.nextAction, plan: result.plan } : result.nextAction
+      updateActionBlock(completedAction, nextAction)
       const message = result.action.result?.message || (command === "cancel" ? "操作已取消" : "操作已执行")
       notify(message, command === "cancel" ? "info" : "success")
-      if (["todo.create", "todo.create.batch", "todo.complete"].includes(result.action.toolId) && result.action.status === "SUCCEEDED") {
+      if (["todo.create", "todo.create.batch", "todo.complete", "todo.delete"].includes(result.action.toolId) && result.action.status === "SUCCEEDED") {
         window.dispatchEvent(new Event(TODO_CHANGED_EVENT))
       }
       if (result.action.result?.downloadUrl) {
@@ -725,36 +755,6 @@ export function ProjectAssistant({
                   {launcherWelcomeText(runtime)}
                 </p>
               </div>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-8"
-                    title={`Agent 授权：${ASSISTANT_ACCESS_MODE_LABELS[runtime.assistantAccessMode]}`}
-                    aria-label={`Agent 授权：${ASSISTANT_ACCESS_MODE_LABELS[runtime.assistantAccessMode]}`}
-                  >
-                    <ShieldCheck />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-72" data-assistant-access-menu>
-                  <DropdownMenuLabel>Agent 操作授权</DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  {(Object.keys(ASSISTANT_ACCESS_MODE_LABELS) as AssistantAccessMode[]).map((mode) => (
-                    <DropdownMenuItem
-                      key={mode}
-                      className="items-start py-2"
-                      onSelect={() => void updateAccessMode(mode)}
-                    >
-                      <Check className={cn("mt-0.5 size-4", runtime.assistantAccessMode !== mode && "invisible")} />
-                      <span className="min-w-0">
-                        <span className="block text-xs font-medium">{ASSISTANT_ACCESS_MODE_LABELS[mode]}</span>
-                        <span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">{accessModeDescription[mode]}</span>
-                      </span>
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
               <Button variant="ghost" size="icon" className="size-8" onClick={() => setFullScreen((current) => !current)} title={fullScreen ? "退出全屏" : "展开助手"}>
                 {fullScreen ? <Minimize2 /> : <Maximize2 />}
               </Button>
@@ -813,6 +813,38 @@ export function ProjectAssistant({
                             </div>
                             <Badge variant={block.action.riskLevel === "LOW" ? "secondary" : "warning"}>{block.action.riskLevel === "LOW" ? "低风险" : "需确认"}</Badge>
                           </div>
+                          {block.action.plan && (
+                            <div className="mt-3 border-t border-border/70 pt-2.5">
+                              <div className="flex items-center justify-between gap-2 text-[11px]">
+                                <span className="font-medium">{block.action.plan.title}</span>
+                                <span className="text-muted-foreground">{block.action.plan.steps.filter((step) => step.status === "SUCCEEDED").length}/{block.action.plan.steps.length}</span>
+                              </div>
+                              <div className="mt-2 grid gap-1.5">
+                                {block.action.plan.steps.map((step) => (
+                                  <div key={step.id} className="flex min-w-0 items-center gap-2 text-[11px]">
+                                    <span className={cn(
+                                      "flex size-4 shrink-0 items-center justify-center rounded-full border text-[9px]",
+                                      step.status === "SUCCEEDED" && "border-emerald-500/60 bg-emerald-500/10 text-emerald-400",
+                                      ["PROPOSED", "EXECUTING"].includes(step.status) && "border-primary/60 bg-primary/10 text-primary",
+                                      ["FAILED", "BLOCKED"].includes(step.status) && "border-destructive/60 bg-destructive/10 text-destructive",
+                                    )}>
+                                      {step.status === "SUCCEEDED" ? <Check className="size-2.5" /> : step.stepIndex + 1}
+                                    </span>
+                                    <span className={cn("min-w-0 flex-1 truncate", step.status === "PENDING" && "text-muted-foreground")}>{step.title}</span>
+                                    <span className="shrink-0 text-[10px] text-muted-foreground">{{
+                                      PENDING: "待执行",
+                                      PROPOSED: "待确认",
+                                      EXECUTING: "执行中",
+                                      SUCCEEDED: "已完成",
+                                      FAILED: "失败",
+                                      BLOCKED: "待补充",
+                                      CANCELLED: "已取消",
+                                    }[step.status] || step.status}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                           {block.action.status === "PROPOSED" ? (
                             <div className="mt-3 flex justify-end gap-2">
                               <Button variant="ghost" size="sm" onClick={() => void handleAction(block.action, "cancel")}>取消</Button>
@@ -941,17 +973,55 @@ export function ProjectAssistant({
                     disabled={sending}
                   />
                   <div className="mt-1 flex items-center justify-between gap-2 border-t border-border/60 pt-2">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 px-2 text-[11px] text-muted-foreground"
-                      onClick={() => attachmentInputRef.current?.click()}
-                      disabled={!currentProjectId || sending || uploadingAttachment || attachments.length >= 5}
-                      title={currentProjectId ? "添加文档或进度文件" : "请先选择项目"}
-                    >
-                      {uploadingAttachment ? <Sparkles className="size-3.5 animate-pulse" /> : <Paperclip className="size-3.5" />}
-                      {uploadingAttachment ? "解析中" : "附件"}
-                    </Button>
+                    <div className="flex min-w-0 items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 shrink-0 px-2 text-[11px] text-muted-foreground"
+                        onClick={() => attachmentInputRef.current?.click()}
+                        disabled={!currentProjectId || sending || uploadingAttachment || attachments.length >= 5}
+                        title={currentProjectId ? "添加文档或进度文件" : "请先选择项目"}
+                      >
+                        {uploadingAttachment ? <Sparkles className="size-3.5 animate-pulse" /> : <Paperclip className="size-3.5" />}
+                        {uploadingAttachment ? "解析中" : "附件"}
+                      </Button>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 min-w-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:text-foreground"
+                            title={`Agent 授权：${ASSISTANT_ACCESS_MODE_LABELS[runtime.assistantAccessMode]}`}
+                            aria-label={`Agent 授权：${ASSISTANT_ACCESS_MODE_LABELS[runtime.assistantAccessMode]}`}
+                          >
+                            {runtime.assistantAccessMode === "REQUEST_APPROVAL" ? <Hand className="size-3.5 shrink-0" /> : runtime.assistantAccessMode === "AUTO_APPROVE" ? <ShieldCheck className="size-3.5 shrink-0" /> : <ShieldAlert className="size-3.5 shrink-0 text-primary" />}
+                            <span className="truncate">{ASSISTANT_ACCESS_MODE_LABELS[runtime.assistantAccessMode]}</span>
+                            <ChevronDown className="size-3 shrink-0 opacity-70" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent side="top" align="start" className="w-[min(340px,calc(100vw-32px))] p-1.5" data-assistant-access-menu>
+                          <DropdownMenuLabel className="px-2 py-1.5 text-[11px] text-muted-foreground">佳佳应如何执行操作？</DropdownMenuLabel>
+                          <DropdownMenuSeparator />
+                          {(Object.keys(ASSISTANT_ACCESS_MODE_LABELS) as AssistantAccessMode[]).map((mode) => (
+                            <DropdownMenuItem
+                              key={mode}
+                              className={cn(
+                                "my-0.5 items-start gap-2.5 rounded-md px-2.5 py-2.5",
+                                runtime.assistantAccessMode === mode && "bg-accent",
+                              )}
+                              onSelect={() => void updateAccessMode(mode)}
+                            >
+                              {mode === "REQUEST_APPROVAL" ? <Hand className="mt-0.5 size-4 shrink-0" /> : mode === "AUTO_APPROVE" ? <ShieldCheck className="mt-0.5 size-4 shrink-0" /> : <ShieldAlert className="mt-0.5 size-4 shrink-0 text-primary" />}
+                              <span className="min-w-0 flex-1">
+                                <span className={cn("block text-xs font-medium", mode === "FULL_ACCESS" && "text-primary")}>{ASSISTANT_ACCESS_MODE_LABELS[mode]}</span>
+                                <span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">{accessModeDescription[mode]}</span>
+                              </span>
+                              <Check className={cn("mt-0.5 size-4 shrink-0 text-primary", runtime.assistantAccessMode !== mode && "invisible")} />
+                            </DropdownMenuItem>
+                          ))}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
                     {sending ? (
                       <Button variant="destructive" size="icon" className="size-8 shrink-0" onClick={stopMessage} title="停止回答" aria-label="停止回答">
                         <Square className="size-3.5 fill-current" />

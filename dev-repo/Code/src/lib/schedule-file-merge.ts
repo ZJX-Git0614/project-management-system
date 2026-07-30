@@ -7,8 +7,10 @@ import {
   parseGanttImportFile,
   type ImportedGanttTask,
 } from "@/lib/gantt-file-transfer";
+import { isValidGanttDurationDays, normalizeGanttDurationDays } from "@/lib/gantt-calendar";
 
 export const SCHEDULE_MERGE_EXTENSIONS = [".mpp", ".xml", ".xlsx", ".csv", ".md", ".txt"] as const;
+export const SCHEDULE_CONVERT_EXTENSIONS = [".mpp", ".xml", ".xlsx"] as const;
 
 export type ScheduleMergeSource = {
   fileName: string;
@@ -45,6 +47,8 @@ const HEADER_ALIASES = {
   module: ["模块", "一级模块"],
   submodule: ["子模块", "二级模块"],
   taskName: ["任务名称", "任务名", "功能项", "工作项", "任务", "taskname", "name"],
+  taskDescription: ["任务描述", "描述", "description", "notes"],
+  remark: ["备注", "备注信息", "remark", "remarks", "note"],
   start: ["计划开始", "计划开始时间", "开始时间", "start", "startdate"],
   finish: ["计划完成", "计划完成时间", "结束时间", "finish", "finishdate", "enddate"],
   duration: ["工期天", "工期", "durationdays", "duration"],
@@ -77,16 +81,17 @@ const asDate = (value: unknown) => {
 };
 
 const addDaysInclusive = (startDate: string, durationDays: number) => {
+  if (!startDate || !Number.isFinite(durationDays) || durationDays <= 0) return "";
   const date = new Date(`${startDate}T00:00:00Z`);
-  date.setUTCDate(date.getUTCDate() + Math.max(1, durationDays) - 1);
+  date.setUTCDate(date.getUTCDate() + Math.ceil(durationDays) - 1);
   return date.toISOString().slice(0, 10);
 };
 
 const durationBetween = (startDate: string, finishDate: string) => {
-  if (!startDate || !finishDate) return 1;
+  if (!startDate || !finishDate) return 0;
   const start = new Date(`${startDate}T00:00:00Z`).getTime();
   const finish = new Date(`${finishDate}T00:00:00Z`).getTime();
-  if (!Number.isFinite(start) || !Number.isFinite(finish) || finish < start) return 1;
+  if (!Number.isFinite(start) || !Number.isFinite(finish) || finish < start) return 0;
   return Math.floor((finish - start) / 86_400_000) + 1;
 };
 
@@ -124,6 +129,8 @@ const createTask = (params: {
   parentExternalId?: string;
   taskCategory?: string;
   taskName: string;
+  taskDescription?: string;
+  remark?: string;
   startDate: string;
   finishDate?: string;
   durationDays?: number;
@@ -135,23 +142,28 @@ const createTask = (params: {
   predecessorExternalIds?: string[];
   sortOrder: number;
 }): ImportedGanttTask => {
-  const durationDays = Math.max(1, Math.round(params.durationDays || durationBetween(params.startDate, params.finishDate || "")));
+  const sourceDuration = params.durationDays === undefined
+    ? durationBetween(params.startDate, params.finishDate || "")
+    : params.durationDays;
+  const durationDays = normalizeGanttDurationDays(sourceDuration);
   const predecessorExternalIds = params.predecessorExternalIds ?? [];
   return {
     externalId: params.externalId,
     parentExternalId: params.parentExternalId || null,
     taskCategory: params.taskCategory || "",
     taskName: params.taskName,
+    taskDescription: params.taskDescription || "",
     startDate: params.startDate,
     finishDate: params.finishDate || addDaysInclusive(params.startDate, durationDays),
     durationDays,
-    durationMinutes: durationDays * 480,
+    durationMinutes: Math.round(durationDays * 450),
     durationFormat: 7,
     actualStartDate: params.actualStartDate || "",
     actualEndDate: params.actualEndDate || "",
     estimatedWorkHours: Math.max(0, params.estimatedWorkHours || 0),
     actualWorkHours: Math.max(0, params.actualWorkHours || 0),
     progress: Math.min(100, Math.max(0, Math.round(params.progress || 0))),
+    remark: params.remark || "",
     predecessorExternalIds,
     predecessorDependencies: predecessorExternalIds.map((predecessorExternalId) => ({ predecessorExternalId, type: 1, lag: 0, lagFormat: 7 })),
     taskMode: "AUTO",
@@ -196,9 +208,12 @@ const rowsToTasks = (params: {
       params.warnings.push({ sourceFile: params.sourceFile, taskName, message: `缺少计划开始日期，使用项目开始日期 ${startDate}` });
     }
     const finishDate = asDate(readColumn(row, map, "finish"));
-    const durationDays = Math.max(1, Math.round(numberValue(readColumn(row, map, "duration"), durationBetween(startDate, finishDate))));
+    const durationValue = numberValue(readColumn(row, map, "duration"), Number.NaN);
+    const durationDays = isValidGanttDurationDays(durationValue)
+      ? normalizeGanttDurationDays(durationValue)
+      : durationBetween(startDate, finishDate);
     if (!finishDate && !cleanText(readColumn(row, map, "duration"))) {
-      params.warnings.push({ sourceFile: params.sourceFile, taskName, message: "缺少计划完成日期和工期，按 1 天生成可导入记录" });
+      params.warnings.push({ sourceFile: params.sourceFile, taskName, message: "缺少计划完成日期和工期，按未排期任务生成可导入记录" });
     }
     const category = [
       cleanText(readColumn(row, map, "category")),
@@ -212,6 +227,8 @@ const rowsToTasks = (params: {
         parentExternalId: cleanText(readColumn(row, map, "parentId")),
         taskCategory: category,
         taskName,
+        taskDescription: cleanText(readColumn(row, map, "taskDescription")),
+        remark: cleanText(readColumn(row, map, "remark")),
         startDate,
         finishDate,
         durationDays,
@@ -396,6 +413,7 @@ const buildWorkbook = (
   tasks: ImportedGanttTask[],
   sources: Array<{ fileName: string; taskCount: number }>,
   warnings: ScheduleMergeWarning[],
+  mode: "CONVERT" | "MERGE",
 ) => {
   const rows = tasks.map((task) => ({
     任务ID: task.externalId,
@@ -404,11 +422,11 @@ const buildWorkbook = (
     任务名称: task.taskName,
     计划开始: task.startDate,
     计划完成: task.finishDate,
-    "工期(天)": task.durationDays,
-    "预计工时(小时)": task.estimatedWorkHours,
+    "工期(天)": task.durationDays > 0 ? task.durationDays : "",
+    "预计工时(小时)": task.estimatedWorkHours > 0 ? task.estimatedWorkHours : "",
     实际开始: task.actualStartDate,
     实际完成: task.actualEndDate,
-    "实际工时(小时)": task.actualWorkHours,
+    "实际工时(小时)": task.actualWorkHours > 0 ? task.actualWorkHours : "",
     "当前进度(%)": task.progress,
     紧前任务ID: task.predecessorExternalIds.join(","),
     任务模式: task.taskMode,
@@ -428,9 +446,12 @@ const buildWorkbook = (
   ];
   taskSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
 
+  const actionLabel = mode === "CONVERT" ? "转换" : "合并";
   const noteRows: unknown[][] = [
-    ["合并结果", `共合并 ${sources.length} 个源文件、${tasks.length} 条任务`],
-    ["说明", "任务按源文件及源文件内原始顺序排列；任务 ID 已统一重排为 Task001、Task002……"],
+    [`${actionLabel}结果`, mode === "CONVERT"
+      ? `已将 ${sources[0]?.fileName || "源文件"} 转换为系统可导入格式，共 ${tasks.length} 条任务`
+      : `共合并 ${sources.length} 个源文件、${tasks.length} 条任务`],
+    ["说明", `任务按源文件及源文件内原始顺序排列；任务 ID 已统一重排为 Task001、Task002……`],
     ["说明", "未提供日期的任务使用当前项目开始日期；未提供计划完成和工期的任务按 1 天生成，具体项目事实未被自动补写"],
     [],
     ["源文件", "识别任务数"],
@@ -445,19 +466,35 @@ const buildWorkbook = (
 
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, taskSheet, "项目进度");
-  XLSX.utils.book_append_sheet(workbook, noteSheet, "合并说明");
+  XLSX.utils.book_append_sheet(workbook, noteSheet, `${actionLabel}说明`);
   return Buffer.from(XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }));
 };
 
-export const mergeScheduleFiles = async (sources: ScheduleMergeSource[], fallbackStartDate: string): Promise<ScheduleMergeResult> => {
-  if (sources.length < 2) throw new Error("请至少上传两个需要合并的进度计划文件");
+const buildScheduleResult = async (
+  sources: ScheduleMergeSource[],
+  fallbackStartDate: string,
+  mode: "CONVERT" | "MERGE",
+): Promise<ScheduleMergeResult> => {
   const warnings: ScheduleMergeWarning[] = [];
   const parsedBySource = await Promise.all(sources.map((source, index) => parseSource(source, index, fallbackStartDate, warnings)));
   const sourceSummaries = parsedBySource.map((tasks, index) => ({ fileName: sources[index].fileName, taskCount: tasks.length }));
   const tasks = mergeParsedTasks(parsedBySource.flat(), warnings);
-  if (tasks.length === 0) throw new Error("源文件中没有可合并的任务");
-  const workbook = buildWorkbook(tasks, sourceSummaries, warnings);
+  if (tasks.length === 0) throw new Error(`源文件中没有可${mode === "CONVERT" ? "转换" : "合并"}的任务`);
+  const workbook = buildWorkbook(tasks, sourceSummaries, warnings, mode);
   const verified = parseGanttExcel(workbook, fallbackStartDate);
-  if (verified.length !== tasks.length) throw new Error("合并文件生成后校验失败");
+  if (verified.length !== tasks.length) throw new Error(`${mode === "CONVERT" ? "转换" : "合并"}文件生成后校验失败`);
   return { tasks, warnings, sourceSummaries, workbook };
+};
+
+export const convertScheduleFile = async (source: ScheduleMergeSource, fallbackStartDate: string): Promise<ScheduleMergeResult> => {
+  const extension = path.extname(source.fileName).toLocaleLowerCase("en-US");
+  if (!SCHEDULE_CONVERT_EXTENSIONS.includes(extension as typeof SCHEDULE_CONVERT_EXTENSIONS[number])) {
+    throw new Error(`「${source.fileName}」不是可转换的甘特计划格式`);
+  }
+  return buildScheduleResult([source], fallbackStartDate, "CONVERT");
+};
+
+export const mergeScheduleFiles = async (sources: ScheduleMergeSource[], fallbackStartDate: string): Promise<ScheduleMergeResult> => {
+  if (sources.length < 2) throw new Error("请至少上传两个需要合并的进度计划文件");
+  return buildScheduleResult(sources, fallbackStartDate, "MERGE");
 };

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { changeGanttTaskHierarchy, type GanttHierarchyTask } from "@/lib/gantt-hierarchy";
+import {
+  changeGanttTaskHierarchy,
+  synchronizeGanttTaskCategories,
+  type GanttHierarchyTask,
+} from "@/lib/gantt-hierarchy";
 import { renumberGanttTaskCodes } from "@/lib/gantt-task-codes";
 
 const task = (
@@ -77,5 +81,20 @@ describe("changeGanttTaskHierarchy", () => {
     const source = [task("first", null, 1), task("second", null, 2), task("third", null, 3)];
     const result = changeGanttTaskHierarchy(source, ["first", "second"], "INDENT");
     expect(result.movedTaskIds).toEqual([]);
+  });
+
+  it("rebuilds only the moved branch's category path", () => {
+    const source = [
+      { ...task("root", null, 1), taskCategory: "设计", taskName: "设计阶段" },
+      { ...task("feature", null, 2), taskCategory: "开发", taskName: "开发阶段" },
+      { ...task("child", "feature", 1), taskCategory: "开发 / 接口", taskName: "接口实现" },
+    ];
+
+    const moved = changeGanttTaskHierarchy(source, ["feature"], "INDENT");
+    const categorized = synchronizeGanttTaskCategories(moved.tasks, moved.movedTaskIds);
+
+    expect(categorized.find((item) => item.id === "feature")).toMatchObject({ taskCategory: "设计 / 开发" });
+    expect(categorized.find((item) => item.id === "child")).toMatchObject({ taskCategory: "设计 / 开发 / 接口" });
+    expect(categorized.find((item) => item.id === "root")).toMatchObject({ taskCategory: "设计" });
   });
 });

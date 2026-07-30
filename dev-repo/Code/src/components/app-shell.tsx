@@ -2,10 +2,9 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
-  AlertTriangle,
   CalendarDays,
   ChartNoAxesCombined,
   ClipboardList,
@@ -50,6 +49,7 @@ import {
 import { CurrentProjectSwitcher } from "@/components/current-project-switcher";
 import { ADMIN_ROLE_NAME } from "@/lib/permissions";
 import { ProjectAssistant } from "@/components/project-assistant";
+import { useSystemFeedback } from "@/components/system-feedback-provider";
 import { api } from "@/lib/api-client";
 import { TODO_CHANGED_EVENT } from "@/lib/todo-events";
 
@@ -195,11 +195,13 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
   const fullPath = queryString ? `${pathname}?${queryString}` : pathname;
   const { user: authUser, loading: authLoading, logout: authLogout } = useAuth();
   const { can } = usePermission();
+  const { notify } = useSystemFeedback();
   const { currentProjectId, currentProject, clearCurrentProject } = useCurrentProject();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [desktopSidebarVisible, setDesktopSidebarVisible] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [todoCounts, setTodoCounts] = useState({ count: 0, notificationCount: 0 });
+  const lastNotificationCountRef = useRef(0);
 
   const isAuthFree = AUTH_FREE_PATHS.includes(pathname);
 
@@ -239,6 +241,15 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
       window.removeEventListener(TODO_CHANGED_EVENT, loadTodoCounts);
     };
   }, [authUser, isAuthFree]);
+
+  useEffect(() => {
+    const notificationCount = todoCounts.notificationCount;
+    const previousCount = lastNotificationCountRef.current;
+    lastNotificationCountRef.current = notificationCount;
+
+    if (notificationCount <= 0 || notificationCount === previousCount || pathname.startsWith("/todos")) return;
+    notify(`有 ${notificationCount} 条未读系统通知，请及时查看。`, "warning");
+  }, [notify, pathname, todoCounts.notificationCount]);
 
   // 回到「项目列表」= 视为重选起点：清空 currentProjectId，菜单折叠回「项目列表」一项
   // 只在 pathname 变化时检查（避免在 /projects 页面写入 currentProjectId 时被此 effect 误清）
@@ -515,16 +526,6 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
             </Tooltip>
           </div>
         </header>
-
-        {todoCounts.notificationCount > 0 && !pathname.startsWith("/todos") && (
-          <div className="app-feedback-toast fixed right-4 top-14 z-[115] flex w-[min(420px,calc(100vw-2rem))] items-start gap-3 rounded-md border border-amber-500/35 bg-amber-950/95 px-3 py-3 text-amber-50 shadow-[var(--app-shadow-popover)] backdrop-blur-md">
-            <div className="flex min-w-0 items-center gap-2">
-              <AlertTriangle className="size-4 shrink-0 text-amber-300" />
-              <span className="text-sm leading-5">有 {todoCounts.notificationCount} 条未读系统通知，请及时查看。</span>
-            </div>
-            <Link href="/todos#notifications" className="ml-auto shrink-0 rounded-md border border-amber-300/35 px-2 py-1 text-xs font-medium text-amber-50 transition-colors hover:bg-white/10">查看</Link>
-          </div>
-        )}
 
         <div className="flex flex-1">
           <aside

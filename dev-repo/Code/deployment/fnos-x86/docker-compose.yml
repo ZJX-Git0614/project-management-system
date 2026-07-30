@@ -1,0 +1,57 @@
+name: ceastar-pms
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    platform: linux/amd64
+    environment:
+      POSTGRES_USER: pms
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be configured in .env}
+      POSTGRES_DB: pms
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pms -d pms"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  pms:
+    image: ceastar-project-management:2026.07.30.3-amd64
+    platform: linux/amd64
+    ports:
+      - "${PMS_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgresql://pms:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be configured in .env}@postgres:5432/pms?schema=public
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be configured in .env}
+      ASSISTANT_CONFIG_ENCRYPTION_KEY: ${JWT_SECRET:?JWT_SECRET must be configured in .env}
+      PROJECT_DOCUMENT_STORAGE_DIR: /app/.local-runtime/project-documents
+      SYSTEM_BACKUP_DIR: /app/.local-runtime/system-backups
+      SYSTEM_BACKUP_ALLOWED_ROOTS: /app/.local-runtime/system-backups,/data/system-backups
+      PMS_WEB_WORKERS: ${PMS_WEB_WORKERS:-4}
+      SKIP_PRISMA_DB_PUSH: "true"
+      SKIP_PRISMA_SEED: "true"
+      NODE_ENV: production
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - document_storage:/app/.local-runtime/project-documents
+      - ./backups:/app/.local-runtime/system-backups
+      - ./backups:/data/system-backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+    name: ${PMS_DATABASE_VOLUME:-ceastar-pms_pgdata}
+  document_storage:
+    name: ${PMS_DOCUMENT_VOLUME:-ceastar-pms_document_storage}

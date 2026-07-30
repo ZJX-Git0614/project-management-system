@@ -20,4 +20,6 @@ dev-repo/Code/tmp/
 *.db-journal
 *.sqlite
 *.sqlite3
+__pycache__/
+*.pyc
 memory.md

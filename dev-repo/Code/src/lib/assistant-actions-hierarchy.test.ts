@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseHierarchyIntent } from "@/lib/assistant-actions";
+import { parseGanttParentWrapIntent, parseHierarchyIntent } from "@/lib/assistant-actions";
 
 describe("parseHierarchyIntent", () => {
   it("recognizes an indent request only when a concrete task code is provided", () => {
@@ -16,5 +16,18 @@ describe("parseHierarchyIntent", () => {
       taskCodes: ["Task2.1", "Task2.2"],
       direction: "OUTDENT",
     });
+  });
+});
+
+describe("parseGanttParentWrapIntent", () => {
+  it("recognizes a request to wrap current root tasks with a named parent", () => {
+    expect(parseGanttParentWrapIntent("我需要在当前的一级甘特任务前面加一个父任务“软件开发”")).toEqual({
+      taskName: "软件开发",
+    });
+  });
+
+  it("does not infer a parent name or target scope", () => {
+    expect(parseGanttParentWrapIntent("新增一个父任务")).toBeNull();
+    expect(parseGanttParentWrapIntent("查看当前一级任务进度")).toBeNull();
   });
 });

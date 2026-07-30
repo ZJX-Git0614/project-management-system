@@ -86,8 +86,98 @@ const parseActionPlannerResponse = (content: string, enabledToolIds: Set<string>
   }
 }
 
+export const parseActionWorkflowPlannerResponse = (content: string, enabledToolIds: Set<string>) => {
+  const json = content.match(/\{[\s\S]*\}/)?.[0]
+  if (!json) return null
+  try {
+    const parsed = JSON.parse(json) as { title?: unknown; steps?: unknown }
+    if (!Array.isArray(parsed.steps) || parsed.steps.length < 2 || parsed.steps.length > 6) return null
+    const ids = new Set<string>()
+    const indexById = new Map<string, number>()
+    const steps = parsed.steps.map((value, stepIndex) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid step")
+      const step = value as { id?: unknown; toolId?: unknown; command?: unknown; dependsOn?: unknown }
+      const id = typeof step.id === "string" ? step.id.trim() : ""
+      const toolId = typeof step.toolId === "string" ? step.toolId.trim() : ""
+      const command = typeof step.command === "string" ? step.command.trim() : ""
+      const dependsOnIds = Array.isArray(step.dependsOn) ? step.dependsOn.map(String) : []
+      if (!id || ids.has(id) || !enabledToolIds.has(toolId) || !command || command.length > 500) throw new Error("invalid step")
+      const dependsOn = dependsOnIds.map((dependencyId) => {
+        const dependencyIndex = indexById.get(dependencyId)
+        if (dependencyIndex === undefined || dependencyIndex >= stepIndex) throw new Error("workflow must be acyclic")
+        return dependencyIndex
+      })
+      ids.add(id)
+      indexById.set(id, stepIndex)
+      return { toolId, title: command.slice(0, 80), command, dependsOn }
+    })
+    return {
+      title: typeof parsed.title === "string" && parsed.title.trim() ? parsed.title.trim().slice(0, 100) : "多步骤项目管理任务",
+      steps,
+    }
+  } catch {
+    return null
+  }
+}
+
 export const shouldPlanProjectAssistantAction = (message: string) =>
-  /(创建|新增|新建|登记|更新|修改|调整|推进|设置|设为|改为|完成|关闭|办结|导出|下载|保存|转为|生成|制作|合并|整合|汇总|合成|合二为一|拼接)/u.test(message)
+  /(创建|新增|新建|登记|更新|修改|调整|推进|设置|设为|改为|完成|关闭|办结|导出|输出|下载|保存|转换|转成|转为|整理成|做成|生成|制作|合并|整合|汇总|合成|合二为一|拼接)/u.test(message)
+
+export const shouldPlanProjectAssistantWorkflow = (message: string) => (
+  shouldPlanProjectAssistantAction(message)
+  && /(然后|再|并且|并|之后|接着|同时|->|→)/u.test(message)
+);
+
+const buildActionToolCatalog = (enabledToolIds: Set<string>) => ASSISTANT_TOOL_CATALOG
+  .filter((tool) => enabledToolIds.has(tool.id))
+  .map((tool) => {
+    const attachmentRule = tool.attachments
+      ? `；附件 ${tool.attachments.min}-${tool.attachments.max} 个，格式 ${tool.attachments.extensions.join("/")}`
+      : "";
+    const fields = Object.entries(tool.inputSchema.properties)
+      .map(([name, field]) => `${name}:${field.type}${field.required ? "!" : ""}${field.enum ? `[${field.enum.join("|")}]` : ""}`)
+      .join(",");
+    const routingHints = tool.routingHints?.length ? `；路由 ${tool.routingHints.join("；")}` : "";
+    return `${tool.id}@${tool.version}: ${tool.description}${routingHints}；风险 ${tool.riskLevel}；权限 ${tool.permissions.join("+") || "项目访问"}；输入 {${fields}}${attachmentRule}；输出 ${tool.outputSchema.kind}(${tool.outputSchema.required.join(",")})；验收 ${tool.verifier}`;
+  })
+  .join("\n")
+
+export const planProjectAssistantWorkflowWithModel = async (params: {
+  message: string
+  history: AssistantMessageInput[]
+  runtime: AssistantRuntimeConfig
+  signal?: AbortSignal
+}) => {
+  if (!params.runtime.agentEnabled || !params.runtime.llmProvider || !shouldPlanProjectAssistantWorkflow(params.message)) return null
+  const enabledToolIds = new Set(params.runtime.agentEnabledToolIds)
+  const catalog = buildActionToolCatalog(enabledToolIds)
+  if (!catalog) return null
+  try {
+    const response = await callAssistantProviderModel({
+      provider: params.runtime.llmProvider,
+      temperature: 0,
+      maxTokens: 700,
+      signal: params.signal,
+      timeoutMs: 20_000,
+      messages: [
+        {
+          role: "system",
+          content: [
+            "你是 Ceastar PMS 多步骤 Agent 规划器。只有用户明确要求连续执行两个以上操作时才规划。",
+            "计划最多 6 步，dependsOn 只能引用前面步骤的 id，必须形成有向无环图。",
+            "每一步只能选择以下已启用工具，命令必须保留用户事实，不得编造数据库 ID 或业务字段：",
+            catalog,
+            "只返回 JSON：{\"title\":\"计划标题\",\"steps\":[{\"id\":\"s1\",\"toolId\":\"工具ID\",\"command\":\"规范化命令\",\"dependsOn\":[]}]}。无法安全规划时返回 null。",
+          ].join("\n"),
+        },
+        { role: "user", content: `最近对话：${JSON.stringify(params.history.slice(-4))}\n当前请求：${params.message}` },
+      ],
+    })
+    return parseActionWorkflowPlannerResponse(response, enabledToolIds)
+  } catch {
+    return null
+  }
+}
 
 export const planProjectAssistantActionWithModel = async (params: {
   message: string
@@ -97,10 +187,7 @@ export const planProjectAssistantActionWithModel = async (params: {
 }) => {
   if (!params.runtime.agentEnabled || !params.runtime.llmProvider || !shouldPlanProjectAssistantAction(params.message)) return null
   const enabledToolIds = new Set(params.runtime.agentEnabledToolIds)
-  const catalog = ASSISTANT_TOOL_CATALOG
-    .filter((tool) => enabledToolIds.has(tool.id))
-    .map((tool) => `${tool.id}: ${tool.description}`)
-    .join("\n")
+  const catalog = buildActionToolCatalog(enabledToolIds)
   if (!catalog) return null
   const recentHistory = params.history
     .slice(-4)
@@ -123,6 +210,7 @@ export const planProjectAssistantActionWithModel = async (params: {
             catalog,
             "返回 JSON：{\"toolId\":\"白名单工具ID\",\"command\":\"保留用户事实的简洁规范化命令\"}，无法确定时返回 null。",
             "不得生成数据库 ID、SQL、接口、虚构名称、虚构进度或用户没有提供的业务字段。",
+            "command 必须保留用户提供的 Task/Matter/Risk 编号、百分比、名称和动作，不得复制工具描述代替命令。",
           ].join("\n"),
         },
         {

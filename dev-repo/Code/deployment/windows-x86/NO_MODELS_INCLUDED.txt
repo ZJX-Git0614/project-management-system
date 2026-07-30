@@ -1,0 +1,8 @@
+This offline package contains the Ceastar PMS system only.
+
+It does not contain Ollama, LLM model files, embedding model files, or any
+other model weights. The system, database, documents, MPP import, Excel export,
+and Project XML export can run without a model service.
+
+To use AI chat later, install or connect a model provider separately through
+System Settings > Assistant Settings.

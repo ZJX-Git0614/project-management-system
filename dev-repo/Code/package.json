@@ -12,6 +12,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "eval:assistant-agent": "tsx scripts/evaluate-assistant-agent.ts",
     "db:seed": "prisma db seed",
     "db:push": "prisma db push",
     "db:studio": "prisma studio"
@@ -29,6 +30,7 @@
     "@radix-ui/react-slot": "^1.2.4",
     "@radix-ui/react-tooltip": "^1.2.8",
     "bcryptjs": "^3.0.3",
+    "chinese-days": "^1.5.9",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "fast-xml-parser": "^5.10.1",

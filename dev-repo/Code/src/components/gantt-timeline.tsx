@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { ChevronDown, ChevronLeft, ChevronRight, CornerDownRight, GripVertical, IndentDecrease, IndentIncrease, ListTree, ZoomIn, ZoomOut } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { ChevronDown, ChevronLeft, ChevronRight, Columns3, CornerDownRight, GripVertical, IndentDecrease, IndentIncrease, ListChecks, ListTree, Plus, Search, Trash2, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { GanttDateField } from "@/components/gantt-date-field";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -15,35 +16,43 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { ProjectGanttTask } from "@/domain/models";
+import type { ProjectGanttTask, ProjectMember } from "@/domain/models";
 import type { GanttHierarchyDirection } from "@/lib/gantt-hierarchy";
 import {
-  GANTT_COLLAPSED_COLUMN_KEYS,
   GANTT_COLUMN_LABELS,
   GANTT_COLUMN_MIN_WIDTHS,
   GANTT_EXPANDED_COLUMN_KEYS,
+  GANTT_HIDEABLE_COLUMN_KEYS,
   fitGanttColumnWidth,
   fitGanttColumnWidths,
-  ganttColumnTemplate,
   ganttColumnsWidth,
   ganttTaskDepths,
+  ganttVisibleColumnKeys,
   type GanttColumnKey,
   type GanttColumnWidths,
 } from "@/lib/gantt-column-layout";
 import {
   addCalendarDays,
-  addDaysInclusive,
   buildGanttDependencyLinks,
   buildGanttRows,
   diffDays,
-  diffDaysInclusive,
   getGanttDateRange,
   parseGanttDate,
 } from "@/lib/gantt";
+import {
+  calculateTaskDurationDays,
+  calculateTaskFinishDate,
+  estimatedHoursForDuration,
+  normalizeGanttDurationDays,
+  roundGanttHours,
+  type GanttCalendarMode,
+} from "@/lib/gantt-calendar";
 import { cn } from "@/lib/utils";
 
 interface GanttTimelineProps {
   tasks: ProjectGanttTask[];
+  projectMembers?: ProjectMember[];
+  calendarMode?: GanttCalendarMode;
   showProject?: boolean;
   emptyText?: string;
   canCreate?: boolean;
@@ -55,6 +64,7 @@ interface GanttTimelineProps {
   hierarchyChanging?: boolean;
   reordering?: boolean;
   fullScreen?: boolean;
+  portalContainer?: HTMLElement | null;
   onCreateTask?: (parentTask?: ProjectGanttTask) => void;
   onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft) => void | Promise<void>;
   onDeleteSelected?: (taskIds: string[]) => void | Promise<void>;
@@ -64,8 +74,10 @@ interface GanttTimelineProps {
 
 export type GanttTaskDraft = {
   parentId?: string | null;
+  ownerMemberId?: string | null;
   taskCategory: string;
   taskName: string;
+  taskDescription: string;
   startDate: string;
   endDate: string;
   durationDays: number;
@@ -75,6 +87,7 @@ export type GanttTaskDraft = {
   actualWorkHours: number;
   progress: number;
   predecessorTaskIds: string[];
+  remark: string;
 };
 
 const ROW_HEIGHT = 30;
@@ -84,7 +97,87 @@ const MIN_TIMELINE_WIDTH = 860;
 const ZOOM_LEVELS = [1, 3, 8, 20, 60];
 const ZOOM_LABELS = ["60天", "30天", "15天", "5天", "1天"];
 const DEFAULT_ZOOM_INDEX = 2;
+const GANTT_DEPTH_COLORS = [
+  { hue: 214, saturation: 66, lightness: 58 },
+  { hue: 192, saturation: 58, lightness: 52 },
+  { hue: 168, saturation: 48, lightness: 48 },
+  { hue: 42, saturation: 62, lightness: 56 },
+  { hue: 276, saturation: 48, lightness: 65 },
+  { hue: 342, saturation: 52, lightness: 62 },
+  { hue: 24, saturation: 58, lightness: 58 },
+  { hue: 228, saturation: 48, lightness: 66 },
+] as const;
 type DropPosition = "before" | "after";
+
+const GanttDividerToggle = ({
+  collapsed,
+  onToggle,
+  className,
+  style,
+}: {
+  collapsed: boolean;
+  onToggle: () => void;
+  className?: string;
+  style?: CSSProperties;
+}) => (
+  <button
+    type="button"
+    className={cn(
+      "group absolute z-[76] flex h-16 w-6 items-center justify-center !border-0 !bg-transparent p-0 text-muted-foreground/55 !shadow-none outline-none transition-[color,transform] duration-200 hover:!bg-transparent hover:text-primary focus-visible:!bg-transparent focus-visible:text-primary",
+      className,
+    )}
+    style={style}
+    onClick={onToggle}
+    title={collapsed ? "展开列" : "折叠列"}
+    aria-label={collapsed ? "展开列" : "折叠列"}
+  >
+    {collapsed
+      ? <ChevronRight className="size-4 transition-transform group-hover:translate-x-0.5" strokeWidth={1.8} />
+      : <ChevronLeft className="size-4 transition-transform group-hover:-translate-x-0.5" strokeWidth={1.8} />}
+  </button>
+);
+
+const ColumnVisibilityMenu = ({
+  hiddenColumnKeys,
+  onShowAll,
+  onToggle,
+  portalContainer,
+}: {
+  hiddenColumnKeys: ReadonlySet<GanttColumnKey>;
+  onShowAll: () => void;
+  onToggle: (key: GanttColumnKey) => void;
+  portalContainer?: HTMLElement | null;
+}) => (
+  <DropdownMenu>
+    <DropdownMenuTrigger asChild>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-7 gap-1 px-2 text-xs"
+        aria-label="列设置"
+      >
+        <Columns3 className="size-3.5" />
+        列
+        <ChevronDown className="size-3" />
+      </Button>
+    </DropdownMenuTrigger>
+    <DropdownMenuContent container={portalContainer} align="end" className="w-44">
+      <DropdownMenuItem onSelect={onShowAll}>全部显示</DropdownMenuItem>
+      <DropdownMenuSeparator />
+      {GANTT_HIDEABLE_COLUMN_KEYS.map((key) => (
+        <DropdownMenuCheckboxItem
+          key={key}
+          checked={!hiddenColumnKeys.has(key)}
+          onCheckedChange={() => onToggle(key)}
+          onSelect={(event) => event.preventDefault()}
+        >
+          {GANTT_COLUMN_LABELS[key]}
+        </DropdownMenuCheckboxItem>
+      ))}
+    </DropdownMenuContent>
+  </DropdownMenu>
+);
 
 const getTickEvery = (dayWidth: number) => {
   if (dayWidth >= 60) return 1;
@@ -115,38 +208,46 @@ const durationFieldClass = cn(
   "px-1 text-center font-mono tabular-nums"
 );
 
-const toTaskDraft = (task: ProjectGanttTask): GanttTaskDraft => ({
+const toTaskDraft = (task: ProjectGanttTask, calendarMode: GanttCalendarMode): GanttTaskDraft => ({
   parentId: task.parentId ?? null,
+  ownerMemberId: task.ownerMemberId ?? null,
   taskCategory: task.taskCategory,
   taskName: task.taskName,
+  taskDescription: task.taskDescription ?? "",
   startDate: task.startDate,
-  endDate: task.finishDate || addDaysInclusive(task.startDate, task.durationDays),
+  endDate: task.finishDate || calculateTaskFinishDate(task.startDate, task.durationDays, calendarMode),
   durationDays: task.durationDays,
   actualStartDate: task.actualStartDate ?? "",
   actualEndDate: task.actualEndDate ?? "",
-  estimatedWorkHours: Math.max(0, task.estimatedWorkHours ?? 0),
-  actualWorkHours: Math.max(0, task.actualWorkHours ?? 0),
+  estimatedWorkHours: estimatedHoursForDuration(task.durationDays),
+  actualWorkHours: roundGanttHours(task.actualWorkHours ?? 0),
   progress: Math.min(100, Math.max(0, task.progress ?? 0)),
   predecessorTaskIds: task.predecessorTaskIds ?? [],
+  remark: task.remark ?? "",
 });
 
-const taskDraftEquals = (task: ProjectGanttTask, draft: GanttTaskDraft) => (
+const taskDraftEquals = (task: ProjectGanttTask, draft: GanttTaskDraft, calendarMode: GanttCalendarMode) => (
   task.taskCategory === draft.taskCategory
     && task.taskName === draft.taskName
+    && (task.taskDescription ?? "") === draft.taskDescription
     && task.startDate === draft.startDate
-    && (task.finishDate || addDaysInclusive(task.startDate, task.durationDays)) === draft.endDate
+    && (task.finishDate || calculateTaskFinishDate(task.startDate, task.durationDays, calendarMode)) === draft.endDate
     && task.durationDays === draft.durationDays
     && (task.actualStartDate ?? "") === draft.actualStartDate
     && (task.actualEndDate ?? "") === draft.actualEndDate
-    && (task.estimatedWorkHours ?? 0) === draft.estimatedWorkHours
-    && (task.actualWorkHours ?? 0) === draft.actualWorkHours
+    && estimatedHoursForDuration(task.durationDays) === draft.estimatedWorkHours
+    && roundGanttHours(task.actualWorkHours ?? 0) === draft.actualWorkHours
     && (task.progress ?? 0) === draft.progress
     && JSON.stringify(task.predecessorTaskIds ?? []) === JSON.stringify(draft.predecessorTaskIds)
+    && (task.remark ?? "") === draft.remark
     && (task.parentId ?? null) === (draft.parentId ?? null)
+    && (task.ownerMemberId ?? null) === (draft.ownerMemberId ?? null)
 );
 
-export const GanttTimeline = ({
+const GanttTimelineContent = ({
   tasks,
+  projectMembers = [],
+  calendarMode = "CALENDAR_DAYS",
   emptyText = "暂无甘特任务",
   canCreate = false,
   canEdit = false,
@@ -157,6 +258,7 @@ export const GanttTimeline = ({
   hierarchyChanging = false,
   reordering = false,
   fullScreen = false,
+  portalContainer,
   onCreateTask,
   onUpdateTask,
   onDeleteSelected,
@@ -171,10 +273,18 @@ export const GanttTimeline = ({
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [taskDropTarget, setTaskDropTarget] = useState<{ id: string; position: DropPosition } | null>(null);
   const [flashingTaskId, setFlashingTaskId] = useState<string | null>(null);
-  const [hoverCollapse, setHoverCollapse] = useState(false);
   const [columnWidths, setColumnWidths] = useState<GanttColumnWidths>({ ...GANTT_COLUMN_MIN_WIDTHS });
+  const [hiddenColumnKeys, setHiddenColumnKeys] = useState<Set<GanttColumnKey>>(() => new Set());
+  const [contextMenu, setContextMenu] = useState<{ taskId: string; x: number; y: number } | null>(null);
+  const visibleColumnKeys = useMemo(
+    () => ganttVisibleColumnKeys(detailsCollapsed, hiddenColumnKeys),
+    [detailsCollapsed, hiddenColumnKeys],
+  );
+  const leftWidth = ganttColumnsWidth(columnWidths, detailsCollapsed, hiddenColumnKeys);
+  const [dividerViewportX, setDividerViewportX] = useState(8);
   const manuallySizedColumns = useRef(new Set<GanttColumnKey>());
   const [collapsedTaskIds, setCollapsedTaskIds] = useState<Set<string>>(() => new Set());
+  const ganttSurfaceRef = useRef<HTMLDivElement>(null);
   const scrollViewportRef = useRef<HTMLDivElement>(null);
   const [virtualRange, setVirtualRange] = useState({ start: 0, end: 40 });
   const range = getGanttDateRange(tasks);
@@ -228,6 +338,11 @@ export const GanttTimeline = ({
     const index = siblings.findIndex((row) => row.id === taskId);
     return index > 0 && !selectedRootSet.has(siblings[index - 1].id);
   });
+  const contextTask = contextMenu ? rowByTaskId.get(contextMenu.taskId) : null;
+  const contextTaskSiblings = contextTask ? rows.filter((row) => (row.parentId ?? null) === (contextTask.parentId ?? null)) : [];
+  const contextTaskSiblingIndex = contextTask ? contextTaskSiblings.findIndex((row) => row.id === contextTask.id) : -1;
+  const canOutdentContextTask = Boolean(contextTask?.parentId);
+  const canIndentContextTask = contextTaskSiblingIndex > 0;
 
   useEffect(() => {
     const fitted = fitGanttColumnWidths(rows);
@@ -247,22 +362,34 @@ export const GanttTimeline = ({
 
   const updateVirtualRange = useCallback(() => {
     const viewport = scrollViewportRef.current;
-    if (!viewport) return;
+    const surface = ganttSurfaceRef.current;
+    if (!viewport || !surface) return;
     const overscan = 10;
     const bodyScrollTop = Math.max(0, viewport.scrollTop - HEADER_HEIGHT);
     const start = Math.max(0, Math.floor(bodyScrollTop / ROW_HEIGHT) - overscan);
     const visibleCount = Math.ceil(viewport.clientHeight / ROW_HEIGHT) + overscan * 2;
     const end = Math.min(visibleRows.length, start + visibleCount);
     setVirtualRange((current) => current.start === start && current.end === end ? current : { start, end });
-  }, [visibleRows.length]);
+    const viewportRect = viewport.getBoundingClientRect();
+    const surfaceRect = surface.getBoundingClientRect();
+    const boundaryX = viewportRect.left - surfaceRect.left + leftWidth - viewport.scrollLeft;
+    const nextDividerX = Math.min(Math.max(boundaryX, 8), Math.max(8, surface.clientWidth - 8));
+    setDividerViewportX((current) => Math.abs(current - nextDividerX) < 0.5 ? current : nextDividerX);
+  }, [leftWidth, visibleRows.length]);
 
   useEffect(() => {
     updateVirtualRange();
     const viewport = scrollViewportRef.current;
-    if (!viewport || typeof ResizeObserver === "undefined") return;
+    const surface = ganttSurfaceRef.current;
+    if (!viewport || !surface || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(updateVirtualRange);
     observer.observe(viewport);
-    return () => observer.disconnect();
+    observer.observe(surface);
+    window.addEventListener("resize", updateVirtualRange);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateVirtualRange);
+    };
   }, [updateVirtualRange]);
 
   const resizeColumn = useCallback((key: GanttColumnKey, width: number) => {
@@ -277,6 +404,21 @@ export const GanttTimeline = ({
     manuallySizedColumns.current.add(key);
     setColumnWidths((current) => ({ ...current, [key]: fitGanttColumnWidth(key, rows, taskDepthById) }));
   }, [rows, taskDepthById]);
+
+  const toggleColumnVisibility = useCallback((key: GanttColumnKey) => {
+    setDetailsCollapsed(false);
+    setHiddenColumnKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const showAllColumns = useCallback(() => {
+    setDetailsCollapsed(false);
+    setHiddenColumnKeys(new Set());
+  }, []);
 
   const toggleTaskCollapsed = useCallback((taskId: string) => {
     setCollapsedTaskIds((current) => {
@@ -308,6 +450,68 @@ export const GanttTimeline = ({
       stack.push(...(childIdsByParentId.get(childId) ?? []));
     }
     return result;
+  };
+
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const closeOnPointer = () => closeContextMenu();
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") closeContextMenu();
+    };
+    window.addEventListener("click", closeOnPointer);
+    window.addEventListener("scroll", closeOnPointer, true);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("click", closeOnPointer);
+      window.removeEventListener("scroll", closeOnPointer, true);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [closeContextMenu, contextMenu]);
+
+  const openTaskContextMenu = (event: ReactMouseEvent, taskId: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const menuWidth = 220;
+    const menuHeight = 220;
+    setContextMenu({
+      taskId,
+      x: Math.min(event.clientX, Math.max(8, window.innerWidth - menuWidth - 8)),
+      y: Math.min(event.clientY, Math.max(8, window.innerHeight - menuHeight - 8)),
+    });
+  };
+
+  const createContextChild = () => {
+    if (!contextTask) return;
+    setDetailsCollapsed(false);
+    setCollapsedTaskIds((current) => {
+      if (!current.has(contextTask.id)) return current;
+      const next = new Set(current);
+      next.delete(contextTask.id);
+      return next;
+    });
+    closeContextMenu();
+    onCreateTask?.(contextTask);
+  };
+
+  const toggleContextSelection = () => {
+    if (!contextTask) return;
+    setSelectionMode(true);
+    toggleTaskSelection(contextTask.id);
+    closeContextMenu();
+  };
+
+  const changeContextHierarchy = (direction: GanttHierarchyDirection) => {
+    if (!contextTask || hierarchyChanging) return;
+    closeContextMenu();
+    void onChangeHierarchy?.([contextTask.id], direction);
+  };
+
+  const deleteContextTask = () => {
+    if (!contextTask || deletingSelected) return;
+    closeContextMenu();
+    void Promise.resolve(onDeleteSelected?.([contextTask.id]));
   };
 
   const isSelectedByAncestor = (taskId: string, selectedIds = selectedTaskIds) => {
@@ -402,11 +606,16 @@ export const GanttTimeline = ({
         dayWidth={dayWidth}
         zoomIndex={zoomIndex}
         detailsCollapsed={detailsCollapsed}
+        hiddenColumnKeys={hiddenColumnKeys}
         setZoomIndex={setZoomIndex}
         setDetailsCollapsed={setDetailsCollapsed}
         columnWidths={columnWidths}
         onAutoFitColumn={autoFitColumn}
         onResizeColumn={resizeColumn}
+        onShowAllColumns={showAllColumns}
+        onToggleColumn={toggleColumnVisibility}
+        fullScreen={fullScreen}
+        portalContainer={portalContainer}
         canCreate={canCreate}
         creatingParentId={creatingParentId}
         onCreateTask={onCreateTask}
@@ -419,7 +628,6 @@ export const GanttTimeline = ({
   const visibleEndDate = addCalendarDays(range.endDate, 7);
   const visibleDays = diffDays(visibleStartDate, visibleEndDate) + 1;
   const timelineWidth = Math.max(MIN_TIMELINE_WIDTH, visibleDays * config.dayWidth);
-  const leftWidth = ganttColumnsWidth(columnWidths, detailsCollapsed);
   const bodyHeight = visibleRows.length * ROW_HEIGHT;
   const todayOffset = diffDays(visibleStartDate, new Date().toISOString().slice(0, 10));
   const todayX = todayOffset >= 0 && todayOffset < visibleDays ? todayOffset * config.dayWidth : null;
@@ -479,6 +687,12 @@ export const GanttTimeline = ({
               <ZoomIn className="h-3 w-3" />
             </button>
           </div>
+          <ColumnVisibilityMenu
+            hiddenColumnKeys={hiddenColumnKeys}
+            onShowAll={showAllColumns}
+            onToggle={toggleColumnVisibility}
+            portalContainer={portalContainer}
+          />
           {parentDepths.length > 0 && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -488,7 +702,7 @@ export const GanttTimeline = ({
                   <ChevronDown className="size-3" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-44">
+              <DropdownMenuContent container={portalContainer} align="end" className="w-44">
                 <DropdownMenuItem onSelect={() => setCollapsedTaskIds(new Set())}>
                   全部展开
                 </DropdownMenuItem>
@@ -580,20 +794,21 @@ export const GanttTimeline = ({
         </div>
       </div>
 
-      <div
-        ref={scrollViewportRef}
-        className={cn(
-          "min-h-[260px] overflow-auto",
-          fullScreen ? "min-h-0 flex-1" : "max-h-[calc(100vh-240px)]",
-        )}
-        onScroll={updateVirtualRange}
-      >
+      <div ref={ganttSurfaceRef} className={cn("relative min-h-0", fullScreen && "flex-1")}>
+        <div
+          ref={scrollViewportRef}
+          className={cn(
+            "min-h-[260px] overflow-auto",
+            fullScreen ? "h-full min-h-0" : "max-h-[calc(100vh-240px)]",
+          )}
+          onScroll={updateVirtualRange}
+        >
         <div className="grid min-w-max" style={{ gridTemplateColumns: `${leftWidth}px ${timelineWidth}px` }}>
           <TaskGridHeader
-            collapsed={detailsCollapsed}
             columnWidths={columnWidths}
             onAutoFitColumn={autoFitColumn}
             onResizeColumn={resizeColumn}
+            visibleColumnKeys={visibleColumnKeys}
           />
           <TimelineHeader
             config={config}
@@ -606,25 +821,6 @@ export const GanttTimeline = ({
             className="sticky left-0 z-10 border-r border-border bg-card transition-colors duration-200 hover:border-primary/40"
             style={{ height: bodyHeight }}
           >
-            <button
-              type="button"
-              className={cn(
-                "absolute right-0 top-0 z-[75] flex !h-full !min-h-0 !w-3 cursor-pointer items-center justify-start !rounded-none !border-0 !p-0 !shadow-none transition-all duration-200",
-                hoverCollapse ? "!bg-primary/5" : "!bg-transparent"
-              )}
-              onMouseEnter={() => setHoverCollapse(true)}
-              onMouseLeave={() => setHoverCollapse(false)}
-              onClick={() => setDetailsCollapsed((prev) => !prev)}
-              title={detailsCollapsed ? "展开列" : "折叠列"}
-              aria-label={detailsCollapsed ? "展开列" : "折叠列"}
-            >
-              <div className={cn(
-                "flex h-8 w-3 -translate-x-1 items-center justify-center rounded-l-sm border-l border-transparent bg-card/95 transition-all duration-200",
-                hoverCollapse ? "opacity-100" : "opacity-0"
-              )}>
-                {detailsCollapsed ? <ChevronRight className="h-2.5 w-2.5 text-primary/70" /> : <ChevronLeft className="h-2.5 w-2.5 text-primary/70" />}
-              </div>
-            </button>
             <div
               className={cn(
                 "absolute inset-x-0 top-0 z-20 h-3",
@@ -667,6 +863,7 @@ export const GanttTimeline = ({
                   }}
                   onDragStart={() => setDraggedTaskId(row.id)}
                   onDrop={() => reorderTask(row.id, taskDropTarget?.id === row.id ? taskDropTarget.position : "before")}
+                  onOpenContextMenu={(event) => openTaskContextMenu(event, row.id)}
                   onStartChild={() => {
                     setDetailsCollapsed(false);
                     setCollapsedTaskIds((current) => {
@@ -682,14 +879,17 @@ export const GanttTimeline = ({
                   onToggleHierarchy={() => toggleTaskCollapsed(row.id)}
                   onToggleSelected={() => toggleTaskSelection(row.id)}
                   onUpdateTask={onUpdateTask}
+                  projectMembers={projectMembers}
+                  calendarMode={calendarMode}
                   predecessorOptions={tasks}
                   row={row}
                   taskDepth={taskDepthById.get(row.id) ?? 0}
                   selected={selectedTaskIds.includes(row.id)}
                   selectionLocked={isSelectedByAncestor(row.id)}
                   selectionMode={selectionMode}
-                  collapsed={detailsCollapsed}
                   columnWidths={columnWidths}
+                  portalContainer={portalContainer}
+                  visibleColumnKeys={visibleColumnKeys}
                 />
             ))}
             <div
@@ -740,7 +940,7 @@ export const GanttTimeline = ({
               {dependencyLinks.map((link) => {
                 const from = rowById.get(link.predecessorId);
                 const to = rowById.get(link.successorId);
-                if (!from || !to) return null;
+                if (!from || !to || from.row.spanDays <= 0 || to.row.spanDays <= 0) return null;
                 const firstIndex = Math.min(from.index, to.index);
                 const lastIndex = Math.max(from.index, to.index);
                 if (lastIndex < virtualRange.start || firstIndex >= virtualRange.end) return null;
@@ -761,8 +961,9 @@ export const GanttTimeline = ({
             </svg>
 
             {virtualRows.map(({ row, index: visualIndex }) => {
+              if (row.spanDays <= 0) return null;
               const left = diffDays(visibleStartDate, row.startDate) * config.dayWidth;
-              const width = config.dayWidth * Math.max(1, row.durationDays);
+              const width = config.dayWidth * row.spanDays;
               const showBarLabel = width >= 72;
               const barLabel = row.taskName || row.taskCode;
               const progress = Math.min(100, Math.max(0, row.progress ?? 0));
@@ -804,10 +1005,101 @@ export const GanttTimeline = ({
             })}
           </div>
         </div>
+        </div>
+        {contextMenu && contextTask && (
+          <div
+            role="menu"
+            aria-label="甘特任务右键菜单"
+            className="fixed z-[130] w-[220px] overflow-hidden rounded-md border border-border bg-card p-1 text-card-foreground shadow-[var(--app-shadow-popover)]"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            onClick={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <div className="px-2 py-1.5 text-xs text-muted-foreground">
+              <div className="truncate font-medium text-foreground">{contextTask.taskCode || "未编号"} · {contextTask.taskName || "未命名任务"}</div>
+              <div className="mt-0.5 truncate">{getDescendantIds(contextTask.id).length > 0 ? "含 " + getDescendantIds(contextTask.id).length + " 个子任务" : "无子任务"}</div>
+            </div>
+            {canCreate && (
+              <button
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+                disabled={creatingParentId === contextTask.id}
+                onClick={createContextChild}
+              >
+                <Plus className="size-4" />
+                新增子任务
+              </button>
+            )}
+            {(canEdit || canDelete) && (
+              <button
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground"
+                onClick={toggleContextSelection}
+              >
+                <ListChecks className="size-4" />
+                {selectedTaskIds.includes(contextTask.id) ? "取消选择" : "选择任务"}
+              </button>
+            )}
+            {canEdit && (
+              <>
+                <div className="-mx-1 my-1 h-px bg-border" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+                  disabled={!canOutdentContextTask || hierarchyChanging}
+                  onClick={() => changeContextHierarchy("OUTDENT")}
+                >
+                  <IndentDecrease className="size-4" />
+                  上移层级
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+                  disabled={!canIndentContextTask || hierarchyChanging}
+                  onClick={() => changeContextHierarchy("INDENT")}
+                >
+                  <IndentIncrease className="size-4" />
+                  层级下移
+                </button>
+              </>
+            )}
+            {canDelete && (
+              <>
+                <div className="-mx-1 my-1 h-px bg-border" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-destructive outline-none transition-colors hover:bg-destructive/10 focus:bg-destructive/10 disabled:pointer-events-none disabled:opacity-50"
+                  disabled={deletingSelected}
+                  onClick={deleteContextTask}
+                >
+                  <Trash2 className="size-4" />
+                  删除任务（含子任务）
+                </button>
+              </>
+            )}
+          </div>
+        )}
+        <GanttDividerToggle
+          collapsed={detailsCollapsed}
+          onToggle={() => setDetailsCollapsed((prev) => !prev)}
+          className="top-1/2 -translate-x-1/2 -translate-y-1/2"
+          style={{ left: dividerViewportX }}
+        />
       </div>
     </div>
   );
 };
+
+export const GanttTimeline = (props: GanttTimelineProps) => (
+  <TooltipProvider>
+    <GanttTimelineContent {...props} />
+  </TooltipProvider>
+);
 
 const EmptyGanttTimeline = ({
   canCreate,
@@ -815,37 +1107,47 @@ const EmptyGanttTimeline = ({
   dayWidth,
   zoomIndex,
   detailsCollapsed,
+  hiddenColumnKeys,
   columnWidths,
   emptyText,
   onAutoFitColumn,
   onCreateTask,
   onResizeColumn,
+  onShowAllColumns,
+  onToggleColumn,
   setZoomIndex,
   setDetailsCollapsed,
+  fullScreen,
+  portalContainer,
 }: {
   canCreate: boolean;
   creatingParentId: string | null;
   dayWidth: number;
   zoomIndex: number;
   detailsCollapsed: boolean;
+  hiddenColumnKeys: ReadonlySet<GanttColumnKey>;
   columnWidths: GanttColumnWidths;
   emptyText: string;
   onAutoFitColumn: (key: GanttColumnKey) => void;
   onCreateTask?: (parentTask?: ProjectGanttTask) => void;
   onResizeColumn: (key: GanttColumnKey, width: number) => void;
+  onShowAllColumns: () => void;
+  onToggleColumn: (key: GanttColumnKey) => void;
   setZoomIndex: (value: number | ((prev: number) => number)) => void;
   setDetailsCollapsed: (value: boolean | ((prev: boolean) => boolean)) => void;
+  fullScreen: boolean;
+  portalContainer?: HTMLElement | null;
 }) => {
   const config = { dayWidth, tickEvery: getTickEvery(dayWidth) };
   const visibleStartDate = new Date().toISOString().slice(0, 10);
   const visibleDays = 28;
   const timelineWidth = Math.max(MIN_TIMELINE_WIDTH, visibleDays * config.dayWidth);
-  const leftWidth = ganttColumnsWidth(columnWidths, detailsCollapsed);
+  const visibleColumnKeys = ganttVisibleColumnKeys(detailsCollapsed, hiddenColumnKeys);
+  const leftWidth = ganttColumnsWidth(columnWidths, detailsCollapsed, hiddenColumnKeys);
   const bodyHeight = ROW_HEIGHT * 3;
-  const [hoverCollapse, setHoverCollapse] = useState(false);
 
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card">
+    <div className={cn("overflow-hidden rounded-lg border border-border bg-card", fullScreen && "flex h-full min-h-0 flex-col rounded-none")}>
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/20 px-3 py-1.5">
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span className="font-medium text-foreground">项目计划</span>
@@ -892,6 +1194,12 @@ const EmptyGanttTimeline = ({
               <ZoomIn className="h-3 w-3" />
             </button>
           </div>
+          <ColumnVisibilityMenu
+            hiddenColumnKeys={hiddenColumnKeys}
+            onShowAll={onShowAllColumns}
+            onToggle={onToggleColumn}
+            portalContainer={portalContainer}
+          />
           {canCreate && (
             <Button
               type="button"
@@ -910,13 +1218,13 @@ const EmptyGanttTimeline = ({
         </div>
       </div>
 
-      <div className="overflow-auto">
+      <div className={cn("overflow-auto", fullScreen && "min-h-0 flex-1")}>
         <div className="grid min-w-max" style={{ gridTemplateColumns: `${leftWidth}px ${timelineWidth}px` }}>
           <TaskGridHeader
-            collapsed={detailsCollapsed}
             columnWidths={columnWidths}
             onAutoFitColumn={onAutoFitColumn}
             onResizeColumn={onResizeColumn}
+            visibleColumnKeys={visibleColumnKeys}
           />
           <TimelineHeader
             config={config}
@@ -926,25 +1234,11 @@ const EmptyGanttTimeline = ({
           />
 
           <div className="sticky left-0 z-10 flex items-center justify-center border-r border-border bg-background text-xs text-muted-foreground transition-colors duration-200 hover:border-primary/40" style={{ height: bodyHeight }}>
-            <button
-              type="button"
-              className={cn(
-                "absolute right-0 top-0 z-[75] flex !h-full !min-h-0 !w-3 cursor-pointer items-center justify-start !rounded-none !border-0 !p-0 !shadow-none transition-all duration-200",
-                hoverCollapse ? "!bg-primary/5" : "!bg-transparent"
-              )}
-              onMouseEnter={() => setHoverCollapse(true)}
-              onMouseLeave={() => setHoverCollapse(false)}
-              onClick={() => setDetailsCollapsed((prev) => !prev)}
-              title={detailsCollapsed ? "展开列" : "折叠列"}
-              aria-label={detailsCollapsed ? "展开列" : "折叠列"}
-            >
-              <div className={cn(
-                "flex h-8 w-3 -translate-x-1 items-center justify-center rounded-l-sm border-l border-transparent bg-card/95 transition-all duration-200",
-                hoverCollapse ? "opacity-100" : "opacity-0"
-              )}>
-                {detailsCollapsed ? <ChevronRight className="h-2.5 w-2.5 text-primary/70" /> : <ChevronLeft className="h-2.5 w-2.5 text-primary/70" />}
-              </div>
-            </button>
+            <GanttDividerToggle
+              collapsed={detailsCollapsed}
+              onToggle={() => setDetailsCollapsed((prev) => !prev)}
+              className="-right-2 top-1/2 -translate-y-1/2"
+            />
             {emptyText}
           </div>
           <div className="relative" style={{ width: timelineWidth, height: bodyHeight }}>
@@ -1014,26 +1308,25 @@ const ColumnResizeHandle = ({
 };
 
 const TaskGridHeader = ({
-  collapsed,
   columnWidths,
   onAutoFitColumn,
   onResizeColumn,
+  visibleColumnKeys,
 }: {
-  collapsed: boolean;
   columnWidths: GanttColumnWidths;
   onAutoFitColumn: (key: GanttColumnKey) => void;
   onResizeColumn: (key: GanttColumnKey, width: number) => void;
+  visibleColumnKeys: GanttColumnKey[];
 }) => {
-  const keys = collapsed ? GANTT_COLLAPSED_COLUMN_KEYS : GANTT_EXPANDED_COLUMN_KEYS;
   return (
     <div
       className="sticky top-0 left-0 z-20 box-border grid items-center border-b border-r border-border bg-muted text-[11px] font-medium text-foreground"
       style={{
         height: HEADER_HEIGHT,
-        gridTemplateColumns: ganttColumnTemplate(columnWidths, collapsed),
+        gridTemplateColumns: visibleColumnKeys.map((key) => `${columnWidths[key]}px`).join(" "),
       }}
     >
-      {keys.map((key) => (
+      {visibleColumnKeys.map((key) => (
         <div key={key} className="group/column relative flex h-full min-w-0 items-center px-2">
           <span className="whitespace-nowrap">{GANTT_COLUMN_LABELS[key]}</span>
           {key !== "drag" && (
@@ -1050,7 +1343,114 @@ const TaskGridHeader = ({
   );
 };
 
+const DurationDaysInput = ({
+  disabled,
+  onCommit,
+  value,
+}: {
+  disabled: boolean;
+  onCommit: (value: number) => void;
+  value: number;
+}) => {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(() => value > 0 ? String(value) : "");
+
+  useEffect(() => {
+    if (!editing) setText(value > 0 ? String(value) : "");
+  }, [editing, value]);
+
+  const commit = () => {
+    const next = text.trim() ? normalizeGanttDurationDays(Number(text)) : 0;
+    setEditing(false);
+    setText(next > 0 ? String(next) : "");
+    onCommit(next);
+  };
+
+  return (
+    <Input
+      type="text"
+      inputMode="decimal"
+      value={editing ? text : value > 0 ? String(value) : "--"}
+      onFocus={() => {
+        setEditing(true);
+        setText(value > 0 ? String(value) : "");
+      }}
+      onChange={(event) => {
+        const next = event.target.value.replace(/[^\d.]/g, "");
+        if (/^\d*(?:\.\d*)?$/.test(next)) setText(next);
+      }}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") event.currentTarget.blur();
+        if (event.key === "Escape") {
+          setEditing(false);
+          setText(value > 0 ? String(value) : "");
+          event.currentTarget.blur();
+        }
+      }}
+      className={durationFieldClass}
+      disabled={disabled}
+      aria-label="工期天数"
+      title="单位：天；支持 0.5 天步进，留空表示未排期"
+    />
+  );
+};
+
+const ActualWorkHoursInput = ({
+  disabled,
+  onCommit,
+  value,
+}: {
+  disabled: boolean;
+  onCommit: (value: number) => void;
+  value: number;
+}) => {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(() => value > 0 ? roundGanttHours(value).toFixed(2) : "");
+
+  useEffect(() => {
+    if (!editing) setText(value > 0 ? roundGanttHours(value).toFixed(2) : "");
+  }, [editing, value]);
+
+  const commit = () => {
+    const next = roundGanttHours(Number(text || 0));
+    setEditing(false);
+    setText(next > 0 ? next.toFixed(2) : "");
+    onCommit(next);
+  };
+
+  return (
+    <Input
+      type="text"
+      inputMode="decimal"
+      value={editing ? text : value > 0 ? roundGanttHours(value).toFixed(2) : "--"}
+      onFocus={() => {
+        setEditing(true);
+        setText(value > 0 ? roundGanttHours(value).toFixed(2) : "");
+      }}
+      onChange={(event) => {
+        const next = event.target.value.replace(/[^\d.]/g, "");
+        if (/^\d*(?:\.\d{0,2})?$/.test(next)) setText(next);
+      }}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") event.currentTarget.blur();
+        if (event.key === "Escape") {
+          setEditing(false);
+          setText(value > 0 ? roundGanttHours(value).toFixed(2) : "");
+          event.currentTarget.blur();
+        }
+      }}
+      className={durationFieldClass}
+      disabled={disabled}
+      aria-label="实际工时"
+      title="单位：小时，最多两位小数"
+    />
+  );
+};
+
 const EditableTaskRow = ({
+  calendarMode,
   canCreate,
   canEdit,
   creatingChild,
@@ -1065,23 +1465,26 @@ const EditableTaskRow = ({
   onDragOver,
   onDragStart,
   onDrop,
+  onOpenContextMenu,
   onStartChild,
   onToggleHierarchy,
   onToggleSelected,
   onUpdateTask,
   predecessorOptions,
+  projectMembers,
   row,
   taskDepth,
   visualTop,
   selected,
   selectionLocked,
   selectionMode,
-  collapsed,
   columnWidths,
+  portalContainer,
+  visibleColumnKeys,
 }: {
+  calendarMode: GanttCalendarMode;
   canCreate: boolean;
   canEdit: boolean;
-  collapsed: boolean;
   creatingChild: boolean;
   dragged: boolean;
   dropPosition: DropPosition | null;
@@ -1094,11 +1497,13 @@ const EditableTaskRow = ({
   onDragOver: (event: DragEvent<HTMLDivElement>) => void;
   onDragStart: () => void;
   onDrop: () => void;
+  onOpenContextMenu: (event: ReactMouseEvent) => void;
   onStartChild?: () => void;
   onToggleHierarchy: () => void;
   onToggleSelected: () => void;
   onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft) => void | Promise<void>;
   predecessorOptions: ProjectGanttTask[];
+  projectMembers: ProjectMember[];
   row: ReturnType<typeof buildGanttRows>[number];
   taskDepth: number;
   visualTop: number;
@@ -1106,9 +1511,20 @@ const EditableTaskRow = ({
   selectionLocked: boolean;
   selectionMode: boolean;
   columnWidths: GanttColumnWidths;
+  portalContainer?: HTMLElement | null;
+  visibleColumnKeys: GanttColumnKey[];
 }) => {
-  const [draft, setDraft] = useState<GanttTaskDraft>(() => toTaskDraft(row));
+  const [draft, setDraft] = useState<GanttTaskDraft>(() => toTaskDraft(row, calendarMode));
+  const isColumnVisible = (key: GanttColumnKey) => visibleColumnKeys.includes(key);
   const isChildTask = taskDepth > 0;
+  const levelColor = GANTT_DEPTH_COLORS[taskDepth % GANTT_DEPTH_COLORS.length];
+  const levelCycle = Math.floor(taskDepth / GANTT_DEPTH_COLORS.length);
+  const levelLightness = Math.max(42, levelColor.lightness - levelCycle * 6);
+  const levelRowStyle = {
+    "--gantt-level-row": `hsl(${levelColor.hue} ${levelColor.saturation}% ${levelLightness}% / 0.024)`,
+    "--gantt-level-hover": `hsl(${levelColor.hue} ${levelColor.saturation}% ${levelLightness}% / 0.08)`,
+    "--gantt-level-accent": `hsl(${levelColor.hue} ${levelColor.saturation}% ${levelLightness}% / 0.68)`,
+  } as CSSProperties & Record<"--gantt-level-row" | "--gantt-level-hover" | "--gantt-level-accent", string>;
 
   const updateDraft = <K extends keyof GanttTaskDraft>(key: K, value: GanttTaskDraft[K]) => {
     setDraft((prev) => ({ ...prev, [key]: value }));
@@ -1119,22 +1535,25 @@ const EditableTaskRow = ({
   };
 
   const commitDraft = () => {
-    if (!canEdit || taskDraftEquals(row, draft)) return;
+    if (!canEdit || taskDraftEquals(row, draft, calendarMode)) return;
     void onUpdateTask?.(row, draft);
   };
 
   const withPlannedStart = (current: GanttTaskDraft, value: string): GanttTaskDraft => ({
     ...current,
     startDate: value,
-    endDate: value ? addDaysInclusive(value, current.durationDays) : current.endDate,
+    endDate: value ? calculateTaskFinishDate(value, current.durationDays, calendarMode) : current.endDate,
   });
 
   const withPlannedEnd = (current: GanttTaskDraft, value: string): GanttTaskDraft => ({
     ...current,
     endDate: value,
     durationDays: current.startDate && value
-      ? diffDaysInclusive(current.startDate, value)
+      ? calculateTaskDurationDays(current.startDate, value, calendarMode)
       : current.durationDays,
+    estimatedWorkHours: current.startDate && value
+      ? estimatedHoursForDuration(calculateTaskDurationDays(current.startDate, value, calendarMode))
+      : current.estimatedWorkHours,
   });
 
   const withActualStart = (current: GanttTaskDraft, value: string): GanttTaskDraft => ({
@@ -1160,21 +1579,21 @@ const EditableTaskRow = ({
   ) => {
     const nextDraft = builder(draft, value);
     setDraft(nextDraft);
-    if (canEdit && !taskDraftEquals(row, nextDraft)) {
+    if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
       void onUpdateTask?.(row, nextDraft);
     }
   };
 
   useEffect(() => {
-    setDraft(toTaskDraft(row));
-  }, [row]);
+    setDraft(toTaskDraft(row, calendarMode));
+  }, [calendarMode, row]);
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement | HTMLSelectElement>) => {
     if (event.key === "Enter") {
       event.currentTarget.blur();
     }
     if (event.key === "Escape") {
-      setDraft(toTaskDraft(row));
+      setDraft(toTaskDraft(row, calendarMode));
       event.currentTarget.blur();
     }
   };
@@ -1183,17 +1602,17 @@ const EditableTaskRow = ({
     <div
       className={cn(
         "group relative box-border grid cursor-default items-center border-b border-border text-xs transition-[background,box-shadow,transform] duration-150",
-        isChildTask ? "bg-primary/5" : index % 2 === 0 ? "bg-background" : "bg-muted/25",
+        "bg-[var(--gantt-level-row)] hover:bg-[var(--gantt-level-hover)]",
         row.isCritical
           ? "shadow-[inset_3px_0_0_hsl(var(--destructive))]"
-          : isChildTask && "shadow-[inset_3px_0_0_hsl(var(--primary))]",
-        selected && "bg-primary/15",
+          : "shadow-[inset_2px_0_0_var(--gantt-level-accent)]",
+        selected && "!bg-primary/15 hover:!bg-primary/20",
         dragged && "scale-[0.995] opacity-45 shadow-lg",
-        dropPosition && "bg-primary/10",
-        "hover:bg-primary/10"
+        dropPosition && "!bg-primary/10"
       )}
       onDragEnd={onDragEnd}
       onDragOver={onDragOver}
+      onContextMenu={onOpenContextMenu}
       onDrop={(event) => {
         event.preventDefault();
         onDrop();
@@ -1203,9 +1622,10 @@ const EditableTaskRow = ({
         insetInline: 0,
         top: visualTop,
         height: ROW_HEIGHT,
-        gridTemplateColumns: ganttColumnTemplate(columnWidths, collapsed),
+        gridTemplateColumns: visibleColumnKeys.map((key) => `${columnWidths[key]}px`).join(" "),
         contentVisibility: dropPosition || dragged ? "visible" : "auto",
         containIntrinsicSize: `${ROW_HEIGHT}px`,
+        ...levelRowStyle,
       }}
     >
       {flashing && (
@@ -1274,9 +1694,9 @@ const EditableTaskRow = ({
             {hierarchyCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
           </button>
         ) : <span className="size-4 shrink-0" aria-hidden="true" />}
-        {isChildTask && <span className="h-px w-2 shrink-0 bg-primary/60" />}
+        {isChildTask && <span className="h-px w-2 shrink-0 bg-[var(--gantt-level-accent)]" />}
         <span
-          className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap pr-12 font-mono text-[11px] font-semibold text-muted-foreground"
+          className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap pr-12 font-mono text-[11px] font-semibold text-[var(--gantt-level-accent)]"
           title={row.taskCode || row.id}
         >
           {row.taskCode || `Task${index + 1}`}
@@ -1306,7 +1726,7 @@ const EditableTaskRow = ({
           </button>
         )}
       </div>
-      {!collapsed && (
+      {isColumnVisible("taskCategory") && (
         <Input
           value={draft.taskCategory}
           onBlur={commitDraft}
@@ -1335,28 +1755,81 @@ const EditableTaskRow = ({
           </span>
         )}
       </div>
-      {!collapsed && (
-        <>
-          <Input
-            type="text"
-            inputMode="numeric"
-            pattern="[0-9]*"
-            value={draft.durationDays}
-            onBlur={commitDraft}
+      {isColumnVisible("taskDescription") && (draft.taskDescription.trim() ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <div className="min-w-0">
+              <Input
+                value={draft.taskDescription}
+                onBlur={commitDraft}
+                onChange={(event) => updateDraft("taskDescription", event.target.value)}
+                onKeyDown={handleKeyDown}
+                className={inlineFieldClass}
+                disabled={!canEdit || isSaving}
+                placeholder="任务描述"
+                aria-label="任务描述"
+              />
+            </div>
+          </TooltipTrigger>
+          <TooltipContent side="top" align="start" className="max-w-[min(480px,calc(100vw-2rem))] whitespace-pre-wrap break-words leading-5">
+            {draft.taskDescription}
+          </TooltipContent>
+        </Tooltip>
+      ) : (
+        <Input
+          value={draft.taskDescription}
+          onBlur={commitDraft}
+          onChange={(event) => updateDraft("taskDescription", event.target.value)}
+          onKeyDown={handleKeyDown}
+          className={inlineFieldClass}
+          disabled={!canEdit || isSaving}
+          placeholder="任务描述"
+          aria-label="任务描述"
+        />
+      ))}
+      {isColumnVisible("owner") && (
+          <Select
+            value={draft.ownerMemberId ?? ""}
+            aria-label="负责人"
             onChange={(event) => {
-              const digits = event.target.value.replace(/\D/g, "");
-              const durationDays = digits ? Number(digits) : 1;
-              setDraft((current) => ({
-                ...current,
-                durationDays,
-                endDate: current.startDate ? addDaysInclusive(current.startDate, durationDays) : current.endDate,
-              }));
+              const nextDraft = { ...draft, ownerMemberId: event.target.value || null };
+              setDraft(nextDraft);
+              if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
+                void onUpdateTask?.(row, nextDraft);
+              }
             }}
-            onKeyDown={handleKeyDown}
-            className={durationFieldClass}
+            className={inlineSelectClass}
+            portalContainer={portalContainer}
+            variant="ghost"
             disabled={!canEdit || isSaving}
-            aria-label="工期天数"
+          >
+            <option value="">未分配</option>
+            {projectMembers.map((member) => (
+              <option key={member.id} value={member.id}>
+                {member.personName}（{member.roleName}）
+              </option>
+            ))}
+          </Select>
+      )}
+      {isColumnVisible("durationDays") && (
+          <DurationDaysInput
+            value={draft.durationDays}
+            disabled={!canEdit || isSaving}
+            onCommit={(durationDays) => {
+              const nextDraft = {
+                ...draft,
+                durationDays,
+                endDate: draft.startDate ? calculateTaskFinishDate(draft.startDate, durationDays, calendarMode) : "",
+                estimatedWorkHours: estimatedHoursForDuration(durationDays),
+              };
+              setDraft(nextDraft);
+              if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
+                void onUpdateTask?.(row, nextDraft);
+              }
+            }}
           />
+      )}
+      {isColumnVisible("startDate") && (
           <GanttDateField
             value={draft.startDate}
             onChange={(value) => updateDateDraft(withPlannedStart, value)}
@@ -1365,6 +1838,8 @@ const EditableTaskRow = ({
             ariaLabel="计划开始"
             required
           />
+      )}
+      {isColumnVisible("endDate") && (
           <GanttDateField
             value={draft.endDate}
             onChange={(value) => updateDateDraft(withPlannedEnd, value)}
@@ -1372,8 +1847,10 @@ const EditableTaskRow = ({
             disabled={!canEdit || isSaving}
             ariaLabel="计划完成"
             min={draft.startDate}
-            required
+            required={draft.durationDays > 0}
           />
+      )}
+      {isColumnVisible("actualStartDate") && (
           <GanttDateField
             value={draft.actualStartDate}
             onChange={(value) => updateDateDraft(withActualStart, value)}
@@ -1381,6 +1858,8 @@ const EditableTaskRow = ({
             disabled={!canEdit || isSaving}
             ariaLabel="实际开始"
           />
+      )}
+      {isColumnVisible("actualEndDate") && (
           <GanttDateField
             value={draft.actualEndDate}
             onChange={(value) => updateDateDraft(withActualEnd, value)}
@@ -1389,32 +1868,31 @@ const EditableTaskRow = ({
             ariaLabel="实际完成"
             min={draft.actualStartDate || undefined}
           />
+      )}
+      {isColumnVisible("estimatedWorkHours") && (
           <Input
-            type="number"
-            min={0}
-            step="0.5"
-            value={draft.estimatedWorkHours}
-            onBlur={commitDraft}
-            onChange={(event) => updateDraft("estimatedWorkHours", Math.max(0, Number(event.target.value) || 0))}
-            onKeyDown={handleKeyDown}
+            type="text"
+            value={draft.estimatedWorkHours > 0 ? roundGanttHours(draft.estimatedWorkHours).toFixed(2) : "--"}
             className={durationFieldClass}
-            disabled={!canEdit || isSaving}
+            readOnly
             aria-label="预计工时"
-            title="单位：小时"
+            title="按工期 × 7.5 小时自动计算"
           />
-          <Input
-            type="number"
-            min={0}
-            step="0.5"
+      )}
+      {isColumnVisible("actualWorkHours") && (
+          <ActualWorkHoursInput
             value={draft.actualWorkHours}
-            onBlur={commitDraft}
-            onChange={(event) => updateDraft("actualWorkHours", Math.max(0, Number(event.target.value) || 0))}
-            onKeyDown={handleKeyDown}
-            className={durationFieldClass}
             disabled={!canEdit || isSaving}
-            aria-label="实际工时"
-            title="单位：小时"
+            onCommit={(value) => {
+              const nextDraft = { ...draft, actualWorkHours: value };
+              setDraft(nextDraft);
+              if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
+                void onUpdateTask?.(row, nextDraft);
+              }
+            }}
           />
+      )}
+      {isColumnVisible("progress") && (
           <div className="flex min-w-0 items-center gap-1">
             <Input
               type="text"
@@ -1433,20 +1911,34 @@ const EditableTaskRow = ({
             />
             <span className="text-[10px] text-muted-foreground">%</span>
           </div>
+      )}
+      {isColumnVisible("predecessor") && (
           <PredecessorSelect
-            value={draft.predecessorTaskIds[0] ?? ""}
-            onChange={(value) => {
-              const nextDraft = { ...draft, predecessorTaskIds: value ? [value] : [] };
+            value={draft.predecessorTaskIds}
+            onChange={(predecessorTaskIds) => {
+              const nextDraft = { ...draft, predecessorTaskIds };
               setDraft(nextDraft);
-              if (canEdit && !taskDraftEquals(row, nextDraft)) {
+              if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
                 void onUpdateTask?.(row, nextDraft);
               }
             }}
             options={predecessorOptions}
             currentTaskId={row.id}
             disabled={!canEdit || isSaving}
+            portalContainer={portalContainer}
           />
-        </>
+      )}
+      {isColumnVisible("remark") && (
+        <Input
+          value={draft.remark}
+          onBlur={commitDraft}
+          onChange={(event) => updateDraft("remark", event.target.value)}
+          onKeyDown={handleKeyDown}
+          className={inlineFieldClass}
+          disabled={!canEdit || isSaving}
+          placeholder="备注"
+          title={draft.remark}
+        />
       )}
     </div>
   );
@@ -1457,39 +1949,225 @@ const PredecessorSelect = ({
   disabled,
   onChange,
   options,
+  portalContainer,
   value,
 }: {
   currentTaskId: string;
   disabled?: boolean;
-  onChange: (value: string) => void;
+  onChange: (value: string[]) => void;
   options: ProjectGanttTask[];
-  value: string;
+  portalContainer?: HTMLElement | null;
+  value: string[];
 }) => {
-  const [showAllOptions, setShowAllOptions] = useState(false);
-  const selectedOption = options.find((task) => task.id === value);
-  const visibleOptions = showAllOptions
-    ? options.filter((task) => task.id !== currentTaskId && task.taskName.trim())
-    : selectedOption ? [selectedOption] : [];
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [pendingValue, setPendingValue] = useState<string[]>(value);
+  const [expandedTaskIds, setExpandedTaskIds] = useState<Set<string>>(() => new Set());
+  const taskById = useMemo(() => new Map(options.map((task) => [task.id, task])), [options]);
+  const childIdsByParentId = useMemo(() => {
+    const result = new Map<string, string[]>();
+    options.forEach((task) => {
+      if (!task.parentId) return;
+      const childIds = result.get(task.parentId) ?? [];
+      childIds.push(task.id);
+      result.set(task.parentId, childIds);
+    });
+    return result;
+  }, [options]);
+  const unavailableTaskIds = useMemo(() => {
+    const result = new Set([currentTaskId]);
+    const queue = [...(childIdsByParentId.get(currentTaskId) ?? [])];
+    while (queue.length > 0) {
+      const taskId = queue.shift();
+      if (!taskId || result.has(taskId)) continue;
+      result.add(taskId);
+      queue.push(...(childIdsByParentId.get(taskId) ?? []));
+    }
+    return result;
+  }, [childIdsByParentId, currentTaskId]);
+  const availableOptions = useMemo(
+    () => options.filter((task) => task.taskName.trim() && !unavailableTaskIds.has(task.id)),
+    [options, unavailableTaskIds],
+  );
+  const availableTaskIds = useMemo(() => new Set(availableOptions.map((task) => task.id)), [availableOptions]);
+  const matchingOptions = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    if (!normalizedQuery) return availableOptions;
+    return availableOptions.filter((task) => [task.taskCode, task.taskName, task.taskCategory]
+      .join(" ")
+      .toLocaleLowerCase()
+      .includes(normalizedQuery));
+  }, [availableOptions, query]);
+  const visibleOptions = useMemo(() => {
+    if (query.trim()) return matchingOptions;
+    return matchingOptions.filter((task) => {
+      let parentId = task.parentId ?? null;
+      while (parentId) {
+        if (availableTaskIds.has(parentId) && !expandedTaskIds.has(parentId)) return false;
+        parentId = taskById.get(parentId)?.parentId ?? null;
+      }
+      return true;
+    });
+  }, [availableTaskIds, expandedTaskIds, matchingOptions, query, taskById]);
+
+  useEffect(() => {
+    if (!open) setPendingValue(value);
+  }, [open, value]);
+
+  const getTaskDepth = (task: ProjectGanttTask) => {
+    let depth = 0;
+    let parentId = task.parentId ?? null;
+    while (parentId) {
+      if (availableTaskIds.has(parentId)) depth += 1;
+      parentId = taskById.get(parentId)?.parentId ?? null;
+    }
+    return depth;
+  };
+
+  const expandSelectedAncestors = (selectedTaskIds: string[]) => {
+    const next = new Set<string>();
+    selectedTaskIds.forEach((taskId) => {
+      let parentId = taskById.get(taskId)?.parentId ?? null;
+      while (parentId) {
+        if (availableTaskIds.has(parentId)) next.add(parentId);
+        parentId = taskById.get(parentId)?.parentId ?? null;
+      }
+    });
+    setExpandedTaskIds(next);
+  };
+
+  const changeOpen = (nextOpen: boolean) => {
+    if (nextOpen) {
+      const nextValue = value.filter((taskId) => availableTaskIds.has(taskId));
+      setPendingValue(nextValue);
+      setQuery("");
+      expandSelectedAncestors(nextValue);
+    } else {
+      setQuery("");
+      setPendingValue(value);
+    }
+    setOpen(nextOpen);
+  };
+
+  const togglePendingValue = (taskId: string) => {
+    setPendingValue((current) => {
+      const next = new Set(current);
+      if (next.has(taskId)) next.delete(taskId);
+      else next.add(taskId);
+      return availableOptions.map((task) => task.id).filter((id) => next.has(id));
+    });
+  };
+
+  const selectedTasks = value
+    .map((taskId) => taskById.get(taskId))
+    .filter((task): task is ProjectGanttTask => Boolean(task));
+  const triggerText = selectedTasks.length === 0
+    ? "无"
+    : selectedTasks.length === 1
+      ? `${selectedTasks[0].taskCode || selectedTasks[0].taskName}`
+      : `已选 ${selectedTasks.length} 项`;
+  const valuesChanged = pendingValue.length !== value.length
+    || pendingValue.some((taskId, index) => taskId !== value[index]);
 
   return (
-    <Select
-      value={value}
-      aria-label="紧前任务"
-      onOpenChange={setShowAllOptions}
-      onChange={(event) => {
-        onChange(event.target.value);
-        setShowAllOptions(false);
-      }}
-      className={inlineSelectClass}
-      disabled={disabled}
-    >
-      <option value="">无</option>
-      {visibleOptions.map((task) => (
-        <option key={task.id} value={task.id}>
-          {task.taskCode} · {task.taskName || "未命名任务"}
-        </option>
-      ))}
-    </Select>
+    <DropdownMenu open={open} onOpenChange={changeOpen}>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label="紧前任务"
+          className={cn(inlineSelectClass, "flex items-center gap-1 text-left disabled:pointer-events-none")}
+          disabled={disabled}
+          title={selectedTasks.map((task) => `${task.taskCode} · ${task.taskName}`).join("\n") || "无"}
+        >
+          <span className="min-w-0 flex-1 truncate">{triggerText}</span>
+          <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent container={portalContainer} align="end" className="w-[360px] max-w-[calc(100vw-24px)] p-0" onCloseAutoFocus={(event) => event.preventDefault()}>
+        <div className="border-b border-border p-2" onKeyDown={(event) => event.stopPropagation()}>
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              aria-label="搜索紧前任务"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              className="h-7 pl-7 text-xs"
+              placeholder="搜索任务 ID、名称或类别"
+            />
+          </div>
+        </div>
+        <div className="max-h-72 overflow-y-auto p-1">
+          {visibleOptions.length === 0 ? (
+            <p className="px-2 py-5 text-center text-xs text-muted-foreground">没有可选择的紧前任务</p>
+          ) : visibleOptions.map((task) => {
+            const childIds = (childIdsByParentId.get(task.id) ?? []).filter((id) => availableTaskIds.has(id));
+            const hasChildren = childIds.length > 0;
+            const isExpanded = expandedTaskIds.has(task.id);
+            const selected = pendingValue.includes(task.id);
+            const depth = getTaskDepth(task);
+            return (
+              <div
+                key={task.id}
+                className="flex min-h-8 items-center gap-1 rounded-sm pr-2 text-xs hover:bg-accent"
+                style={{ paddingLeft: `${6 + depth * 16}px` }}
+              >
+                {hasChildren ? (
+                  <button
+                    type="button"
+                    aria-label={`${isExpanded ? "折叠" : "展开"} ${task.taskCode || task.taskName} 子任务`}
+                    className="flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+                    onClick={() => setExpandedTaskIds((current) => {
+                      const next = new Set(current);
+                      if (next.has(task.id)) next.delete(task.id);
+                      else next.add(task.id);
+                      return next;
+                    })}
+                  >
+                    {isExpanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+                  </button>
+                ) : <span className="size-5 shrink-0" aria-hidden="true" />}
+                <input
+                  type="checkbox"
+                  aria-label={`选择 ${task.taskCode || task.taskName}`}
+                  checked={selected}
+                  onChange={() => togglePendingValue(task.id)}
+                  className="size-3.5 shrink-0 rounded border-border bg-background"
+                />
+                <button
+                  type="button"
+                  className="min-w-0 flex-1 truncate py-1 text-left text-foreground"
+                  onClick={() => togglePendingValue(task.id)}
+                  title={`${task.taskCode} · ${task.taskName}`}
+                >
+                  <span className="font-mono text-[11px]">{task.taskCode || "未编号"} · {task.taskName}</span>
+                </button>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex items-center justify-between gap-2 border-t border-border px-2 py-2">
+          <span className="text-xs text-muted-foreground">已选择 {pendingValue.length} 项</span>
+          <div className="flex items-center gap-1.5">
+            <Button type="button" size="sm" variant="ghost" className="h-7 text-xs" onClick={() => changeOpen(false)}>
+              取消
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              className="h-7 text-xs"
+              aria-label="应用紧前任务"
+              disabled={!valuesChanged}
+              onClick={() => {
+                onChange(pendingValue);
+                changeOpen(false);
+              }}
+            >
+              应用
+            </Button>
+          </div>
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 };
 

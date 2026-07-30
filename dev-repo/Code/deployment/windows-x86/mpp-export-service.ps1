@@ -1,6 +1,7 @@
 param(
   [int]$Port = 3210,
-  [string]$ConfigPath = ""
+  [string]$ConfigPath = "",
+  [string]$ProjectProgId = "MSProject.Application"
 )
 
 $ErrorActionPreference = "Stop"
@@ -70,7 +71,7 @@ try {
         $inputStream.Dispose()
       }
 
-      $projectApplication = New-Object -ComObject MSProject.Application
+      $projectApplication = New-Object -ComObject $ProjectProgId
       $projectApplication.Visible = $false
       $projectApplication.DisplayAlerts = $false
       $projectApplication.FileOpenEx($inputPath, $true)

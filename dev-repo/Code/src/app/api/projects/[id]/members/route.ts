@@ -3,6 +3,29 @@ import { prisma } from "@/lib/prisma"
 import { getUserFromRequest } from "@/lib/auth"
 import { ok, err, unauthorized, notFound } from "@/lib/api-utils"
 
+// GET /api/projects/[id]/members
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params
+  const user = getUserFromRequest(req)
+  if (!user) return unauthorized()
+
+  const project = await prisma.project.findUnique({ where: { id }, select: { id: true } })
+  if (!project) return notFound("项目")
+
+  const members = await prisma.projectMember.findMany({
+    where: { projectId: id },
+    orderBy: [{ roleName: "asc" }, { personName: "asc" }, { createdAt: "asc" }],
+  })
+  return ok(members.map((member) => ({
+    ...member,
+    createdAt: member.createdAt.toISOString(),
+    updatedAt: member.updatedAt.toISOString(),
+  })))
+}
+
 // POST /api/projects/[id]/members
 export async function POST(
   req: NextRequest,

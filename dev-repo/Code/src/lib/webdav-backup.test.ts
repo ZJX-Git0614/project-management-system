@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  candidateWebDavBaseUrls,
   downloadFileFromWebDav,
   listWebDavBackupDirectories,
   pruneWebDavBackups,
@@ -74,6 +75,14 @@ afterEach(() => {
 });
 
 describe("WebDAV backup retention", () => {
+  it("probes common WebDAV endpoints when the entered address is not writable", () => {
+    expect(candidateWebDavBaseUrls("http://192.168.100.10:10000/dav/", "admin")).toEqual(expect.arrayContaining([
+      "http://192.168.100.10:10000/dav/",
+      "http://192.168.100.10:10000/webdav/",
+      "http://192.168.100.10:10000/remote.php/dav/files/admin/",
+    ]));
+  });
+
   it("reads backup directories and sums their contained files", async () => {
     installWebDavMock();
 

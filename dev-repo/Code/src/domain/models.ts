@@ -16,14 +16,19 @@ export interface Project extends BaseEntity {
   startDate: string;
   expectedEndDate: string;
   status: ProjectStatus;
+  ganttCalendarMode?: "CALENDAR_DAYS" | "WORKING_DAYS";
+  ganttRevision?: number;
 }
 
 export interface ProjectGanttTask extends BaseEntity {
   projectId: string;
   parentId?: string | null;
+  ownerMemberId?: string | null;
+  ownerMember?: Pick<ProjectMember, "id" | "personName" | "roleName"> | null;
   taskCode: string;
   taskCategory: string;
   taskName: string;
+  taskDescription: string;
   startDate: string;
   finishDate?: string;
   durationDays: number;
@@ -35,6 +40,7 @@ export interface ProjectGanttTask extends BaseEntity {
   actualWorkHours?: number;
   progress: number;
   predecessorTask: string;
+  remark: string;
   predecessorTaskIds?: string[];
   predecessorDependencies?: ProjectGanttDependency[];
   taskMode?: string;
@@ -64,6 +70,34 @@ export interface ProjectGanttDependency extends BaseEntity {
   lag: number;
   lagFormat: number;
   predecessorTask?: Pick<ProjectGanttTask, "id" | "taskCode" | "taskName">;
+}
+
+export interface ProjectGanttDeletionPreview {
+  rootTaskIds: string[];
+  rootTasks: Array<Pick<ProjectGanttTask, "id" | "taskCode" | "taskName">>;
+  taskIds: string[];
+  deletedTaskCount: number;
+  descendantTaskCount: number;
+  dependencyCount: number;
+  internalDependencyCount: number;
+  externalDependencyCount: number;
+  detachedWeeklyItemCount: number;
+  detachedRiskCount: number;
+  clearedPredecessorCount: number;
+  ganttRevision: number;
+}
+
+export interface ProjectGanttDeletionBatch extends BaseEntity {
+  projectId: string;
+  operatorUserId: string;
+  operatorName: string;
+  status: "AVAILABLE" | "RESTORED" | "EXPIRED" | "PURGED";
+  rootTaskIds: string[];
+  summary: ProjectGanttDeletionPreview;
+  revisionBeforeDelete: number;
+  revisionAfterDelete: number;
+  expiresAt: string;
+  restoredAt?: string | null;
 }
 
 export interface ProjectBudgetCategory extends BaseEntity {
@@ -196,7 +230,7 @@ export interface OperationHistory extends BaseEntity {
     | "PROJECT_GANTT_IMPORT"
     | "PROJECT_EARNED_VALUE";
   entityId: string;
-  actionType: "CREATE" | "UPDATE" | "DELETE" | "STATUS_CHANGED";
+  actionType: "CREATE" | "UPDATE" | "DELETE" | "RESTORE" | "STATUS_CHANGED";
   operator: string;
   detail: string;
 }

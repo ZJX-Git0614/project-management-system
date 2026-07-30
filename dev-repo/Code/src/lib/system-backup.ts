@@ -125,6 +125,21 @@ export const listServerBackupDirectories = async (
   })))).filter((entry) => entry.exists).map((entry) => entry.path);
   const fallbackRoot = existingRoots[0] || await ensureWritableBackupDirectory(DEFAULT_SYSTEM_BACKUP_ROOT, settings);
   const currentPath = requestedPath ? assertAllowedBackupDirectory(requestedPath, settings) : fallbackRoot;
+  const currentRoot = [...(existingRoots.length > 0 ? existingRoots : [fallbackRoot])]
+    .filter((root) => isPathInsideRoot(currentPath, root))
+    .sort((left, right) => right.length - left.length)[0] || fallbackRoot;
+  const rootLabel = (root: string) => {
+    if (root === DEFAULT_SYSTEM_BACKUP_ROOT) return "默认备份空间";
+    if (settings?.localDirectory && root === path.resolve(settings.localDirectory)) return "当前备份空间";
+    if (root === "/data") return "本机数据空间";
+    if (root === "/mnt") return "外部存储空间";
+    return path.basename(root) || root;
+  };
+  const relativeParts = path.relative(currentRoot, currentPath).split(path.sep).filter(Boolean);
+  const breadcrumbs = [{ name: rootLabel(currentRoot), path: currentRoot }];
+  relativeParts.forEach((part, index) => {
+    breadcrumbs.push({ name: part, path: path.join(currentRoot, ...relativeParts.slice(0, index + 1)) });
+  });
   const entries = await readdir(currentPath, { withFileTypes: true });
   return {
     currentPath,
@@ -133,7 +148,11 @@ export const listServerBackupDirectories = async (
       : roots.find((root) => isPathInsideRoot(currentPath, root))
         ? path.dirname(currentPath)
         : null,
-    roots: existingRoots.length > 0 ? existingRoots : [fallbackRoot],
+    roots: (existingRoots.length > 0 ? existingRoots : [fallbackRoot]).map((root) => ({
+      name: rootLabel(root),
+      path: root,
+    })),
+    breadcrumbs,
     directories: entries
       .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
       .map((entry) => ({ name: entry.name, path: path.join(currentPath, entry.name) }))
@@ -149,6 +168,15 @@ export const getSystemWebDavConfig = (
   username: settings.cloudUsername.trim(),
   password: decryptAssistantSecret(settings.cloudPasswordEncrypted),
   directory,
+});
+
+export const getDocumentWebDavConfig = (
+  settings: SystemBackupSettings,
+): WebDavBackupConfig => ({
+  baseUrl: settings.documentCloudBaseUrl.trim() || settings.cloudBaseUrl.trim(),
+  username: settings.documentCloudUsername.trim() || settings.cloudUsername.trim(),
+  password: decryptAssistantSecret(settings.documentCloudPasswordEncrypted || settings.cloudPasswordEncrypted),
+  directory: settings.documentCloudDirectory.trim() || "Ceastar-PMS/documents",
 });
 
 const calculateDirectorySize = async (directory: string): Promise<number> => {

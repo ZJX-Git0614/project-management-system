@@ -101,7 +101,7 @@ function Ensure-CompatibleSystemBackupConfiguration([string]$Directory) {
     return
   }
 
-  $backupPath = "$composePath.before-update-20260728-4"
+  $backupPath = "$composePath.before-update-20260730-3"
   if (-not (Test-Path $backupPath)) {
     [System.IO.File]::Copy($composePath, $backupPath, $false)
   }
@@ -121,6 +121,7 @@ $deploymentDirectory = Find-DeploymentDirectory
 $imageNameFile = Join-Path $PSScriptRoot "image-name.txt"
 $imageHashFile = Join-Path $PSScriptRoot "image.sha256"
 $imageDirectory = Join-Path $PSScriptRoot "images"
+$packagedBackupScript = Join-Path $PSScriptRoot "backup.ps1"
 
 if (-not (Test-Path $imageNameFile)) {
   throw "Missing image-name.txt in the update package."
@@ -139,10 +140,15 @@ if (-not $newImage) {
   throw "image-name.txt is empty."
 }
 
-$expectedHash = (Get-Content -Path $imageHashFile -Raw).Trim().ToLowerInvariant()
-$actualHash = (Get-FileHash -Path $imageFiles[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+$hashContent = (Get-Content -LiteralPath $imageHashFile -Raw).Trim()
+$hashMatch = [regex]::Match($hashContent, '(?i)(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])')
+if (-not $hashMatch.Success) {
+  throw "image.sha256 does not contain a valid SHA256 checksum."
+}
+$expectedHash = $hashMatch.Value.ToLowerInvariant()
+$actualHash = (Get-FileHash -LiteralPath $imageFiles[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($expectedHash -ne $actualHash) {
-  throw "The update image checksum does not match. Copy the update package again."
+  throw "The update image checksum does not match. Expected: $expectedHash; actual: $actualHash. Copy the complete update package again."
 }
 
 Set-Location $deploymentDirectory
@@ -165,25 +171,22 @@ if (-not $composeImage) {
   throw "The current Ceastar PMS image name could not be determined."
 }
 
-$rollbackImage = "ceastar-project-management:rollback-20260728-4-amd64"
+$rollbackImage = "ceastar-project-management:rollback-20260730-3-amd64"
 docker image inspect $composeImage *> $null
 Assert-LastExitCode "The current Ceastar PMS image is missing."
 docker tag $composeImage $rollbackImage
 Assert-LastExitCode "Failed to preserve the rollback image."
 
+if (Test-Path $packagedBackupScript) {
+  Copy-Item -LiteralPath $packagedBackupScript -Destination (Join-Path $deploymentDirectory "backup.ps1") -Force
+}
+
 Write-Host "Creating a database and document backup..." -ForegroundColor Cyan
 & (Join-Path $deploymentDirectory "backup.ps1")
 Ensure-CompatibleSystemBackupConfiguration $deploymentDirectory
 
-$mppInstaller = Join-Path $PSScriptRoot "install-mpp-export-service.ps1"
-if (Test-Path $mppInstaller) {
-  try {
-    & $mppInstaller -DeploymentDirectory $deploymentDirectory -SkipContainerRestart
-  } catch {
-    Write-Host "MPP export service was not enabled: $($_.Exception.Message)" -ForegroundColor Yellow
-    Write-Host "The PMS update will continue. Excel and Project XML export remain available." -ForegroundColor Yellow
-  }
-}
+Write-Host "MPP export service setup was skipped during update." -ForegroundColor DarkYellow
+Write-Host "After the update completes, run repair-mpp-export-service.bat as Administrator only when binary MPP export is required." -ForegroundColor DarkYellow
 
 Write-Host "Loading the offline update image..." -ForegroundColor Cyan
 docker load --input $imageFiles[0].FullName
@@ -207,7 +210,7 @@ $state = @(
   "rollbackImage=$rollbackImage",
   "updatedAt=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 )
-Set-Content -Path (Join-Path $deploymentDirectory ".ceastar-update-20260728-4.state") -Value $state -Encoding ASCII
+Set-Content -Path (Join-Path $deploymentDirectory ".ceastar-update-20260730-3.state") -Value $state -Encoding ASCII
 
 Write-Host ""
 Write-Host "Ceastar PMS update completed successfully." -ForegroundColor Green

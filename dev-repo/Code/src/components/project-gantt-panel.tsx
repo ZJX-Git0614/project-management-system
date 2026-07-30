@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, Download, FileSpreadsheet, FileType2, Maximize2, Minimize2, Upload } from "lucide-react";
+import { BriefcaseBusiness, CalendarDays, ChevronDown, Download, FileSpreadsheet, FileType2, Maximize2, Minimize2, Undo2, Upload } from "lucide-react";
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -25,11 +25,20 @@ import { useConfirm } from "@/components/confirm-provider";
 import { usePermission } from "@/lib/use-permission";
 import { api } from "@/lib/api-client";
 import { buildGanttRows, getGanttDateRange } from "@/lib/gantt";
+import {
+  calculateTaskDurationDays,
+  isValidGanttDurationDays,
+  type GanttCalendarMode,
+} from "@/lib/gantt-calendar";
 import { renumberGanttTaskCodes } from "@/lib/gantt-task-codes";
-import { changeGanttTaskHierarchy, type GanttHierarchyDirection } from "@/lib/gantt-hierarchy";
+import {
+  changeGanttTaskHierarchy,
+  synchronizeGanttTaskCategories,
+  type GanttHierarchyDirection,
+} from "@/lib/gantt-hierarchy";
 import { cn } from "@/lib/utils";
 import { ProjectStatus } from "@/domain/enums";
-import type { ProjectGanttTask } from "@/domain/models";
+import type { ProjectGanttDeletionBatch, ProjectGanttTask, ProjectMember } from "@/domain/models";
 
 interface ProjectGanttPanelProps {
   projectId: string;
@@ -43,6 +52,26 @@ interface FetchTasksOptions {
 
 interface GanttTransferCapabilities {
   mppExport: boolean;
+}
+
+interface GanttSettings {
+  calendarMode: GanttCalendarMode;
+  hoursPerDay: number;
+}
+
+interface GanttDeleteResult {
+  deletionBatchId?: string;
+  deletedTaskCount?: number;
+  detachedWeeklyItemCount?: number;
+  detachedRiskCount?: number;
+  clearedPredecessorCount?: number;
+  expiresAt?: string;
+}
+
+interface GanttRestoreResult {
+  message: string;
+  restoredTaskCount: number;
+  warnings?: string[];
 }
 
 type ScheduleImportPreview = {
@@ -64,8 +93,22 @@ type ScheduleImportPreview = {
   };
 };
 
+const describeDeletionBatch = (batch: ProjectGanttDeletionBatch) => {
+  const rootNames = batch.summary.rootTasks
+    ?.map((task) => [task.taskCode, task.taskName].filter(Boolean).join(" · "))
+    .filter(Boolean) ?? [];
+  const primary = rootNames.length > 0
+    ? rootNames.slice(0, 2).join("、") + (rootNames.length > 2 ? " 等 " + rootNames.length + " 项" : "")
+    : String(batch.summary.deletedTaskCount ?? 0) + " 条任务";
+  const expires = batch.expiresAt ? new Date(batch.expiresAt).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+  return primary + "（" + String(batch.summary.deletedTaskCount ?? 0) + " 条，" + (expires ? expires + " 前可撤销" : "可撤销") + "）";
+};
+
 export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPanelProps) => {
   const [tasks, setTasks] = useState<ProjectGanttTask[]>([]);
+  const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([]);
+  const [calendarMode, setCalendarMode] = useState<GanttCalendarMode>("CALENDAR_DAYS");
+  const [savingCalendarMode, setSavingCalendarMode] = useState(false);
   const [loading, setLoading] = useState(true);
   const [creatingParentId, setCreatingParentId] = useState<string | null>(null);
   const [savingTaskId, setSavingTaskId] = useState<string | null>(null);
@@ -77,9 +120,16 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
   const [mppExportAvailable, setMppExportAvailable] = useState(false);
   const [importPreview, setImportPreview] = useState<ScheduleImportPreview | null>(null);
+  const [deletionBatches, setDeletionBatches] = useState<ProjectGanttDeletionBatch[]>([]);
+  const [restoringBatchId, setRestoringBatchId] = useState<string | null>(null);
   const [operationError, setOperationError] = useState<{ title: string; message: string } | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const ganttCardRef = useRef<HTMLDivElement>(null);
+  const [ganttPortalContainer, setGanttPortalContainer] = useState<HTMLElement | null>(null);
+  const setGanttCardElement = useCallback((element: HTMLDivElement | null) => {
+    ganttCardRef.current = element;
+    setGanttPortalContainer(element);
+  }, []);
   const confirm = useConfirm();
   const { can } = usePermission();
 
@@ -109,9 +159,39 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     }
   }, [projectId]);
 
+  const fetchDeletionBatches = useCallback(async () => {
+    if (!canDelete) {
+      setDeletionBatches([]);
+      return [];
+    }
+    try {
+      const data = await api.get<ProjectGanttDeletionBatch[]>("/api/projects/" + projectId + "/gantt-tasks/deletions");
+      setDeletionBatches(data);
+      return data;
+    } catch {
+      setDeletionBatches([]);
+      return [];
+    }
+  }, [canDelete, projectId]);
+
   useEffect(() => {
     void Promise.resolve().then(() => fetchTasks({ showLoading: true, clearOnError: true }));
   }, [fetchTasks]);
+
+  useEffect(() => {
+    void fetchDeletionBatches();
+  }, [fetchDeletionBatches]);
+
+  useEffect(() => {
+    if (!projectId) return;
+    void Promise.all([
+      api.get<ProjectMember[]>(`/api/projects/${projectId}/members`).then(setProjectMembers),
+      api.get<GanttSettings>(`/api/projects/${projectId}/gantt-settings`).then((settings) => setCalendarMode(settings.calendarMode)),
+    ]).catch(() => {
+      setProjectMembers([]);
+      setCalendarMode("CALENDAR_DAYS");
+    });
+  }, [projectId]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -211,14 +291,17 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
         parentId,
         taskCategory: parentTask?.taskCategory ?? "",
         taskName: "",
+        taskDescription: "",
         startDate,
-        durationDays: 1,
+        durationDays: 0,
+        ownerMemberId: null,
         actualStartDate: "",
         actualEndDate: "",
         estimatedWorkHours: 0,
         actualWorkHours: 0,
         progress: 0,
         predecessorTaskIds: [],
+        remark: "",
       });
       await fetchTasks();
     } catch (error) {
@@ -229,8 +312,8 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   };
 
   const handleUpdateTask = async (task: ProjectGanttTask, draft: GanttTaskDraft) => {
-    if (!draft.startDate || draft.durationDays < 1) {
-      alert("请填写计划开始时间，且任务周期 ≥ 1 天");
+    if (!draft.startDate || !isValidGanttDurationDays(draft.durationDays)) {
+      alert("请填写计划开始时间，工期留空或按 0.5 天为单位填写");
       return;
     }
     if (draft.progress < 0 || draft.progress > 100) {
@@ -243,11 +326,8 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     }
     setSavingTaskId(task.id);
     try {
-      const updated = await api.put<ProjectGanttTask>(`/api/projects/${projectId}/gantt-tasks/${task.id}`, draft);
-      setTasks((prev) => prev.map((item) => (item.id === task.id ? updated : item)));
-      if (task.taskCategory !== draft.taskCategory) {
-        await fetchTasks();
-      }
+      await api.put<ProjectGanttTask>(`/api/projects/${projectId}/gantt-tasks/${task.id}`, draft);
+      await fetchTasks();
     } catch (error) {
       alert(error instanceof Error ? error.message : "保存失败");
       await fetchTasks();
@@ -259,7 +339,10 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const handleDeleteSelected = async (selectedIds: string[]) => {
     const selectedTasks = tasks.filter((task) => selectedIds.includes(task.id));
     if (selectedTasks.length === 0) return;
-    if (!(await confirm(`确认删除选中的 ${selectedTasks.length} 个甘特任务？`))) return;
+    const confirmed = fullScreen
+      ? window.confirm(`确认删除选中的 ${selectedTasks.length} 个甘特任务？`)
+      : await confirm(`确认删除选中的 ${selectedTasks.length} 个甘特任务？`);
+    if (!confirmed) return;
 
     const selectedIdSet = new Set(selectedTasks.map((task) => task.id));
     const taskById = new Map(tasks.map((task) => [task.id, task]));
@@ -274,12 +357,37 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
 
     setDeletingSelected(true);
     try {
-      await Promise.all(deleteRoots.map((task) => api.delete(`/api/projects/${projectId}/gantt-tasks/${task.id}`)));
+      const results: GanttDeleteResult[] = [];
+      for (const task of deleteRoots) {
+        results.push(await api.delete<GanttDeleteResult>("/api/projects/" + projectId + "/gantt-tasks/" + task.id));
+      }
+      const deletedTaskCount = results.reduce((sum, item) => sum + (item.deletedTaskCount ?? 0), 0);
+      const detachedWeeklyItemCount = results.reduce((sum, item) => sum + (item.detachedWeeklyItemCount ?? 0), 0);
+      const detachedRiskCount = results.reduce((sum, item) => sum + (item.detachedRiskCount ?? 0), 0);
+      if (deletedTaskCount > 0 && (detachedWeeklyItemCount > 0 || detachedRiskCount > 0)) {
+        alert("已删除 " + deletedTaskCount + " 条甘特任务，并解除 " + detachedWeeklyItemCount + " 条事项、" + detachedRiskCount + " 条风险关联；可在最近删除中撤销。");
+      }
     } catch (error) {
       alert(error instanceof Error ? error.message : "删除失败");
     } finally {
-      await fetchTasks();
+      await Promise.all([fetchTasks(), fetchDeletionBatches()]);
       setDeletingSelected(false);
+    }
+  };
+
+  const handleRestoreDeletion = async (batchId: string) => {
+    setRestoringBatchId(batchId);
+    try {
+      const result = await api.post<GanttRestoreResult>("/api/projects/" + projectId + "/gantt-tasks/deletions/" + batchId + "/restore");
+      await Promise.all([fetchTasks(), fetchDeletionBatches()]);
+      if (result.warnings?.length) {
+        alert(result.message + "\n\n注意：\n" + result.warnings.join("\n"));
+      }
+    } catch (error) {
+      setOperationError({ title: "撤销删除失败", message: error instanceof Error ? error.message : "恢复失败" });
+      await fetchDeletionBatches();
+    } finally {
+      setRestoringBatchId(null);
     }
   };
 
@@ -305,7 +413,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const handleChangeHierarchy = async (taskIds: string[], direction: GanttHierarchyDirection) => {
     const optimistic = changeGanttTaskHierarchy(tasks, taskIds, direction);
     if (optimistic.movedTaskIds.length === 0) return;
-    setTasks(renumberGanttTaskCodes(optimistic.tasks));
+    setTasks(renumberGanttTaskCodes(synchronizeGanttTaskCategories(optimistic.tasks, optimistic.movedTaskIds)));
     setHierarchyChanging(true);
     try {
       const result = await api.put<{ tasks: ProjectGanttTask[]; movedTaskIds: string[]; message: string }>(
@@ -333,17 +441,34 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     }
   };
 
+  const changeCalendarMode = async (nextMode: GanttCalendarMode) => {
+    if (nextMode === calendarMode || savingCalendarMode || !canEdit) return;
+    setSavingCalendarMode(true);
+    try {
+      const settings = await api.put<GanttSettings>(`/api/projects/${projectId}/gantt-settings`, {
+        calendarMode: nextMode,
+      });
+      setCalendarMode(settings.calendarMode);
+      await fetchTasks();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "工期计算方式保存失败");
+    } finally {
+      setSavingCalendarMode(false);
+    }
+  };
+
   if (loading) {
     return <div className="text-sm text-muted-foreground">加载中...</div>;
   }
 
   const range = getGanttDateRange(tasks);
   const criticalCount = buildGanttRows(tasks).filter((row) => row.isCritical).length;
+  const latestDeletionBatch = deletionBatches[0];
 
   return (
     <div className="space-y-4">
       <Card
-        ref={ganttCardRef}
+        ref={setGanttCardElement}
         className={cn(
           fullScreen && "fixed inset-0 z-[120] flex h-screen w-screen flex-col overflow-hidden rounded-none border-0 bg-background",
         )}
@@ -361,7 +486,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                 <div className="mr-1 grid grid-cols-3 gap-3 text-right text-xs">
                   <div>
                     <div className="text-muted-foreground">总工期</div>
-                    <div className="font-semibold">{range.totalDays} 天</div>
+                    <div className="font-semibold">{calculateTaskDurationDays(range.startDate, range.endDate, calendarMode)} 天</div>
                   </div>
                   <div>
                     <div className="text-muted-foreground">任务数</div>
@@ -373,6 +498,30 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   </div>
                 </div>
               )}
+              <div className="flex h-8 items-center rounded-md border border-border bg-background p-0.5" title="工作日按中国法定节假日及调休日历计算，每天 7.5 小时">
+                <button
+                  type="button"
+                  className={cn(
+                    "flex h-6 items-center gap-1 rounded px-2 text-[11px] transition-colors",
+                    calendarMode === "CALENDAR_DAYS" ? "bg-accent text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+                  )}
+                  disabled={!canEdit || savingCalendarMode}
+                  onClick={() => void changeCalendarMode("CALENDAR_DAYS")}
+                >
+                  <CalendarDays className="size-3" />自然日
+                </button>
+                <button
+                  type="button"
+                  className={cn(
+                    "flex h-6 items-center gap-1 rounded px-2 text-[11px] transition-colors",
+                    calendarMode === "WORKING_DAYS" ? "bg-accent text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+                  )}
+                  disabled={!canEdit || savingCalendarMode}
+                  onClick={() => void changeCalendarMode("WORKING_DAYS")}
+                >
+                  <BriefcaseBusiness className="size-3" />工作日
+                </button>
+              </div>
               {canCreate && (
                 <>
                   <input
@@ -412,7 +561,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                     <Upload className="size-3.5" /> {exportingFormat ? "导出中..." : "导出"}<ChevronDown className="size-3" />
                   </Button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuContent container={fullScreen ? ganttPortalContainer : undefined} align="end" className="w-56">
                   <DropdownMenuItem onClick={() => void handleExport("xlsx")}>
                     <FileSpreadsheet className="size-4" /> Excel 工作簿
                   </DropdownMenuItem>
@@ -438,6 +587,25 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
             </div>
           </div>
         </CardHeader>
+        {canDelete && latestDeletionBatch && (
+          <div className={cn("mx-6 mb-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-xs", fullScreen && "mx-3")}>
+            <div className="min-w-0">
+              <div className="font-medium text-amber-200">最近删除可撤销</div>
+              <div className="truncate text-muted-foreground">{describeDeletionBatch(latestDeletionBatch)}</div>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-7 gap-1 px-2 text-xs"
+              disabled={restoringBatchId === latestDeletionBatch.id}
+              onClick={() => void handleRestoreDeletion(latestDeletionBatch.id)}
+            >
+              <Undo2 className="size-3.5" />
+              {restoringBatchId === latestDeletionBatch.id ? "撤销中..." : "撤销删除"}
+            </Button>
+          </div>
+        )}
         <CardContent className={cn(fullScreen && "min-h-0 flex-1 overflow-hidden px-3 pb-3")}>
           <GanttTimeline
             canCreate={canCreate}
@@ -446,12 +614,15 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
             creatingParentId={creatingParentId}
             deletingSelected={deletingSelected}
             fullScreen={fullScreen}
+            portalContainer={fullScreen ? ganttPortalContainer : undefined}
+            calendarMode={calendarMode}
             hierarchyChanging={hierarchyChanging}
             onChangeHierarchy={handleChangeHierarchy}
             onCreateTask={startCreate}
             onDeleteSelected={handleDeleteSelected}
             onReorderTasks={handleReorderTasks}
             onUpdateTask={handleUpdateTask}
+            projectMembers={projectMembers}
             reordering={reordering}
             savingTaskId={savingTaskId}
             tasks={tasks}
@@ -459,7 +630,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
         </CardContent>
       </Card>
       <Dialog open={Boolean(importPreview)} onOpenChange={(open) => !open && !importing && setImportPreview(null)}>
-        <DialogContent className="max-w-3xl">
+        <DialogContent container={fullScreen ? ganttPortalContainer : undefined} className="max-w-3xl">
           <DialogHeader>
             <DialogTitle>计划导入预览</DialogTitle>
             <DialogDescription>
@@ -516,6 +687,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
         open={Boolean(operationError)}
         title={operationError?.title || "操作失败"}
         message={operationError?.message || "未知错误"}
+        container={fullScreen ? ganttPortalContainer : undefined}
         onOpenChange={(open) => !open && setOperationError(null)}
       />
     </div>

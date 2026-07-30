@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { getUserFromRequest } from "@/lib/auth";
 import { err, notFound, unauthorized } from "@/lib/api-utils";
 import { getProjectDocumentPath } from "@/lib/project-document-storage";
-import { getSystemBackupSettings, getSystemWebDavConfig } from "@/lib/system-backup";
+import { getDocumentWebDavConfig, getSystemBackupSettings } from "@/lib/system-backup";
 import { downloadFileFromWebDav } from "@/lib/webdav-backup";
 
 export const runtime = "nodejs";
@@ -29,7 +29,7 @@ export async function GET(
   if (!file && document.cloudPath) {
     try {
       const settings = await getSystemBackupSettings();
-      file = await downloadFileFromWebDav(getSystemWebDavConfig(settings), document.cloudPath);
+      file = await downloadFileFromWebDav(getDocumentWebDavConfig(settings), document.cloudPath);
     } catch (error) {
       return err(error instanceof Error ? error.message : "从公司云盘读取文件失败", 502);
     }

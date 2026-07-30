@@ -9,6 +9,7 @@ interface SelectProps extends Omit<React.SelectHTMLAttributes<HTMLSelectElement>
   value?: string;
   onChange?: (e: React.ChangeEvent<HTMLSelectElement>) => void;
   onOpenChange?: (open: boolean) => void;
+  portalContainer?: React.ComponentProps<typeof DropdownMenuPrimitive.Portal>["container"];
   variant?: "default" | "ghost";
 }
 
@@ -29,6 +30,7 @@ function Select({
   disabled,
   name,
   onOpenChange,
+  portalContainer,
   "aria-label": ariaLabel,
   title,
   variant = "default",
@@ -120,7 +122,7 @@ function Select({
             />
           </button>
         </DropdownMenuPrimitive.Trigger>
-        <DropdownMenuPrimitive.Portal>
+        <DropdownMenuPrimitive.Portal container={portalContainer}>
           <DropdownMenuPrimitive.Content
             data-slot="select-content"
             className="z-[110] max-h-60 min-w-[var(--radix-dropdown-menu-trigger-width)] overflow-auto rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-[var(--app-shadow-popover)]"

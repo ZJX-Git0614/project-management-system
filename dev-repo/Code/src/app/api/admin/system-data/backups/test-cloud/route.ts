@@ -11,14 +11,15 @@ export async function POST(req: NextRequest) {
   if ("response" in auth) return auth.response;
   const body = await req.json().catch(() => ({}));
   const current = await getSystemBackupSettings();
+  const target = body.target === "DOCUMENT" ? "DOCUMENT" : "BACKUP";
   try {
     await testWebDavConnection({
-      baseUrl: String(body.cloudBaseUrl ?? current.cloudBaseUrl).trim(),
-      username: String(body.cloudUsername ?? current.cloudUsername).trim(),
-      password: String(body.cloudPassword ?? "") || decryptAssistantSecret(current.cloudPasswordEncrypted),
-      directory: String(body.cloudDirectory ?? current.cloudDirectory).trim(),
+      baseUrl: String(target === "DOCUMENT" ? body.documentCloudBaseUrl ?? current.documentCloudBaseUrl : body.cloudBaseUrl ?? current.cloudBaseUrl).trim(),
+      username: String(target === "DOCUMENT" ? body.documentCloudUsername ?? current.documentCloudUsername : body.cloudUsername ?? current.cloudUsername).trim(),
+      password: String(target === "DOCUMENT" ? body.documentCloudPassword ?? "" : body.cloudPassword ?? "") || decryptAssistantSecret(target === "DOCUMENT" ? current.documentCloudPasswordEncrypted : current.cloudPasswordEncrypted),
+      directory: String(target === "DOCUMENT" ? body.documentCloudDirectory ?? current.documentCloudDirectory : body.cloudDirectory ?? current.cloudDirectory).trim(),
     });
-    return ok({ message: "公司云盘 WebDAV 登录与连接正常" });
+    return ok({ message: `${target === "DOCUMENT" ? "项目文档" : "系统备份"}云盘 WebDAV 可读写` });
   } catch (error) {
     return err(error instanceof Error ? error.message : "公司云盘连接失败");
   }

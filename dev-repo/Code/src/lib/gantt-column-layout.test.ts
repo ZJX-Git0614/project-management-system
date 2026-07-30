@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  GANTT_HIDEABLE_COLUMN_KEYS,
+  GANTT_EXPANDED_COLUMN_KEYS,
   GANTT_COLUMN_MIN_WIDTHS,
   fitGanttColumnWidth,
   fitGanttColumnWidths,
   ganttColumnTemplate,
   ganttColumnsWidth,
   ganttTaskDepths,
+  ganttVisibleColumnKeys,
 } from "@/lib/gantt-column-layout";
 
 const tasks = [
@@ -30,5 +33,27 @@ describe("gantt column layout", () => {
     const widths = fitGanttColumnWidths(tasks);
     const templateWidths = ganttColumnTemplate(widths, true).split(" ").map((value) => Number(value.replace("px", "")));
     expect(templateWidths.reduce((total, value) => total + value, 0)).toBe(ganttColumnsWidth(widths, true));
+  });
+
+  it("hides optional columns without removing pinned task columns", () => {
+    const widths = fitGanttColumnWidths(tasks);
+    const hidden = new Set(["owner", "predecessor"] as const);
+    const visibleKeys = ganttVisibleColumnKeys(false, hidden);
+
+    expect(GANTT_HIDEABLE_COLUMN_KEYS).toContain("owner");
+    expect(visibleKeys).toEqual(expect.arrayContaining(["drag", "taskCode", "taskName"]));
+    expect(visibleKeys).not.toContain("owner");
+    expect(visibleKeys).not.toContain("predecessor");
+    expect(ganttColumnTemplate(widths, false, hidden).split(" ")).toHaveLength(visibleKeys.length);
+    expect(ganttColumnsWidth(widths, false, hidden)).toBe(
+      visibleKeys.reduce((total, key) => total + widths[key], 0),
+    );
+  });
+
+  it("keeps task description next to the task name and remark at the end", () => {
+    expect(GANTT_EXPANDED_COLUMN_KEYS.indexOf("taskDescription")).toBe(
+      GANTT_EXPANDED_COLUMN_KEYS.indexOf("taskName") + 1,
+    );
+    expect(GANTT_EXPANDED_COLUMN_KEYS.at(-1)).toBe("remark");
   });
 });
