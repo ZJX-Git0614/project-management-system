@@ -14,6 +14,7 @@ fi
 echo ">>> 执行增量数据修复脚本..."
 for migration in prisma/manual-migrations/*.sql; do
   [ -f "$migration" ] || continue
+  echo ">>> 执行迁移: $(basename "$migration")"
   npx prisma db execute --file "$migration" --schema prisma/schema.prisma 2>&1
 done
 

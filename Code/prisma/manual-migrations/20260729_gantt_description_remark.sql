@@ -1,0 +1,5 @@
+ALTER TABLE "ProjectGanttTask"
+  ADD COLUMN IF NOT EXISTS "taskDescription" TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE "ProjectGanttTask"
+  ADD COLUMN IF NOT EXISTS "remark" TEXT NOT NULL DEFAULT '';

@@ -104,6 +104,10 @@ docker compose restart pms
 Assert-LastExitCode "Failed to restart Ceastar PMS."
 
 Wait-ForApplication
+
+Write-Host "MPP export service setup was skipped during installation." -ForegroundColor DarkYellow
+Write-Host "After installation completes, run repair-mpp-export-service.bat as Administrator only when binary MPP export is required." -ForegroundColor DarkYellow
+
 Set-Content -Path ".installed" -Value (Get-Date -Format "yyyy-MM-dd HH:mm:ss") -Encoding UTF8
 
 try {

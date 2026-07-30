@@ -6,6 +6,7 @@ import { ensureMutableProject, err, notFound, ok, unauthorized } from "@/lib/api
 import {
   calculateTaskFinishDate,
   estimatedHoursForDuration,
+  isValidGanttDurationDays,
   normalizeTaskStartDate,
   roundGanttHours,
 } from "@/lib/gantt-calendar";
@@ -49,10 +50,11 @@ export async function POST(
   const body = await req.json() as Record<string, unknown>;
   const taskCategory = String(body.taskCategory ?? "").trim();
   const taskName = String(body.taskName ?? "").trim();
+  const taskDescription = String(body.taskDescription ?? "").trim();
   const requestedStartDate = String(body.startDate ?? "").trim();
-  const durationDays = Number(body.durationDays);
+  const durationDays = Number(body.durationDays ?? 0);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(requestedStartDate)) return err("计划开始时间格式应为 YYYY-MM-DD");
-  if (!Number.isInteger(durationDays) || durationDays <= 0) return err("任务周期必须为大于 0 的整数天数");
+  if (!isValidGanttDurationDays(durationDays)) return err("工期只能为空或以 0.5 天为单位填写");
   const calendarMode = await getProjectGanttCalendarMode(id);
   const startDate = normalizeTaskStartDate(requestedStartDate, calendarMode);
   const finishDate = calculateTaskFinishDate(startDate, durationDays, calendarMode);
@@ -62,13 +64,14 @@ export async function POST(
   const actualWorkHours = roundGanttHours(Number(body.actualWorkHours ?? 0));
   const progress = Number(body.progress ?? 0);
   const predecessorTask = String(body.predecessorTask ?? "").trim();
+  const remark = String(body.remark ?? "").trim();
   const dependencies = parseGanttDependencyInput(body);
   const parentId = body.parentId ? String(body.parentId) : null;
   const ownerMemberId = body.ownerMemberId ? String(body.ownerMemberId) : null;
   const budgetItemId = body.budgetItemId ? String(body.budgetItemId) : null;
 
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(finishDate)) return err("计划完成时间格式应为 YYYY-MM-DD");
-  if (finishDate < startDate) return err("计划完成时间不能早于计划开始时间");
+  if (durationDays > 0 && !/^\d{4}-\d{2}-\d{2}$/.test(finishDate)) return err("计划完成时间格式应为 YYYY-MM-DD");
+  if (finishDate && finishDate < startDate) return err("计划完成时间不能早于计划开始时间");
   if (actualStartDate && !/^\d{4}-\d{2}-\d{2}$/.test(actualStartDate)) return err("实际开始时间格式应为 YYYY-MM-DD");
   if (actualEndDate && !/^\d{4}-\d{2}-\d{2}$/.test(actualEndDate)) return err("实际完成时间格式应为 YYYY-MM-DD");
   if (!Number.isFinite(Number(body.actualWorkHours ?? 0)) || Number(body.actualWorkHours ?? 0) < 0) return err("实际工时必须为大于或等于 0 的数字");
@@ -111,10 +114,11 @@ export async function POST(
         taskCode: "",
         taskCategory,
         taskName,
+        taskDescription,
         startDate,
         finishDate,
         durationDays,
-        durationMinutes: durationDays * 450,
+        durationMinutes: Math.round(durationDays * 450),
         actualStartDate,
         actualEndDate,
         estimatedWorkHours,
@@ -122,6 +126,7 @@ export async function POST(
         progress,
         budgetItemId,
         predecessorTask,
+        remark,
         sortOrder,
       },
     });

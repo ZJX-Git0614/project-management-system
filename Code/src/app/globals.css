@@ -131,6 +131,90 @@ body {
   background: #3c3c40;
 }
 
+.gantt-scroll-viewport {
+  scrollbar-gutter: stable;
+  scrollbar-color: #3c3c40 #161619;
+  scrollbar-width: thin;
+}
+
+.gantt-scroll-viewport-embedded {
+  height: max(260px, calc(100dvh - 380px));
+}
+
+.gantt-scroll-viewport::-webkit-scrollbar {
+  width: 8px;
+  height: 10px;
+}
+
+.gantt-scroll-viewport::-webkit-scrollbar-track {
+  background: #161619;
+}
+
+.gantt-scroll-viewport::-webkit-scrollbar-thumb {
+  min-width: 36px;
+  border: 2px solid #161619;
+  border-radius: 999px;
+  background: #3c3c40;
+}
+
+.gantt-scroll-viewport::-webkit-scrollbar-thumb:hover {
+  background: #505056;
+}
+
+.gantt-context-menu {
+  width: min(320px, calc(100vw - 16px));
+  padding: 8px;
+}
+
+.gantt-context-menu-header {
+  padding: 4px 8px 8px;
+  color: var(--app-text-dim);
+  font-size: 12px;
+}
+
+.gantt-context-menu-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.gantt-context-menu-grid-single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.gantt-context-menu-separator {
+  height: 1px;
+  margin: 8px 0;
+  background: var(--app-border);
+}
+
+.gantt-context-menu-item {
+  display: flex;
+  width: 100% !important;
+  min-width: 0;
+  min-height: 36px !important;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  padding: 0 10px;
+  text-align: left;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.gantt-context-menu-item > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gantt-context-menu-item-danger {
+  color: hsl(var(--destructive));
+}
+
 a {
   color: #93c5fd;
   text-decoration: none;

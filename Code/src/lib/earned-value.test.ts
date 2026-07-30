@@ -73,11 +73,11 @@ describe("earned value", () => {
 
     expect(rows[0]).toMatchObject({
       estimatedWorkHours: 0,
-      workBasisHours: 80,
-      plannedWorkHours: 40,
-      earnedWorkHours: 32,
+      workBasisHours: 75,
+      plannedWorkHours: 37.5,
+      earnedWorkHours: 30,
     });
-    expect(summary.scheduleVarianceHours).toBe(-8);
+    expect(summary.scheduleVarianceHours).toBe(-7.5);
     expect(summary.schedulePerformanceIndex).toBeCloseTo(0.8);
   });
 });

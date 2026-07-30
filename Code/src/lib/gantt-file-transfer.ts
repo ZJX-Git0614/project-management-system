@@ -8,7 +8,12 @@ import { XMLBuilder, XMLParser } from "fast-xml-parser";
 
 import type { ProjectGanttTask } from "@/domain/models";
 import { addDaysInclusive } from "@/lib/gantt";
-import { estimatedHoursForDuration, roundGanttHours } from "@/lib/gantt-calendar";
+import {
+  estimatedHoursForDuration,
+  isValidGanttDurationDays,
+  normalizeGanttDurationDays,
+  roundGanttHours,
+} from "@/lib/gantt-calendar";
 
 export interface ImportedGanttTask {
   externalId: string;
@@ -19,6 +24,7 @@ export interface ImportedGanttTask {
   ownerName?: string;
   taskCategory: string;
   taskName: string;
+  taskDescription: string;
   startDate: string;
   finishDate: string;
   durationDays: number;
@@ -29,6 +35,7 @@ export interface ImportedGanttTask {
   estimatedWorkHours: number;
   actualWorkHours: number;
   progress: number;
+  remark: string;
   predecessorExternalIds: string[];
   predecessorDatabaseIds?: string[];
   predecessorDependencies: ImportedGanttDependency[];
@@ -166,10 +173,10 @@ const dateOnly = (value: unknown) => {
 };
 
 const durationBetween = (startDate: string, endDate: string) => {
-  if (!startDate || !endDate) return 1;
+  if (!startDate || !endDate) return 0;
   const start = new Date(`${startDate}T00:00:00Z`).getTime();
   const end = new Date(`${endDate}T00:00:00Z`).getTime();
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 1;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 0;
   return Math.floor((end - start) / 86_400_000) + 1;
 };
 
@@ -250,6 +257,12 @@ export const parseProjectXmlBundle = (xml: string): GanttImportBundle => {
     if (!startDate) throw new Error(`任务“${taskName}”缺少计划开始日期`);
     const finishDate = dateOnly(rawTask.Finish);
     const durationMinutes = parseIsoDurationMinutes(rawTask.Duration);
+    const isMilestone = text(rawTask.Milestone) === "1";
+    const durationDays = isMilestone
+      ? 0
+      : durationMinutes > 0
+        ? normalizeGanttDurationDays(durationMinutes / minutesPerDay)
+        : durationBetween(startDate, finishDate);
     const predecessorDependencies = asArray(rawTask.PredecessorLink as Record<string, unknown> | Record<string, unknown>[] | undefined)
       .map((link) => ({
         predecessorExternalId: text(link.PredecessorUID),
@@ -268,11 +281,10 @@ export const parseProjectXmlBundle = (xml: string): GanttImportBundle => {
       ownerName: text(rawTask.Text2),
       taskCategory: "",
       taskName,
+      taskDescription: text(rawTask.Notes),
       startDate,
-      finishDate: finishDate || startDate,
-      durationDays: durationMinutes > 0
-        ? Math.max(1, Math.ceil(durationMinutes / minutesPerDay))
-        : Math.max(1, durationBetween(startDate, finishDate)),
+      finishDate: finishDate || (durationDays > 0 ? addDaysInclusive(startDate, durationDays) : ""),
+      durationDays,
       durationMinutes,
       durationFormat: Math.round(numberValue(rawTask.DurationFormat, 7)),
       actualStartDate: dateOnly(rawTask.ActualStart),
@@ -280,10 +292,11 @@ export const parseProjectXmlBundle = (xml: string): GanttImportBundle => {
       estimatedWorkHours: parseIsoDurationMinutes(rawTask.Work) / 60,
       actualWorkHours: parseIsoDurationMinutes(rawTask.ActualWork) / 60,
       progress: normalizeProgress(rawTask.PercentComplete),
+      remark: text(rawTask.Text3),
       predecessorExternalIds: predecessorDependencies.map((dependency) => dependency.predecessorExternalId),
       predecessorDependencies,
       taskMode: text(rawTask.Manual) === "1" ? "MANUAL" : "AUTO",
-      isMilestone: text(rawTask.Milestone) === "1",
+      isMilestone,
       wbsCode: text(rawTask.WBS),
       outlineNumber: text(rawTask.OutlineNumber),
       calendarUid: text(rawTask.CalendarUID),
@@ -349,7 +362,15 @@ export const parseGanttExcel = (buffer: Buffer, fallbackStartDate = ""): Importe
     if (!taskName) throw new Error(`Excel 第 ${index + 2} 行缺少任务名称`);
     if (!startDate) throw new Error(`Excel 第 ${index + 2} 行缺少计划开始日期`);
     const finishDate = dateOnly(excelValue(row, "计划完成", "Finish", "Finish Date"));
-    const explicitDuration = Number(text(excelValue(row, "工期(天)", "工期", "Duration Days")));
+    const explicitDurationText = text(excelValue(row, "工期(天)", "工期", "Duration Days"));
+    const explicitDuration = explicitDurationText ? Number(explicitDurationText) : Number.NaN;
+    const durationDays = isValidGanttDurationDays(explicitDuration)
+      ? normalizeGanttDurationDays(explicitDuration)
+      : durationBetween(startDate, finishDate);
+    const durationMinutesFromFile = Math.max(
+      0,
+      Math.round(numberValue(excelValue(row, "工期(分钟)", "Duration Minutes"), 0)),
+    );
     const predecessorValue = text(excelValue(row, "紧前任务ID", "Predecessors", "Predecessor"));
     const predecessorDatabaseValue = text(excelValue(row, "系统紧前任务键", "System Predecessor Keys"));
 
@@ -362,19 +383,18 @@ export const parseGanttExcel = (buffer: Buffer, fallbackStartDate = ""): Importe
       ownerName: text(excelValue(row, "负责人", "Owner", "Resource Name")),
       taskCategory: text(excelValue(row, "任务类别", "Category")),
       taskName,
+      taskDescription: text(excelValue(row, "任务描述", "Task Description", "Description", "Notes")),
       startDate,
-      finishDate: finishDate || addDaysInclusive(startDate, Number.isInteger(explicitDuration) && explicitDuration > 0 ? explicitDuration : 1),
-      durationDays: Number.isInteger(explicitDuration) && explicitDuration > 0
-        ? explicitDuration
-        : durationBetween(startDate, finishDate),
-      durationMinutes: Math.max(0, Math.round(numberValue(excelValue(row, "工期(分钟)", "Duration Minutes"), 0)))
-        || (Number.isInteger(explicitDuration) && explicitDuration > 0 ? explicitDuration * 450 : durationBetween(startDate, finishDate) * 450),
+      finishDate: finishDate || (durationDays > 0 ? addDaysInclusive(startDate, durationDays) : ""),
+      durationDays,
+      durationMinutes: durationMinutesFromFile || Math.round(durationDays * 450),
       durationFormat: Math.round(numberValue(excelValue(row, "工期格式", "Duration Format"), 7)),
       actualStartDate: dateOnly(excelValue(row, "实际开始", "Actual Start")),
       actualEndDate: dateOnly(excelValue(row, "实际完成", "Actual Finish")),
       estimatedWorkHours: Math.max(0, numberValue(excelValue(row, "预计工时(小时)", "预计工时", "Planned Work Hours", "Work Hours"))),
       actualWorkHours: Math.max(0, numberValue(excelValue(row, "实际工时(小时)", "实际工时", "Actual Work Hours"))),
       progress: normalizeProgress(excelValue(row, "当前进度(%)", "当前进度", "Progress")),
+      remark: text(excelValue(row, "备注", "Remark", "Remarks", "Note")),
       predecessorExternalIds: predecessorValue.split(/[,，;；\s]+/).filter(Boolean),
       predecessorDatabaseIds: predecessorDatabaseValue.split(/[,，;；\s]+/).filter(Boolean),
       predecessorDependencies: predecessorValue.split(/[,，;；\s]+/).filter(Boolean).map((predecessorExternalId) => ({
@@ -440,6 +460,194 @@ const taskDepth = (task: ProjectGanttTask, taskById: Map<string, ProjectGanttTas
   return depth;
 };
 
+const GANTT_VISIBLE_HEADERS = [
+  "任务ID", "父任务ID", "任务类别", "任务名称", "任务描述", "负责人", "计划开始", "计划完成", "工期(天)",
+  "工期(分钟)", "任务模式", "里程碑", "WBS", "实际开始", "实际完成", "预计工时(小时)", "实际工时(小时)",
+  "当前进度(%)", "紧前任务ID", "基线开始", "基线完成", "基线成本", "完工预算(BAC)", "实际成本(AC)", "备注",
+] as const;
+
+const GANTT_SYSTEM_HEADERS = ["系统任务键", "系统父任务键", "系统紧前任务键", "系统负责人键"] as const;
+const GANTT_EXPORT_HEADERS = [...GANTT_VISIBLE_HEADERS, ...GANTT_SYSTEM_HEADERS];
+
+const GANTT_COLUMN_WIDTHS: Record<string, number> = {
+  任务ID: 16,
+  父任务ID: 16,
+  任务类别: 30,
+  任务名称: 32,
+  任务描述: 42,
+  负责人: 16,
+  计划开始: 13,
+  计划完成: 13,
+  "工期(天)": 10,
+  "工期(分钟)": 12,
+  任务模式: 11,
+  里程碑: 9,
+  WBS: 15,
+  实际开始: 13,
+  实际完成: 13,
+  "预计工时(小时)": 16,
+  "实际工时(小时)": 16,
+  "当前进度(%)": 13,
+  紧前任务ID: 24,
+  基线开始: 13,
+  基线完成: 13,
+  基线成本: 14,
+  "完工预算(BAC)": 16,
+  "实际成本(AC)": 16,
+  备注: 32,
+};
+
+const GANTT_DATE_HEADERS = new Set(["计划开始", "计划完成", "实际开始", "实际完成", "基线开始", "基线完成"]);
+const GANTT_INTEGER_HEADERS = new Set(["工期(分钟)", "当前进度(%)"]);
+const GANTT_DECIMAL_HEADERS = new Set(["工期(天)", "预计工时(小时)", "实际工时(小时)"]);
+const GANTT_COST_HEADERS = new Set(["基线成本", "完工预算(BAC)", "实际成本(AC)"]);
+const GANTT_CENTER_HEADERS = new Set([
+  "计划开始", "计划完成", "工期(天)", "工期(分钟)", "任务模式", "里程碑", "WBS", "实际开始", "实际完成",
+  "预计工时(小时)", "实际工时(小时)", "当前进度(%)", "基线开始", "基线完成", "基线成本", "完工预算(BAC)",
+  "实际成本(AC)",
+]);
+
+const GANTT_LEVEL_STYLES = [
+  { fill: "B4C7E7", font: "17365D", bold: true },
+  { fill: "D9EAF7", font: "1F4E78", bold: true },
+  { fill: "EEF4FA", font: "315A7D", bold: true },
+  { fill: "F7F9FC", font: "445B70", bold: false },
+] as const;
+
+const GANTT_STYLE_VARIANTS = ["text", "wrapped", "taskName", "center", "integer", "decimal", "cost", "date"] as const;
+type GanttStyleVariant = typeof GANTT_STYLE_VARIANTS[number];
+
+const xmlColor = (rgb: string) => `<color rgb="FF${rgb}"/>`;
+
+const ganttStyleVariant = (header: string): GanttStyleVariant => {
+  if (header === "任务名称") return "taskName";
+  if (header === "任务类别" || header === "任务描述" || header === "备注") return "wrapped";
+  if (GANTT_DATE_HEADERS.has(header)) return "date";
+  if (GANTT_INTEGER_HEADERS.has(header)) return "integer";
+  if (GANTT_DECIMAL_HEADERS.has(header)) return "decimal";
+  if (GANTT_COST_HEADERS.has(header)) return "cost";
+  if (GANTT_CENTER_HEADERS.has(header)) return "center";
+  return "text";
+};
+
+const ganttStyleId = (depth: number, header: string) => {
+  const levelIndex = Math.min(GANTT_LEVEL_STYLES.length, Math.max(1, depth)) - 1;
+  const variantIndex = GANTT_STYLE_VARIANTS.indexOf(ganttStyleVariant(header));
+  return 2 + levelIndex * GANTT_STYLE_VARIANTS.length + variantIndex;
+};
+
+const buildGanttStylesXml = () => {
+  const fonts = [
+    '<font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>',
+    `<font><b/><sz val="10"/>${xmlColor("FFFFFF")}<name val="Microsoft YaHei"/><family val="2"/></font>`,
+    ...GANTT_LEVEL_STYLES.map((style) => (
+      `<font>${style.bold ? "<b/>" : ""}<sz val="10"/>${xmlColor(style.font)}<name val="Microsoft YaHei"/><family val="2"/></font>`
+    )),
+  ];
+  const fills = [
+    '<fill><patternFill patternType="none"/></fill>',
+    '<fill><patternFill patternType="gray125"/></fill>',
+    '<fill><patternFill patternType="solid"><fgColor rgb="FF1F4E78"/><bgColor indexed="64"/></patternFill></fill>',
+    ...GANTT_LEVEL_STYLES.map((style) => (
+      `<fill><patternFill patternType="solid"><fgColor rgb="FF${style.fill}"/><bgColor indexed="64"/></patternFill></fill>`
+    )),
+  ];
+  const borders = [
+    "<border><left/><right/><top/><bottom/><diagonal/></border>",
+    '<border><left style="thin"><color rgb="FF557A9E"/></left><right style="thin"><color rgb="FF557A9E"/></right><top style="medium"><color rgb="FF163A5C"/></top><bottom style="medium"><color rgb="FF163A5C"/></bottom><diagonal/></border>',
+    '<border><left/><right/><top style="thin"><color rgb="FFD9E2F3"/></top><bottom style="thin"><color rgb="FFD9E2F3"/></bottom><diagonal/></border>',
+  ];
+  const cellXfs = [
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>',
+    '<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>',
+  ];
+
+  GANTT_LEVEL_STYLES.forEach((_style, levelIndex) => {
+    GANTT_STYLE_VARIANTS.forEach((variant) => {
+      const numberFormatId = variant === "integer" ? 1 : variant === "decimal" ? 2 : variant === "cost" ? 4 : variant === "date" ? 164 : 0;
+      const horizontal = variant === "cost" ? "right" : ["center", "integer", "decimal", "date"].includes(variant) ? "center" : "left";
+      const wrapText = variant === "wrapped" || variant === "taskName";
+      const indent = variant === "taskName" && levelIndex > 0 ? ` indent="${levelIndex}"` : "";
+      cellXfs.push([
+        `<xf numFmtId="${numberFormatId}" fontId="${levelIndex + 2}" fillId="${levelIndex + 3}" borderId="2" xfId="0"`,
+        ` applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"${numberFormatId ? ' applyNumberFormat="1"' : ""}>`,
+        `<alignment horizontal="${horizontal}" vertical="center"${wrapText ? ' wrapText="1"' : ""}${indent}/></xf>`,
+      ].join(""));
+    });
+  });
+
+  return [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
+    '<numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts>',
+    `<fonts count="${fonts.length}">${fonts.join("")}</fonts>`,
+    `<fills count="${fills.length}">${fills.join("")}</fills>`,
+    `<borders count="${borders.length}">${borders.join("")}</borders>`,
+    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>',
+    `<cellXfs count="${cellXfs.length}">${cellXfs.join("")}</cellXfs>`,
+    '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>',
+    '<dxfs count="0"/>',
+    '<tableStyles count="0" defaultTableStyle="TableStyleMedium2" defaultPivotStyle="PivotStyleLight16"/>',
+    "</styleSheet>",
+  ].join("");
+};
+
+const styleGanttWorksheetXml = (xml: string, headers: readonly string[], depths: number[]) => {
+  const headerByColumn = new Map(headers.map((header, index) => [XLSX.utils.encode_col(index), header]));
+  let styled = xml.replace(/<c r="([A-Z]+)(\d+)"([^>]*)>/g, (match, column: string, rowText: string, attributes: string) => {
+    const row = Number(rowText);
+    const header = headerByColumn.get(column);
+    if (!header) return match;
+    const styleId = row === 1 ? 1 : ganttStyleId(depths[row - 2] ?? GANTT_LEVEL_STYLES.length, header);
+    const cleanAttributes = attributes.replace(/\s+s="[^"]*"/g, "");
+    return `<c r="${column}${row}"${cleanAttributes} s="${styleId}">`;
+  });
+  styled = styled.replace(
+    /<sheetViews><sheetView workbookViewId="0"\/><\/sheetViews>/,
+    '<sheetViews><sheetView showGridLines="0" workbookViewId="0"><pane xSplit="4" ySplit="1" topLeftCell="E2" activePane="bottomRight" state="frozen"/><selection pane="topRight" activeCell="E1" sqref="E1"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/><selection pane="bottomRight"/></sheetView></sheetViews>',
+  );
+  const validationXml = '<dataValidations count="2"><dataValidation type="list" allowBlank="1" showErrorMessage="1" sqref="K2:K1048576"><formula1>"AUTO,MANUAL"</formula1></dataValidation><dataValidation type="list" allowBlank="1" showErrorMessage="1" sqref="L2:L1048576"><formula1>"是,否"</formula1></dataValidation></dataValidations>';
+  return styled.replace(/(<pageMargins\b)/, `${validationXml}$1`);
+};
+
+const applyGanttWorkbookStyle = (buffer: Buffer, headers: readonly string[], depths: number[]) => {
+  const archive = XLSX.CFB.read(buffer, { type: "buffer" });
+  const stylesFile = XLSX.CFB.find(archive, "Root Entry/xl/styles.xml");
+  const worksheetFile = XLSX.CFB.find(archive, "Root Entry/xl/worksheets/sheet1.xml");
+  if (!stylesFile?.content || !worksheetFile?.content) throw new Error("无法写入甘特 Excel 样式");
+  stylesFile.content = Buffer.from(buildGanttStylesXml(), "utf8");
+  worksheetFile.content = Buffer.from(
+    styleGanttWorksheetXml(Buffer.from(worksheetFile.content).toString("utf8"), headers, depths),
+    "utf8",
+  );
+  return Buffer.from(XLSX.CFB.write(archive, { type: "buffer", fileType: "zip", compression: true }));
+};
+
+const applyGanttWorksheetStyle = (
+  worksheet: XLSX.WorkSheet,
+  headers: readonly string[],
+  depths: number[],
+) => {
+  const lastVisibleColumn = XLSX.utils.encode_col(GANTT_VISIBLE_HEADERS.length - 1);
+  worksheet["!cols"] = headers.map((header) => (
+    header.startsWith("系统")
+      ? { hidden: true, wch: 2 }
+      : { wch: GANTT_COLUMN_WIDTHS[header] ?? Math.max(12, Math.min(24, header.length * 2 + 2)) }
+  ));
+  worksheet["!rows"] = [
+    { hpt: 30 },
+    ...depths.map((depth, index) => {
+      const description = worksheet[`E${index + 2}`]?.v;
+      const remark = worksheet[`Y${index + 2}`]?.v;
+      const longestText = Math.max(String(description ?? "").length, String(remark ?? "").length);
+      return { hpt: longestText > 80 ? 42 : longestText > 40 ? 30 : 22, level: Math.min(7, Math.max(0, depth - 1)) };
+    }),
+  ];
+  worksheet["!autofilter"] = { ref: `A1:${lastVisibleColumn}${Math.max(1, depths.length + 1)}` };
+  worksheet["!freeze"] = { xSplit: 4, ySplit: 1 };
+  worksheet["!margins"] = { left: 0.3, right: 0.3, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 };
+};
+
 export const buildGanttExcel = (tasks: ProjectGanttTask[]) => {
   const taskById = new Map(tasks.map((task) => [task.id, task]));
   const rows = tasks.map((task) => ({
@@ -447,18 +655,19 @@ export const buildGanttExcel = (tasks: ProjectGanttTask[]) => {
     父任务ID: task.parentId ? taskById.get(task.parentId)?.taskCode ?? "" : "",
     任务类别: task.taskCategory,
     任务名称: task.taskName,
+    任务描述: task.taskDescription ?? "",
     负责人: task.ownerMember?.personName ?? "",
     计划开始: task.startDate,
-    计划完成: task.finishDate || addDaysInclusive(task.startDate, task.durationDays),
-    "工期(天)": task.durationDays,
-    "工期(分钟)": task.durationMinutes || task.durationDays * 450,
+    计划完成: task.finishDate || (task.durationDays > 0 ? addDaysInclusive(task.startDate, task.durationDays) : ""),
+    "工期(天)": task.durationDays > 0 ? task.durationDays : "",
+    "工期(分钟)": task.durationMinutes && task.durationMinutes > 0 ? task.durationMinutes : "",
     任务模式: task.taskMode ?? "AUTO",
     里程碑: task.isMilestone ? "是" : "否",
     WBS: task.wbsCode || task.taskCode.replace(/^Task/, ""),
     实际开始: task.actualStartDate,
     实际完成: task.actualEndDate,
-    "预计工时(小时)": estimatedHoursForDuration(task.durationDays),
-    "实际工时(小时)": roundGanttHours(task.actualWorkHours ?? 0),
+    "预计工时(小时)": task.durationDays > 0 ? estimatedHoursForDuration(task.durationDays) : "",
+    "实际工时(小时)": task.actualWorkHours && task.actualWorkHours > 0 ? roundGanttHours(task.actualWorkHours) : "",
     "当前进度(%)": task.progress,
     紧前任务ID: task.predecessorTaskIds?.map((id) => taskById.get(id)?.taskCode).filter(Boolean).join(",") || task.predecessorTask,
     基线开始: task.baselineStartDate ?? "",
@@ -466,36 +675,29 @@ export const buildGanttExcel = (tasks: ProjectGanttTask[]) => {
     基线成本: task.baselineCost ?? 0,
     "完工预算(BAC)": task.budgetAtCompletion ?? 0,
     "实际成本(AC)": task.actualCost ?? 0,
+    备注: task.remark ?? "",
     系统任务键: task.id,
     系统父任务键: task.parentId ?? "",
     系统紧前任务键: task.predecessorTaskIds?.join(",") ?? "",
     系统负责人键: task.ownerMemberId ?? "",
   }));
-  const worksheet = XLSX.utils.json_to_sheet(rows);
-  worksheet["!cols"] = [
-    { wch: 14 }, { wch: 14 }, { wch: 18 }, { wch: 32 }, { wch: 16 }, { wch: 14 }, { wch: 14 },
-    { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 14 },
-    { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 24 },
-    { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 16 },
-    { hidden: true }, { hidden: true }, { hidden: true }, { hidden: true },
-  ];
+  const worksheet = XLSX.utils.json_to_sheet(rows, { header: GANTT_EXPORT_HEADERS });
+  const depths = tasks.map((task) => taskDepth(task, taskById));
+  applyGanttWorksheetStyle(worksheet, GANTT_EXPORT_HEADERS, depths);
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "项目进度");
-  return Buffer.from(XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }));
+  const buffer = Buffer.from(XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }));
+  return applyGanttWorkbookStyle(buffer, GANTT_EXPORT_HEADERS, depths);
 };
 
 export const buildGanttExcelTemplate = () => {
-  const headers = [
-    "任务ID", "父任务ID", "任务类别", "任务名称", "负责人", "计划开始", "计划完成", "工期(天)",
-    "预计工时(小时)", "实际开始", "实际完成", "实际工时(小时)", "当前进度(%)", "紧前任务ID",
-    "任务模式", "里程碑", "WBS", "基线开始", "基线完成", "基线成本", "完工预算(BAC)", "实际成本(AC)",
-  ];
+  const headers = [...GANTT_VISIBLE_HEADERS];
   const worksheet = XLSX.utils.aoa_to_sheet([headers]);
-  worksheet["!cols"] = headers.map((header) => ({ wch: Math.max(12, Math.min(24, header.length * 2 + 2)) }));
-  worksheet["!freeze"] = { xSplit: 0, ySplit: 1 };
+  applyGanttWorksheetStyle(worksheet, headers, []);
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "项目进度导入模板");
-  return Buffer.from(XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }));
+  const buffer = Buffer.from(XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }));
+  return applyGanttWorkbookStyle(buffer, headers, []);
 };
 
 const isoDateTime = (date: string) => `${date}T08:00:00`;
@@ -558,8 +760,8 @@ export const buildProjectXml = (
         .map((name) => uidByTaskName.get(name.trim()))
         .filter((uid): uid is number => Boolean(uid))
         .map((uid) => ({ PredecessorUID: uid, Type: 1, CrossProject: 0, LinkLag: 0, LagFormat: 7 }));
-    const durationMinutes = task.isMilestone ? 0 : (task.durationMinutes || task.durationDays * 450);
-    const finishDate = task.finishDate || addDaysInclusive(task.startDate, task.durationDays);
+    const durationMinutes = task.isMilestone ? 0 : (task.durationMinutes || Math.round(task.durationDays * 450));
+    const finishDate = task.finishDate || addDaysInclusive(task.startDate, task.durationDays) || task.startDate;
     const baselines = Array.isArray(task.baselines) && task.baselines.length > 0
       ? task.baselines
       : (task.baselineStartDate || task.baselineFinishDate || task.baselineCost)
@@ -584,6 +786,8 @@ export const buildProjectXml = (
       Manual: task.taskMode === "MANUAL" ? 1 : 0,
       Text1: task.taskCategory,
       Text2: task.ownerMember?.personName ?? "",
+      Notes: task.taskDescription ?? "",
+      Text3: task.remark ?? "",
       Priority: 500,
       Start: isoDateTime(task.startDate),
       Finish: isoDateTime(finishDate),

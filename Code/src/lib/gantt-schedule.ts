@@ -4,6 +4,7 @@ import {
   calculateTaskStartDate,
   estimatedHoursForDuration,
   nextTaskStartDate,
+  normalizeGanttDurationDays,
   normalizeTaskStartDate,
   shiftTaskDate,
   type GanttCalendarMode,
@@ -92,22 +93,22 @@ export const scheduleGanttTasks = <T extends SchedulableGanttTask>(
   const scheduled = new Map<string, T & ScheduledGanttTask>();
   orderedIds.forEach((taskId) => {
     const task = taskById.get(taskId)!;
-    const durationDays = Math.max(1, Math.trunc(task.durationDays));
+    const durationDays = normalizeGanttDurationDays(task.durationDays);
     const dependencies = (task.predecessorDependencies ?? [])
       .map((dependency) => ({ dependency, predecessor: scheduled.get(dependency.predecessorTaskId) }))
-      .filter((item): item is { dependency: SchedulableGanttDependency; predecessor: T & ScheduledGanttTask } => Boolean(item.predecessor));
+      .filter((item): item is { dependency: SchedulableGanttDependency; predecessor: T & ScheduledGanttTask } => Boolean(item.predecessor?.finishDate));
     const dependencyStarts = dependencies.map(({ dependency, predecessor }) => (
       dependencyDate(predecessor, durationDays, dependency, mode)
     ));
-    const startDate = task.taskMode !== "MANUAL" && dependencyStarts.length > 0
+    const startDate = durationDays > 0 && task.taskMode !== "MANUAL" && dependencyStarts.length > 0
       ? dependencyStarts.sort().at(-1)!
       : normalizeTaskStartDate(task.startDate, mode);
     scheduled.set(taskId, {
       ...task,
       startDate,
-      finishDate: calculateTaskFinishDate(startDate, durationDays, mode),
+      finishDate: durationDays > 0 ? calculateTaskFinishDate(startDate, durationDays, mode) : "",
       durationDays,
-      durationMinutes: durationDays * 450,
+      durationMinutes: Math.round(durationDays * 450),
       estimatedWorkHours: estimatedHoursForDuration(durationDays),
     });
   });

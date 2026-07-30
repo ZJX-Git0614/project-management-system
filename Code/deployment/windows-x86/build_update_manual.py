@@ -301,7 +301,7 @@ set_run_font(subtitle.add_run("Windows x86 离线更新手册"), size=18, bold=T
 meta = doc.add_table(rows=3, cols=2)
 set_table_geometry(meta, [2200, 7160])
 meta_data = [
-    ("更新版本", "2026.07.27.1"),
+    ("更新版本", "2026.07.30.1"),
     ("适用环境", "Windows 10/11 x86-64，已完成 Ceastar PMS 首次安装"),
     ("更新方式", "离线 Docker 镜像增量更新，保留数据库与上传文档"),
 ]
@@ -347,7 +347,7 @@ add_numbered(doc, "启动 Docker Desktop，并等待其显示运行正常。", p
 add_numbered(doc, "确认系统盘或 Docker 数据盘至少有 4 GB 可用空间。", prepare_numbering)
 add_numbered(doc, "等待当前用户操作保存完成，暂时关闭正在使用系统的浏览器页面。", prepare_numbering)
 add_numbered(doc, "把整个更新包文件夹复制到原部署目录中，更新包文件夹与 docker-compose.yml 直接相邻。", prepare_numbering)
-add_code(doc, "D:\\PMS\\Ceastar-PMS-内网完整部署-20260723\\docker-compose.yml\nD:\\PMS\\Ceastar-PMS-内网完整部署-20260723\\Ceastar-PMS-更新包-20260727-1\\update.bat")
+add_code(doc, "D:\\PMS\\Ceastar-PMS-内网完整部署-20260723\\docker-compose.yml\nD:\\PMS\\Ceastar-PMS-内网完整部署-20260723\\Ceastar-PMS-Update-20260730-1\\update.bat")
 
 doc.add_heading("3. 执行更新", level=1)
 update_numbering = create_decimal_numbering(doc)
@@ -359,6 +359,11 @@ add_callout(
     doc,
     "更新脚本不会修改",
     "PostgreSQL 数据卷、上传文档卷、Windows 上的 Ollama 安装与模型目录，以及已存在的备份文件。",
+)
+add_callout(
+    doc,
+    "MPP 导出服务说明",
+    "更新脚本不会自动启动 Microsoft Project 或注册 MPP 导出服务，避免 Project 自动化或权限窗口阻塞更新。系统更新完成后，如确实需要导出二进制 MPP 文件，再右键以管理员身份运行 repair-mpp-export-service.bat。Excel 和 Project XML 导出不受影响。",
 )
 
 doc.add_heading("4. 更新后检查", level=1)
@@ -407,7 +412,7 @@ for issue, solution in (
 set_table_geometry(faq, [3200, 6160])
 
 doc.core_properties.title = "Ceastar项目管理系统 Windows x86 离线更新手册"
-doc.core_properties.subject = "Ceastar PMS 2026.07.27.1 离线更新操作说明"
+doc.core_properties.subject = "Ceastar PMS 2026.07.30.1 离线更新操作说明"
 doc.core_properties.author = "Ceastar项目管理系统"
 doc.save(OUTPUT)
 print(OUTPUT)

@@ -35,6 +35,7 @@ model Project {
   expectedEndDate   String   @default("")
   status            String   @default("DRAFT") // ProjectStatus
   ganttCalendarMode String   @default("CALENDAR_DAYS")
+  ganttRevision     Int      @default(0)
 
   projectMembers       ProjectMember[]
   ganttTasks           ProjectGanttTask[]
@@ -42,6 +43,7 @@ model Project {
   scheduleMetadata     ProjectScheduleImportMetadata?
   scheduleSnapshots    ProjectScheduleSnapshot[]
   scheduleAnalyses     ScheduleAnalysisRun[]
+  ganttDeletionBatches ProjectGanttDeletionBatch[]
   budgetCategories     ProjectBudgetCategory[]
   budgetItems          ProjectBudgetItem[]
   budgetSetting        ProjectBudgetSetting?
@@ -66,9 +68,10 @@ model ProjectGanttTask {
   taskCode           String   @default("")
   taskCategory       String
   taskName           String
+  taskDescription    String   @default("")
   startDate          String
   finishDate         String   @default("")
-  durationDays       Int
+  durationDays       Float
   durationMinutes    Int      @default(0)
   durationFormat     Int      @default(7)
   actualStartDate    String   @default("")
@@ -92,6 +95,7 @@ model ProjectGanttTask {
   actualCost         Float    @default(0)
   budgetItemId       String?
   baselines          Json     @default("[]")
+  remark             String   @default("")
   sortOrder          Int      @default(0)
 
   project                 Project                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -126,6 +130,28 @@ model ProjectGanttDependency {
 
   @@unique([predecessorTaskId, successorTaskId])
   @@index([projectId, successorTaskId])
+}
+
+model ProjectGanttDeletionBatch {
+  id                   String    @id @default(cuid())
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  projectId            String
+  operatorUserId       String    @default("")
+  operatorName         String    @default("")
+  status               String    @default("AVAILABLE")
+  rootTaskIds          String    @default("[]") @db.Text
+  summary              String    @default("{}") @db.Text
+  snapshotJson         String    @default("{}") @db.Text
+  revisionBeforeDelete Int       @default(0)
+  revisionAfterDelete  Int       @default(0)
+  expiresAt            DateTime
+  restoredAt           DateTime?
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, status, createdAt])
+  @@index([expiresAt])
 }
 
 model ProjectScheduleImportMetadata {

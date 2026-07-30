@@ -13,7 +13,8 @@ import {
 } from "@/lib/assistant-settings";
 import { prisma } from "@/lib/prisma";
 import { buildAssistantStoredName, getAssistantArtifactPath, getAssistantAttachmentPath } from "@/lib/assistant-artifact-storage";
-import { nextRiskCode } from "@/lib/risk-register-codes";
+import { nextRiskCode, renumberRiskCodes } from "@/lib/risk-register-codes";
+import { nextWeeklyMatterCode, renumberWeeklyMatterCodes } from "@/lib/weekly-matter-codes";
 import {
   convertScheduleFile,
   mergeScheduleFiles,
@@ -22,13 +23,27 @@ import {
 } from "@/lib/schedule-file-merge";
 import {
   changeProjectGanttTaskHierarchy,
+  deleteGanttTaskSubtrees,
+  deleteGanttTasksAtOrBeyondDepth,
   getOrderedGanttTasks,
+  getProjectGanttCalendarMode,
+  recalculateProjectGanttSchedule,
   renumberProjectGanttTaskCodes,
 } from "@/lib/gantt-task-service";
+import {
+  calculateTaskFinishDate,
+  estimatedHoursForDuration,
+  isValidGanttDurationDays,
+  normalizeTaskStartDate,
+} from "@/lib/gantt-calendar";
 import { parseGanttImportFile } from "@/lib/gantt-file-transfer";
 import { analyzeSchedule } from "@/lib/schedule-analysis";
 import { buildImportedScheduleSnapshot, getCurrentScheduleSnapshot } from "@/lib/schedule-snapshot";
 import { isDocumentRevisionRequest, reviseDocumentsWithSmallModel } from "@/lib/assistant-document-revision";
+import {
+  describeAssistantExportFilters,
+  parseAssistantProjectExportIntent,
+} from "@/lib/assistant-export";
 
 export type AssistantActionView = {
   id: string;
@@ -79,6 +94,51 @@ const parseProgressIntent = (message: string) => {
   if (!code || progress === undefined) return null;
   const value = Number(progress);
   return Number.isFinite(value) && value >= 0 && value <= 100 ? { taskCode: code, progress: value } : null;
+};
+
+const parseCommandField = (message: string, labels: readonly string[]) => {
+  const label = labels.map((item) => item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const match = message.match(new RegExp(`(?:${label})\\s*(?:改为|更新为|设置为|设为|为|[:：])\\s*[“\"']?([^；;，,。\n”\"']+)`, "u"));
+  return match?.[1]?.trim() || "";
+};
+
+export const parseGanttTaskCreateIntent = (message: string) => {
+  if (!/(创建|新增|新建).{0,12}(甘特)?任务|(甘特)?任务.{0,12}(创建|新增|新建)/u.test(message)) return null;
+  const taskName = parseCommandField(message, ["任务名称", "任务"])
+    || message.match(/[“"']([^”"']{1,100})[”"']/u)?.[1]?.trim()
+    || "";
+  const taskCategory = parseCommandField(message, ["任务类别", "类别"]);
+  const startDate = message.match(/(?:计划开始|开始日期|开始时间)\s*(?:为|[:：])?\s*(\d{4}-\d{2}-\d{2})/u)?.[1] || "";
+  const durationText = message.match(/(?:工期|持续时间)\s*(?:为|[:：])?\s*(\d+(?:\.5)?)/u)?.[1];
+  const durationDays = durationText === undefined ? Number.NaN : Number(durationText);
+  const parentTaskCode = message.match(/(?:父任务|上级任务|父级)\s*(?:为|[:：])?\s*(Task\d+(?:\.\d+)*)/iu)?.[1] || undefined;
+  if (!taskName || !taskCategory || !/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !isValidGanttDurationDays(durationDays)) return null;
+  return { taskName, taskCategory, startDate, durationDays, parentTaskCode };
+};
+
+export const parseGanttTaskTextUpdateIntent = (message: string) => {
+  const taskCode = message.match(/Task\d+(?:\.\d+)*/i)?.[0];
+  if (!taskCode || !/(修改|更新|改为|设置为|设为)/u.test(message)) return null;
+  const taskName = parseCommandField(message, ["任务名称"]);
+  const taskDescription = parseCommandField(message, ["任务描述", "描述"]);
+  const remark = parseCommandField(message, ["备注"]);
+  if (!taskName && !taskDescription && !remark) return null;
+  return { taskCode, taskName: taskName || undefined, taskDescription: taskDescription || undefined, remark: remark || undefined };
+};
+
+export const parseGanttTaskDeleteIntent = (message: string) => {
+  if (!/(删除|移除).*(任务|Task)|(任务|Task).*(删除|移除)/u.test(message)) return null;
+  const taskCodes = Array.from(new Set([...message.matchAll(/Task\d+(?:\.\d+)*/gi)].map((match) => match[0])));
+  return taskCodes.length > 0 ? { taskCodes } : null;
+};
+
+export const parseGanttDepthPruneIntent = (message: string) => {
+  if (!/(删除|清理|移除).*(任务|甘特)|(任务|甘特).*(删除|清理|移除)/u.test(message)) return null;
+  const depthMatch = message.match(/第?\s*(\d+|一|二|三|四|五|六|七|八|九|十)\s*层(?:级)?(?:及|和|以及)?(?:以)?(?:下|后|更深)?/u);
+  if (!depthMatch || !/(全部|所有|及|更深|以下|后)/u.test(message)) return null;
+  const numberMap: Record<string, number> = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+  const minimumDepth = numberMap[depthMatch[1]] ?? Number(depthMatch[1]);
+  return Number.isInteger(minimumDepth) && minimumDepth > 0 ? { minimumDepth } : null;
 };
 
 export const parseHierarchyIntent = (message: string) => {
@@ -151,12 +211,45 @@ export const parseTodoCompletionTarget = (message: string) => {
   return target || null;
 };
 
+export const parseTodoDeleteTarget = (message: string) => {
+  if (!/(删除|移除).*(待办)|待办.*(删除|移除)/u.test(message)) return null;
+  const target = message
+    .replace(/^(请|帮我|麻烦)?\s*(?:把|将)?\s*(?:删除|移除)\s*(?:项目)?待办\s*[:：]?/u, "")
+    .replace(/^(请|帮我|麻烦)?\s*(?:把|将)?\s*(?:项目)?待办\s*/u, "")
+    .replace(/\s*(?:删除|移除)\s*$/u, "")
+    .replace(/[“”"'：:]/g, "")
+    .trim();
+  return target || null;
+};
+
+export const parseWeeklyItemCreateIntent = (message: string) => {
+  if (!/(创建|新增|新建).{0,12}(事项|项目事项)|(事项|项目事项).{0,12}(创建|新增|新建)/u.test(message)) return null;
+  const title = parseCommandField(message, ["事项名称", "事项"])
+    || message.match(/[“"']([^”"']{1,200})[”"']/u)?.[1]?.trim()
+    || "";
+  const owner = parseCommandField(message, ["负责人"]);
+  const description = parseCommandField(message, ["详细内容", "事项描述", "描述"]);
+  return title && owner ? { title, owner, description: description || undefined } : null;
+};
+
+export const parseWeeklyItemDeleteIntent = (message: string) => {
+  if (!/(删除|移除).*(事项|Matter)|(事项|Matter).*(删除|移除)/u.test(message)) return null;
+  const matterCode = message.match(/Matter\d+/i)?.[0];
+  return matterCode ? { matterCode } : null;
+};
+
 const riskStatuses = ["识别中", "跟踪中", "处理中", "已关闭"] as const;
 
 export const parseRiskStatusUpdateIntent = (message: string) => {
   const riskCode = message.match(/Risk\d+/i)?.[0];
   const status = riskStatuses.find((candidate) => message.includes(candidate));
   return riskCode && status ? { riskCode, status } : null;
+};
+
+export const parseRiskDeleteIntent = (message: string) => {
+  if (!/(删除|移除).*(风险|Risk)|(风险|Risk).*(删除|移除)/u.test(message)) return null;
+  const riskCode = message.match(/Risk\d+/i)?.[0];
+  return riskCode ? { riskCode } : null;
 };
 
 export const parseRiskCreationName = (message: string) => {
@@ -169,18 +262,6 @@ export const parseRiskCreationName = (message: string) => {
     .replace(/[“”"']/g, "")
     .trim();
   return name && name.length <= 200 ? name : null;
-};
-
-type AssistantExportType = "scheduleAnalysis" | "gantt" | "weekly" | "risk" | "budget";
-
-const parseExportType = (message: string): AssistantExportType | null => {
-  if (!/(导出|下载)/u.test(message)) return null;
-  if (/(差异|冲突|计划分析|影响链)/u.test(message)) return "scheduleAnalysis";
-  if (/(任务|甘特|进度)/u.test(message)) return "gantt";
-  if (/(事项|本周)/u.test(message)) return "weekly";
-  if (/风险/u.test(message)) return "risk";
-  if (/(预算|成本)/u.test(message)) return "budget";
-  return null;
 };
 
 export const isScheduleMergeRequest = (message: string) => (
@@ -468,6 +549,109 @@ export const proposeAssistantAction = async (params: {
     });
   }
 
+  const todoDeleteTarget = parseTodoDeleteTarget(params.message);
+  if (canUse("todo.delete") && todoDeleteTarget) {
+    const matches = await prisma.todoItem.findMany({
+      where: { projectId: params.projectId, title: { contains: todoDeleteTarget, mode: "insensitive" } },
+      orderBy: { createdAt: "desc" },
+      take: 2,
+      select: { id: true, title: true },
+    });
+    if (matches.length === 1) {
+      return createProposal({
+        ...params,
+        toolId: "todo.delete",
+        riskLevel: "HIGH",
+        args: { todoId: matches[0].id },
+        title: "删除项目待办",
+        description: `删除待办「${matches[0].title}」`,
+      });
+    }
+  }
+
+  const depthPruneIntent = parseGanttDepthPruneIntent(params.message);
+  if (canUse("gantt.depth.prune") && depthPruneIntent) {
+    const count = await prisma.projectGanttTask.count({ where: { projectId: params.projectId } });
+    if (count > 0) {
+      return createProposal({
+        ...params,
+        toolId: "gantt.depth.prune",
+        riskLevel: "HIGH",
+        args: { minimumDepth: depthPruneIntent.minimumDepth },
+        title: "按层级清理甘特任务",
+        description: `删除当前项目第 ${depthPruneIntent.minimumDepth} 层及更深的全部甘特任务；第 ${Math.max(0, depthPruneIntent.minimumDepth - 1)} 层及更高层级会保留，并重新编号`,
+      });
+    }
+  }
+
+  const ganttTaskDeleteIntent = parseGanttTaskDeleteIntent(params.message);
+  if (canUse("gantt.task.delete") && ganttTaskDeleteIntent) {
+    const tasks = await prisma.projectGanttTask.findMany({
+      where: { projectId: params.projectId, taskCode: { in: ganttTaskDeleteIntent.taskCodes, mode: "insensitive" } },
+      select: { id: true, taskCode: true, taskName: true },
+    });
+    if (tasks.length === ganttTaskDeleteIntent.taskCodes.length) {
+      return createProposal({
+        ...params,
+        toolId: "gantt.task.delete",
+        riskLevel: "HIGH",
+        args: { taskIds: tasks.map((task) => task.id) },
+        title: "删除甘特任务",
+        description: `删除 ${tasks.map((task) => `${task.taskCode} ${task.taskName}`).join("、")} 及其全部子任务，并重新编号`,
+      });
+    }
+  }
+
+  const ganttTaskCreateIntent = parseGanttTaskCreateIntent(params.message);
+  if (canUse("gantt.task.create") && ganttTaskCreateIntent) {
+    const parent = ganttTaskCreateIntent.parentTaskCode
+      ? await prisma.projectGanttTask.findFirst({
+          where: { projectId: params.projectId, taskCode: { equals: ganttTaskCreateIntent.parentTaskCode, mode: "insensitive" } },
+          select: { id: true, taskCode: true, taskName: true },
+        })
+      : null;
+    if (!ganttTaskCreateIntent.parentTaskCode || parent) {
+      return createProposal({
+        ...params,
+        toolId: "gantt.task.create",
+        riskLevel: "MEDIUM",
+        args: {
+          taskName: ganttTaskCreateIntent.taskName,
+          taskCategory: ganttTaskCreateIntent.taskCategory,
+          startDate: ganttTaskCreateIntent.startDate,
+          durationDays: ganttTaskCreateIntent.durationDays,
+          ...(parent ? { parentTaskId: parent.id } : {}),
+        },
+        title: "新增甘特任务",
+        description: `新增任务「${ganttTaskCreateIntent.taskName}」：类别 ${ganttTaskCreateIntent.taskCategory}，计划开始 ${ganttTaskCreateIntent.startDate}，工期 ${ganttTaskCreateIntent.durationDays} 天${parent ? `，父任务为 ${parent.taskCode} ${parent.taskName}` : ""}`,
+      });
+    }
+  }
+
+  const ganttTaskTextUpdateIntent = parseGanttTaskTextUpdateIntent(params.message);
+  if (canUse("gantt.task.update") && ganttTaskTextUpdateIntent) {
+    const task = await prisma.projectGanttTask.findFirst({
+      where: { projectId: params.projectId, taskCode: { equals: ganttTaskTextUpdateIntent.taskCode, mode: "insensitive" } },
+      select: { id: true, taskCode: true, taskName: true },
+    });
+    if (task) {
+      const args = {
+        taskId: task.id,
+        ...(ganttTaskTextUpdateIntent.taskName ? { taskName: ganttTaskTextUpdateIntent.taskName } : {}),
+        ...(ganttTaskTextUpdateIntent.taskDescription ? { taskDescription: ganttTaskTextUpdateIntent.taskDescription } : {}),
+        ...(ganttTaskTextUpdateIntent.remark ? { remark: ganttTaskTextUpdateIntent.remark } : {}),
+      };
+      return createProposal({
+        ...params,
+        toolId: "gantt.task.update",
+        riskLevel: "MEDIUM",
+        args,
+        title: "修改甘特任务",
+        description: `更新 ${task.taskCode} ${task.taskName} 的${ganttTaskTextUpdateIntent.taskName ? "名称" : ganttTaskTextUpdateIntent.taskDescription ? "任务描述" : "备注"}`,
+      });
+    }
+  }
+
   const progressIntent = parseProgressIntent(params.message);
   if (canUse("gantt.progress.update") && progressIntent) {
     const task = await prisma.projectGanttTask.findFirst({
@@ -549,6 +733,36 @@ export const proposeAssistantAction = async (params: {
     }
   }
 
+  const weeklyCreateIntent = parseWeeklyItemCreateIntent(params.message);
+  if (canUse("weekly.item.create") && weeklyCreateIntent) {
+    return createProposal({
+      ...params,
+      toolId: "weekly.item.create",
+      riskLevel: "MEDIUM",
+      args: weeklyCreateIntent,
+      title: "新增项目事项",
+      description: `创建事项「${weeklyCreateIntent.title}」，负责人 ${weeklyCreateIntent.owner}`,
+    });
+  }
+
+  const weeklyDeleteIntent = parseWeeklyItemDeleteIntent(params.message);
+  if (canUse("weekly.item.delete") && weeklyDeleteIntent) {
+    const item = await prisma.weeklyItem.findFirst({
+      where: { projectId: params.projectId, matterCode: { equals: weeklyDeleteIntent.matterCode, mode: "insensitive" } },
+      select: { id: true, matterCode: true, title: true },
+    });
+    if (item) {
+      return createProposal({
+        ...params,
+        toolId: "weekly.item.delete",
+        riskLevel: "HIGH",
+        args: { weeklyItemId: item.id },
+        title: "删除项目事项",
+        description: `删除 ${item.matterCode} ${item.title}，其余事项将按当前排序重新编号`,
+      });
+    }
+  }
+
   const riskStatusIntent = parseRiskStatusUpdateIntent(params.message);
   if (canUse("risk.status.update") && riskStatusIntent) {
     const risk = await prisma.riskRegisterItem.findFirst({
@@ -567,6 +781,24 @@ export const proposeAssistantAction = async (params: {
     }
   }
 
+  const riskDeleteIntent = parseRiskDeleteIntent(params.message);
+  if (canUse("risk.delete") && riskDeleteIntent) {
+    const risk = await prisma.riskRegisterItem.findFirst({
+      where: { projectId: params.projectId, riskCode: { equals: riskDeleteIntent.riskCode, mode: "insensitive" } },
+      select: { id: true, riskCode: true, riskName: true },
+    });
+    if (risk) {
+      return createProposal({
+        ...params,
+        toolId: "risk.delete",
+        riskLevel: "HIGH",
+        args: { riskId: risk.id },
+        title: "删除项目风险",
+        description: `删除 ${risk.riskCode} ${risk.riskName}，其余风险将按当前排序重新编号`,
+      });
+    }
+  }
+
   const riskName = parseRiskCreationName(params.message);
   if (canUse("risk.create") && riskName) {
     return createProposal({
@@ -579,17 +811,18 @@ export const proposeAssistantAction = async (params: {
     });
   }
 
-  const exportType = parseExportType(params.message);
-  const projectExportType = exportType && exportType !== "scheduleAnalysis" ? exportType : null;
-  if (canUse("project.export") && projectExportType) {
+  const exportIntent = parseAssistantProjectExportIntent(params.message);
+  const projectExportType = exportIntent && exportIntent.exportType !== "scheduleAnalysis" ? exportIntent.exportType : null;
+  if (canUse("project.export") && exportIntent && projectExportType) {
     const label = { gantt: "任务进度", weekly: "项目事项", risk: "风险登记册", budget: "项目预算" }[projectExportType];
+    const filters = describeAssistantExportFilters(exportIntent);
     return createProposal({
       ...params,
       toolId: "project.export",
       riskLevel: "LOW",
-      args: { exportType: projectExportType },
+      args: exportIntent,
       title: `导出${label}`,
-      description: `生成当前项目的${label} CSV 文件`,
+      description: `生成当前项目的${label} CSV 文件${filters.length > 0 ? `，仅包含${filters.join("、")}` : ""}`,
     });
   }
   return null;
@@ -736,6 +969,145 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     });
   }
 
+  if (action.toolId === "todo.delete") {
+    const todoId = String(args.todoId || "");
+    const current = await prisma.todoItem.findFirst({ where: { id: todoId, projectId: action.projectId } });
+    if (!current) throw new Error("待办不存在或已删除");
+    await prisma.$transaction(async (tx) => {
+      await tx.todoItem.delete({ where: { id: todoId } });
+      await tx.operationHistory.create({
+        data: {
+          projectId: action.projectId,
+          entityType: "TODO_ITEM",
+          entityId: todoId,
+          actionType: "DELETE",
+          operator: user.displayName,
+          detail: `通过智能助手删除待办「${current.title}」`,
+        },
+      });
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "待办已删除", todoId, navigateUrl: "/todos", navigateLabel: "查看待办中心" }) },
+    });
+  }
+
+  if (action.toolId === "gantt.task.create") {
+    const taskName = String(args.taskName || "").trim();
+    const taskCategory = String(args.taskCategory || "").trim();
+    const requestedStartDate = String(args.startDate || "").trim();
+    const durationDays = Number(args.durationDays);
+    const parentTaskId = args.parentTaskId ? String(args.parentTaskId) : null;
+    if (!taskName || !taskCategory || !/^\d{4}-\d{2}-\d{2}$/.test(requestedStartDate) || !isValidGanttDurationDays(durationDays)) {
+      throw new Error("新增任务需要有效的任务名称、任务类别、计划开始日期和以 0.5 天为单位的工期");
+    }
+    const calendarMode = await getProjectGanttCalendarMode(action.projectId);
+    const startDate = normalizeTaskStartDate(requestedStartDate, calendarMode);
+    const finishDate = calculateTaskFinishDate(startDate, durationDays, calendarMode);
+    const parent = parentTaskId
+      ? await prisma.projectGanttTask.findFirst({ where: { id: parentTaskId, projectId: action.projectId }, select: { id: true } })
+      : null;
+    if (parentTaskId && !parent) throw new Error("父任务不存在或不属于当前项目");
+    const siblings = await prisma.projectGanttTask.findMany({
+      where: { projectId: action.projectId, parentId: parentTaskId },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+      select: { sortOrder: true, taskCategory: true },
+    });
+    const categorySiblings = siblings.filter((task) => task.taskCategory === taskCategory);
+    const sortOrder = (categorySiblings.at(-1)?.sortOrder ?? siblings.at(-1)?.sortOrder ?? 0) + 1;
+    const created = await prisma.$transaction(async (tx) => {
+      await tx.projectGanttTask.updateMany({
+        where: { projectId: action.projectId, parentId: parentTaskId, sortOrder: { gte: sortOrder } },
+        data: { sortOrder: { increment: 1 } },
+      });
+      const task = await tx.projectGanttTask.create({
+        data: {
+          projectId: action.projectId,
+          parentId: parentTaskId,
+          taskCode: "",
+          taskCategory,
+          taskName,
+          startDate,
+          finishDate,
+          durationDays,
+          durationMinutes: Math.round(durationDays * 450),
+          estimatedWorkHours: estimatedHoursForDuration(durationDays),
+          sortOrder,
+        },
+      });
+      await tx.operationHistory.create({
+        data: {
+          projectId: action.projectId,
+          entityType: "PROJECT_GANTT_TASK",
+          entityId: task.id,
+          actionType: "CREATE",
+          operator: user.displayName,
+          detail: `通过智能助手新增甘特任务「${taskName}」`,
+        },
+      });
+      return task;
+    });
+    await renumberProjectGanttTaskCodes(action.projectId);
+    await recalculateProjectGanttSchedule(action.projectId, calendarMode);
+    const normalizedTask = (await getOrderedGanttTasks(action.projectId)).find((task) => task.id === created.id);
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: `已新增 ${normalizedTask?.taskCode || "任务"} ${taskName}`, taskId: created.id, navigateUrl: `/projects/${action.projectId}?nav=gantt`, navigateLabel: "查看项目进度" }) },
+    });
+  }
+
+  if (action.toolId === "gantt.task.update") {
+    const taskId = String(args.taskId || "");
+    const data = {
+      ...(typeof args.taskName === "string" ? { taskName: args.taskName.trim() } : {}),
+      ...(typeof args.taskDescription === "string" ? { taskDescription: args.taskDescription.trim() } : {}),
+      ...(typeof args.remark === "string" ? { remark: args.remark.trim() } : {}),
+    };
+    if (Object.keys(data).length === 0 || ("taskName" in data && !data.taskName)) {
+      throw new Error("请提供需要更新的任务名称、任务描述或备注");
+    }
+    const current = await prisma.projectGanttTask.findFirst({ where: { id: taskId, projectId: action.projectId } });
+    if (!current) throw new Error("任务不存在");
+    const updated = await prisma.$transaction(async (tx) => {
+      const task = await tx.projectGanttTask.update({ where: { id: taskId }, data });
+      await tx.operationHistory.create({
+        data: {
+          projectId: action.projectId,
+          entityType: "PROJECT_GANTT_TASK",
+          entityId: task.id,
+          actionType: "UPDATE",
+          operator: user.displayName,
+          detail: `通过智能助手更新 ${current.taskCode} ${current.taskName} 的${Object.keys(data).join("、")}`,
+        },
+      });
+      return task;
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "甘特任务已更新", taskId: updated.id, navigateUrl: `/projects/${action.projectId}?nav=gantt`, navigateLabel: "查看项目进度" }) },
+    });
+  }
+
+  if (action.toolId === "gantt.task.delete") {
+    const taskIds = Array.isArray(args.taskIds) ? args.taskIds.map(String).filter(Boolean) : [];
+    if (taskIds.length === 0) throw new Error("没有可删除的甘特任务");
+    const result = await deleteGanttTaskSubtrees({ projectId: action.projectId, rootTaskIds: taskIds, operator: user.displayName });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: `已删除 ${result.deletedTaskCount} 条甘特任务并重新编号`, taskIds, navigateUrl: `/projects/${action.projectId}?nav=gantt`, navigateLabel: "查看项目进度" }) },
+    });
+  }
+
+  if (action.toolId === "gantt.depth.prune") {
+    const minimumDepth = Number(args.minimumDepth);
+    if (!Number.isInteger(minimumDepth) || minimumDepth < 1) throw new Error("清理层级无效");
+    const result = await deleteGanttTasksAtOrBeyondDepth({ projectId: action.projectId, minimumDepth, operator: user.displayName });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: result.deletedTaskCount > 0 ? `已删除第 ${minimumDepth} 层及更深的 ${result.deletedTaskCount} 条任务并重新编号` : `当前项目没有第 ${minimumDepth} 层及更深的任务`, deletedTaskCount: result.deletedTaskCount, navigateUrl: `/projects/${action.projectId}?nav=gantt`, navigateLabel: "查看项目进度" }) },
+    });
+  }
+
   if (action.toolId === "gantt.progress.update") {
     const taskId = String(args.taskId || "");
     const progress = Number(args.progress);
@@ -782,14 +1154,18 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     }
 
     const startDate = childTasks.map((task) => task.startDate).sort()[0];
-    const finishDate = childTasks.map((task) => task.finishDate).sort().at(-1) || startDate;
-    const durationDays = Math.max(1, Math.round((new Date(`${finishDate}T00:00:00Z`).getTime() - new Date(`${startDate}T00:00:00Z`).getTime()) / 86_400_000) + 1);
+    const finishDate = childTasks.map((task) => task.finishDate).filter(Boolean).sort().at(-1) || "";
+    const durationDays = finishDate
+      ? Math.max(0.5, Math.round((new Date(`${finishDate}T00:00:00Z`).getTime() - new Date(`${startDate}T00:00:00Z`).getTime()) / 86_400_000) + 1)
+      : 0;
     const actualStartDate = childTasks.map((task) => task.actualStartDate).filter(Boolean).sort()[0] || "";
     const actualEndDate = childTasks.map((task) => task.actualEndDate).filter(Boolean).sort().at(-1) || "";
     const estimatedWorkHours = childTasks.reduce((sum, task) => sum + Math.max(0, task.estimatedWorkHours), 0);
     const actualWorkHours = childTasks.reduce((sum, task) => sum + Math.max(0, task.actualWorkHours), 0);
-    const weightedDuration = childTasks.reduce((sum, task) => sum + Math.max(1, task.durationDays), 0);
-    const progress = Math.round(childTasks.reduce((sum, task) => sum + Math.max(1, task.durationDays) * task.progress, 0) / weightedDuration);
+    const weightedDuration = childTasks.reduce((sum, task) => sum + Math.max(0, task.durationDays), 0);
+    const progress = weightedDuration > 0
+      ? Math.round(childTasks.reduce((sum, task) => sum + Math.max(0, task.durationDays) * task.progress, 0) / weightedDuration)
+      : Math.round(childTasks.reduce((sum, task) => sum + task.progress, 0) / childTasks.length);
     const parent = await prisma.$transaction(async (tx) => {
       await tx.projectGanttTask.updateMany({
         where: { projectId: action.projectId, parentId: null },
@@ -805,7 +1181,7 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
           startDate,
           finishDate,
           durationDays,
-          durationMinutes: durationDays * 480,
+          durationMinutes: Math.round(durationDays * 450),
           actualStartDate,
           actualEndDate,
           estimatedWorkHours,
@@ -874,6 +1250,87 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
           navigateLabel: "查看项目进度",
         }),
       },
+    });
+  }
+
+  if (action.toolId === "weekly.item.create") {
+    const title = String(args.title || "").trim();
+    const owner = String(args.owner || "").trim();
+    const description = typeof args.description === "string" ? args.description.trim() : "";
+    if (!title || !owner) throw new Error("新增事项需要事项名称和负责人");
+    const ownerMember = await prisma.projectMember.findFirst({
+      where: { projectId: action.projectId, personName: owner },
+      select: { id: true },
+    });
+    if (!ownerMember) throw new Error("负责人必须是当前项目组成员");
+    const existing = await prisma.weeklyItem.findMany({
+      where: { projectId: action.projectId },
+      select: { id: true, matterCode: true, sortOrder: true, createdAt: true },
+    });
+    const lastSortOrder = existing.reduce((maximum, item) => Math.max(maximum, item.sortOrder), 0);
+    const created = await prisma.$transaction(async (tx) => {
+      const item = await tx.weeklyItem.create({
+        data: {
+          projectId: action.projectId,
+          matterCode: nextWeeklyMatterCode(existing),
+          sortOrder: lastSortOrder + 1,
+          title,
+          owner,
+          description,
+        },
+      });
+      await tx.operationHistory.create({
+        data: {
+          projectId: action.projectId,
+          entityType: "WEEKLY_ITEM",
+          entityId: item.id,
+          actionType: "CREATE",
+          operator: user.displayName,
+          detail: `通过智能助手创建项目事项「${item.title}」`,
+        },
+      });
+      return item;
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: `已创建 ${created.matterCode} ${created.title}`, weeklyItemId: created.id, navigateUrl: "/weekly-items", navigateLabel: "查看项目事项" }) },
+    });
+  }
+
+  if (action.toolId === "weekly.item.delete") {
+    const weeklyItemId = String(args.weeklyItemId || "");
+    const current = await prisma.weeklyItem.findFirst({ where: { id: weeklyItemId, projectId: action.projectId } });
+    if (!current) throw new Error("事项不存在或已删除");
+    await prisma.$transaction(async (tx) => {
+      await tx.riskRegisterItem.updateMany({
+        where: { projectId: action.projectId, weeklyItemId },
+        data: { weeklyItemId: null, linkedItemName: "" },
+      });
+      await tx.weeklyItem.delete({ where: { id: weeklyItemId } });
+      const remaining = await tx.weeklyItem.findMany({
+        where: { projectId: action.projectId },
+        orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+        select: { id: true, matterCode: true, sortOrder: true, createdAt: true },
+      });
+      const renumbered = renumberWeeklyMatterCodes(remaining.map((item, index) => ({ ...item, sortOrder: index + 1 })));
+      await Promise.all(renumbered.map((item) => tx.weeklyItem.update({
+        where: { id: item.id },
+        data: { sortOrder: item.sortOrder, matterCode: item.matterCode },
+      })));
+      await tx.operationHistory.create({
+        data: {
+          projectId: action.projectId,
+          entityType: "WEEKLY_ITEM",
+          entityId: weeklyItemId,
+          actionType: "DELETE",
+          operator: user.displayName,
+          detail: `通过智能助手删除项目事项「${current.title}」`,
+        },
+      });
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "项目事项已删除并重新编号", weeklyItemId, navigateUrl: "/weekly-items", navigateLabel: "查看项目事项" }) },
     });
   }
 
@@ -1283,6 +1740,39 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     return prisma.assistantActionRun.update({
       where: { id: action.id },
       data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "风险状态已更新", riskId: updated.id, navigateUrl: "/risk-register", navigateLabel: "查看风险登记册" }) },
+    });
+  }
+
+  if (action.toolId === "risk.delete") {
+    const riskId = String(args.riskId || "");
+    const current = await prisma.riskRegisterItem.findFirst({ where: { id: riskId, projectId: action.projectId } });
+    if (!current) throw new Error("风险不存在或已删除");
+    await prisma.$transaction(async (tx) => {
+      await tx.riskRegisterItem.delete({ where: { id: riskId } });
+      const remaining = await tx.riskRegisterItem.findMany({
+        where: { projectId: action.projectId },
+        orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+        select: { id: true, riskCode: true, sortOrder: true, createdAt: true },
+      });
+      const renumbered = renumberRiskCodes(remaining.map((item, index) => ({ ...item, sortOrder: index + 1 })));
+      await Promise.all(renumbered.map((item) => tx.riskRegisterItem.update({
+        where: { id: item.id },
+        data: { sortOrder: item.sortOrder, riskCode: item.riskCode },
+      })));
+      await tx.operationHistory.create({
+        data: {
+          projectId: action.projectId,
+          entityType: "RISK_REGISTER_ITEM",
+          entityId: riskId,
+          actionType: "DELETE",
+          operator: user.displayName,
+          detail: `通过智能助手删除风险「${current.riskName}」`,
+        },
+      });
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "风险已删除并重新编号", riskId, navigateUrl: "/risk-register", navigateLabel: "查看风险登记册" }) },
     });
   }
 

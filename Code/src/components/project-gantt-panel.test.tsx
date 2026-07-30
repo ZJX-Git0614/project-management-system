@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -70,12 +70,14 @@ const rootTask: ProjectGanttTask = {
   taskCode: "Task001",
   taskCategory: "设计",
   taskName: "根任务",
+  taskDescription: "",
   startDate: "2026-07-24",
   durationDays: 1,
   actualStartDate: "",
   actualEndDate: "",
   progress: 0,
   predecessorTask: "",
+  remark: "",
   sortOrder: 1,
 };
 
@@ -114,6 +116,7 @@ describe("ProjectGanttPanel", () => {
       if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
       if (url.endsWith("/members")) return Promise.resolve([]);
       if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      if (url.endsWith("/deletions")) return Promise.resolve([]);
       taskRequestCount += 1;
       return taskRequestCount === 1 ? Promise.resolve([rootTask]) : refresh.promise;
     });
@@ -142,6 +145,7 @@ describe("ProjectGanttPanel", () => {
       if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
       if (url.endsWith("/members")) return Promise.resolve([]);
       if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      if (url.endsWith("/deletions")) return Promise.resolve([]);
       taskRequestCount += 1;
       return Promise.resolve(taskRequestCount === 1 ? [rootTask, childTask] : []);
     });
@@ -163,6 +167,7 @@ describe("ProjectGanttPanel", () => {
       if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
       if (url.endsWith("/members")) return Promise.resolve([{ id: "member-1", personName: "张三", roleName: "项目经理" }]);
       if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      if (url.endsWith("/deletions")) return Promise.resolve([]);
       return Promise.resolve([rootTask]);
     });
     mocks.put.mockResolvedValue({ calendarMode: "WORKING_DAYS", hoursPerDay: 7.5 });
@@ -171,11 +176,85 @@ describe("ProjectGanttPanel", () => {
 
     const user = userEvent.setup();
     await waitFor(() => expect(screen.getByTestId("member-count")).toHaveTextContent("1"));
-    await user.click(screen.getByRole("button", { name: "工作日" }));
+    const calendarModeGroup = screen.getByRole("group", { name: "工期计算方式" });
+    const calendarDayButton = within(calendarModeGroup).getByRole("button", { name: "自然日" });
+    const workingDayButton = within(calendarModeGroup).getByRole("button", { name: "工作日" });
+
+    expect(calendarModeGroup).toHaveClass("h-8");
+    expect(calendarDayButton).toHaveClass("h-8", "text-xs");
+    expect(workingDayButton).toHaveClass("h-8", "text-xs");
+    expect(calendarDayButton).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(workingDayButton);
 
     await waitFor(() => expect(mocks.put).toHaveBeenCalledWith(
       "/api/projects/project-1/gantt-settings",
       { calendarMode: "WORKING_DAYS" },
+    ));
+    await waitFor(() => expect(workingDayButton).toHaveAttribute("aria-pressed", "true"));
+  });
+
+  it("uses compact toolbar buttons to undo and redo the latest deletion", async () => {
+    const deletionBatch = {
+      id: "batch-1",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+      projectId: "project-1",
+      operatorUserId: "user-1",
+      operatorName: "张三",
+      status: "AVAILABLE",
+      rootTaskIds: ["task-1"],
+      summary: {
+        rootTaskIds: ["task-1"],
+        rootTasks: [{ id: "task-1", taskCode: "Task001", taskName: "根任务" }],
+        taskIds: ["task-1"],
+        deletedTaskCount: 1,
+        descendantTaskCount: 0,
+        dependencyCount: 0,
+        internalDependencyCount: 0,
+        externalDependencyCount: 0,
+        detachedWeeklyItemCount: 0,
+        detachedRiskCount: 0,
+        clearedPredecessorCount: 0,
+        ganttRevision: 3,
+      },
+      revisionBeforeDelete: 3,
+      revisionAfterDelete: 4,
+      expiresAt: "2026-08-29T00:00:00.000Z",
+      restoredAt: null,
+    };
+    mocks.get.mockImplementation((url: string) => {
+      if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      if (url.endsWith("/deletions")) return Promise.resolve([deletionBatch]);
+      return Promise.resolve([]);
+    });
+    mocks.post.mockResolvedValue({ message: "已恢复 1 条甘特任务", restoredTaskCount: 1 });
+
+    render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
+
+    const user = userEvent.setup();
+    const undoButton = await screen.findByRole("button", { name: "撤销删除" });
+    const redoButton = screen.getByRole("button", { name: "取消撤销" });
+    expect(screen.queryByText("最近删除可撤销")).not.toBeInTheDocument();
+    expect(undoButton).toBeEnabled();
+    expect(redoButton).toBeDisabled();
+    expect(undoButton).toHaveClass("size-8");
+    expect(redoButton).toHaveClass("size-8");
+    expect(undoButton.parentElement).toHaveClass("gap-2");
+    await user.click(undoButton);
+
+    await waitFor(() => expect(mocks.post).toHaveBeenNthCalledWith(
+      1,
+      "/api/projects/project-1/gantt-tasks/deletions/batch-1/restore",
+    ));
+    await waitFor(() => expect(redoButton).toBeEnabled());
+    await user.click(redoButton);
+
+    await waitFor(() => expect(mocks.post).toHaveBeenNthCalledWith(
+      2,
+      "/api/projects/project-1/gantt-tasks/deletions/batch-1/redo",
     ));
   });
 });

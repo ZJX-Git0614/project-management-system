@@ -1,4 +1,5 @@
 import { addDaysInclusive, diffDays, diffDaysInclusive } from "@/lib/gantt";
+import { GANTT_HOURS_PER_DAY } from "@/lib/gantt-calendar";
 
 export interface EarnedValueTaskInput {
   id: string;
@@ -101,7 +102,7 @@ export const calculateEarnedValue = (tasks: EarnedValueTaskInput[], statusDate: 
     const pv = bac * plannedProgress;
     const estimatedWorkHours = finiteNonNegative(task.estimatedWorkHours);
     const actualWorkHours = finiteNonNegative(task.actualWorkHours);
-    const workBasisHours = estimatedWorkHours || Math.max(0, task.durationDays) * 8;
+    const workBasisHours = estimatedWorkHours || Math.max(0, task.durationDays) * GANTT_HOURS_PER_DAY;
     const plannedWorkHours = workBasisHours * plannedProgress;
     const earnedWorkHours = workBasisHours * Math.min(100, Math.max(0, task.progress)) / 100;
     return {

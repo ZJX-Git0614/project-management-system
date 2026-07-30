@@ -41,12 +41,22 @@ Data protection
 
 Assistant configuration
 -----------------------
+- This package intentionally does not include Ollama, any LLM, embedding model,
+  or model weights. The core system, database, documents, MPP import, and Excel/
+  Project XML export work without a model service.
 - Existing assistant settings and encrypted provider keys are included in the database.
 - The current active LLM provider is an external network service. The deployment computer
   must be able to reach that service for AI chat to work.
 - For local Ollama on Windows, install Ollama and pull the configured model. In Assistant
   Settings, use http://host.docker.internal:11434 instead of http://127.0.0.1:11434 because
   Ceastar PMS runs inside Docker.
+
+Optional binary MPP export
+--------------------------
+- Microsoft Project binary MPP export is optional and is not enabled automatically during
+  installation or update, so a Project COM prompt can never block deployment.
+- After the system is running, right-click repair-mpp-export-service.bat and run it as
+  Administrator only when MPP export is needed. Excel and Project XML export do not need it.
 
 Troubleshooting
 ---------------

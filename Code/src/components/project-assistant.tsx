@@ -377,10 +377,13 @@ export function ProjectAssistant({
   }, [sending, thinkingStartedAt])
 
   useEffect(() => {
-    if (!open) return
+    if (!open || loadingHistory) return
+    // Enter the conversation at the latest message. Smooth scrolling would visibly replay
+    // the full history whenever the panel opens, which is distracting for long sessions.
     const frame = window.requestAnimationFrame(() => {
       const container = messagesRef.current
-      if (container) container.scrollTo({ top: container.scrollHeight, behavior: "smooth" })
+      if (!container) return
+      container.scrollTop = container.scrollHeight
     })
     return () => window.cancelAnimationFrame(frame)
   }, [messages, open, sending, loadingHistory])
@@ -648,7 +651,7 @@ export function ProjectAssistant({
       updateActionBlock(completedAction, nextAction)
       const message = result.action.result?.message || (command === "cancel" ? "操作已取消" : "操作已执行")
       notify(message, command === "cancel" ? "info" : "success")
-      if (["todo.create", "todo.create.batch", "todo.complete"].includes(result.action.toolId) && result.action.status === "SUCCEEDED") {
+      if (["todo.create", "todo.create.batch", "todo.complete", "todo.delete"].includes(result.action.toolId) && result.action.status === "SUCCEEDED") {
         window.dispatchEvent(new Event(TODO_CHANGED_EVENT))
       }
       if (result.action.result?.downloadUrl) {

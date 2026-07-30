@@ -7,6 +7,11 @@ export interface GanttHierarchyTask {
   createdAt?: Date | string;
 }
 
+export interface GanttHierarchyCategorizedTask extends GanttHierarchyTask {
+  taskCategory: string;
+  taskName: string;
+}
+
 const compareCreatedAt = (left?: Date | string, right?: Date | string) => {
   const leftValue = left ? new Date(left).getTime() : 0;
   const rightValue = right ? new Date(right).getTime() : 0;
@@ -138,4 +143,65 @@ export const changeGanttTaskHierarchy = <T extends GanttHierarchyTask>(
     changedTasks,
     movedTaskIds,
   };
+};
+
+const categoryLeaf = (task: Pick<GanttHierarchyCategorizedTask, "taskCategory" | "taskName">) => (
+  task.taskCategory
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .at(-1)
+  || task.taskName.trim()
+);
+
+/**
+ * Rebuilds only the moved branches' category paths after a hierarchy change.
+ * The terminal category remains user-owned; obsolete ancestor segments are replaced.
+ */
+export const synchronizeGanttTaskCategories = <T extends GanttHierarchyCategorizedTask>(
+  tasks: T[],
+  movedRootTaskIds: string[],
+): T[] => {
+  if (movedRootTaskIds.length === 0) return tasks;
+
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
+  const childIdsByParentId = new Map<string, string[]>();
+  tasks.forEach((task) => {
+    if (!task.parentId) return;
+    childIdsByParentId.set(task.parentId, [...(childIdsByParentId.get(task.parentId) ?? []), task.id]);
+  });
+
+  const affectedTaskIds = new Set<string>();
+  const visitChildren = (taskId: string) => {
+    if (affectedTaskIds.has(taskId) || !taskById.has(taskId)) return;
+    affectedTaskIds.add(taskId);
+    (childIdsByParentId.get(taskId) ?? []).forEach(visitChildren);
+  };
+  movedRootTaskIds.forEach(visitChildren);
+
+  const resolvedCategories = new Map<string, string>();
+  const resolveCategory = (taskId: string, visiting = new Set<string>()): string => {
+    const cached = resolvedCategories.get(taskId);
+    if (cached !== undefined) return cached;
+    const task = taskById.get(taskId);
+    if (!task) return "";
+    if (!affectedTaskIds.has(taskId)) return task.taskCategory.trim();
+    if (visiting.has(taskId)) return categoryLeaf(task);
+
+    const ownCategory = categoryLeaf(task);
+    const parentCategory = task.parentId
+      ? resolveCategory(task.parentId, new Set(visiting).add(taskId))
+      : "";
+    const nextCategory = parentCategory && ownCategory
+      ? `${parentCategory} / ${ownCategory}`
+      : ownCategory || parentCategory;
+    resolvedCategories.set(taskId, nextCategory);
+    return nextCategory;
+  };
+
+  return tasks.map((task) => (
+    affectedTaskIds.has(task.id)
+      ? { ...task, taskCategory: resolveCategory(task.id) }
+      : task
+  ));
 };

@@ -29,6 +29,21 @@ describe("gantt calendar", () => {
   it("derives expected work at 7.5 hours per day", () => {
     expect(estimatedHoursForDuration(1)).toBe(7.5);
     expect(estimatedHoursForDuration(10)).toBe(75);
+    expect(estimatedHoursForDuration(0.5)).toBe(3.75);
+    expect(estimatedHoursForDuration(0)).toBe(0);
+  });
+
+  it("keeps half-day and unscheduled durations without inventing a full day", () => {
+    expect(calculateTaskFinishDate("2026-07-01", 0.5, "CALENDAR_DAYS")).toBe("2026-07-01");
+    expect(calculateTaskFinishDate("2026-07-01", 0, "CALENDAR_DAYS")).toBe("");
+
+    const result = scheduleGanttTasks([
+      { id: "half", startDate: "2026-07-01", durationDays: 0.5, taskMode: "AUTO" },
+      { id: "empty", startDate: "2026-07-01", durationDays: 0, taskMode: "AUTO" },
+    ], "CALENDAR_DAYS");
+
+    expect(result[0]).toMatchObject({ finishDate: "2026-07-01", durationMinutes: 225, estimatedWorkHours: 3.75 });
+    expect(result[1]).toMatchObject({ finishDate: "", durationMinutes: 0, estimatedWorkHours: 0 });
   });
 
   it("moves an automatic successor after its predecessor", () => {

@@ -147,10 +147,11 @@ export async function POST(
             taskCode: mode === "MERGE" ? (task.wbsCode || task.outlineNumber || "") : "",
             taskCategory: task.taskCategory,
             taskName: task.taskName,
+            taskDescription: task.taskDescription,
             startDate: task.startDate,
             finishDate: task.finishDate,
             durationDays: task.durationDays,
-            durationMinutes: task.durationDays * 450,
+            durationMinutes: Math.round(task.durationDays * 450),
             durationFormat: task.durationFormat,
             actualStartDate: task.actualStartDate,
             actualEndDate: task.actualEndDate,
@@ -161,6 +162,7 @@ export async function POST(
               .map((externalId) => taskNameByExternalId.get(externalId) ?? "")
               .filter(Boolean)
               .join(","),
+            remark: task.remark,
             taskMode: task.taskMode,
             isMilestone: task.isMilestone,
             externalUid: task.databaseId ? undefined : task.externalId,

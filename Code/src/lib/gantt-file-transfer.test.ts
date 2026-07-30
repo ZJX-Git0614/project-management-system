@@ -14,6 +14,7 @@ const tasks: ProjectGanttTask[] = [
     taskCode: "Task1",
     taskCategory: "设计",
     taskName: "总体设计",
+    taskDescription: "明确总体方案与接口边界",
     startDate: "2026-07-24",
     durationDays: 3,
     actualStartDate: "2026-07-24",
@@ -22,6 +23,7 @@ const tasks: ProjectGanttTask[] = [
     actualWorkHours: 10,
     progress: 50,
     predecessorTask: "",
+    remark: "首轮评审前完成",
     sortOrder: 1,
   },
   {
@@ -33,6 +35,7 @@ const tasks: ProjectGanttTask[] = [
     taskCode: "Task1.1",
     taskCategory: "设计",
     taskName: "接口设计",
+    taskDescription: "完成外部接口定义",
     startDate: "2026-07-25",
     durationDays: 2,
     actualStartDate: "",
@@ -41,6 +44,7 @@ const tasks: ProjectGanttTask[] = [
     actualWorkHours: 0,
     progress: 0,
     predecessorTask: "总体设计",
+    remark: "需同步硬件团队",
     predecessorTaskIds: ["root"],
     predecessorDependencies: [{
       id: "dependency-1",
@@ -72,6 +76,8 @@ describe("gantt file transfer", () => {
       databaseId: "root",
       parentExternalId: null,
       taskName: "总体设计",
+      taskDescription: "明确总体方案与接口边界",
+      remark: "首轮评审前完成",
       estimatedWorkHours: 22.5,
       actualWorkHours: 10,
     });
@@ -82,6 +88,8 @@ describe("gantt file transfer", () => {
       parentDatabaseId: "root",
       predecessorDatabaseIds: ["root"],
       taskName: "接口设计",
+      taskDescription: "完成外部接口定义",
+      remark: "需同步硬件团队",
     });
   });
 
@@ -99,8 +107,32 @@ describe("gantt file transfer", () => {
     ]);
   });
 
+  it("exports the project plan with the reference hierarchy styles and worksheet controls", () => {
+    const buffer = buildGanttExcel(tasks);
+    const workbook = XLSX.read(buffer, { type: "buffer", cellStyles: true, cellNF: true });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const archive = XLSX.CFB.read(buffer, { type: "buffer" });
+    const worksheetXml = Buffer.from(
+      XLSX.CFB.find(archive, "Root Entry/xl/worksheets/sheet1.xml").content,
+    ).toString("utf8");
+
+    expect(sheet.A1.s?.fgColor?.rgb).toBe("1F4E78");
+    expect(sheet.A2.s?.fgColor?.rgb).toBe("B4C7E7");
+    expect(sheet.A3.s?.fgColor?.rgb).toBe("D9EAF7");
+    expect(sheet.I2.z).toBe("0.00");
+    expect(sheet.V2.z).toBe("#,##0.00");
+    expect(sheet["!autofilter"]).toEqual({ ref: "A1:Y3" });
+    expect(sheet["!rows"]?.[0]).toEqual(expect.objectContaining({ hpt: 30 }));
+    expect(sheet["!rows"]?.[2]).toEqual(expect.objectContaining({ level: 1 }));
+    expect(worksheetXml).toContain('showGridLines="0"');
+    expect(worksheetXml).toContain('state="frozen"');
+    expect(worksheetXml).toContain('topLeftCell="E2"');
+    expect(worksheetXml).toContain('sqref="K2:K1048576"');
+    expect(worksheetXml).toContain('sqref="L2:L1048576"');
+  });
+
   it("builds an empty system Excel import template with the supported columns", () => {
-    const workbook = XLSX.read(buildGanttExcelTemplate(), { type: "buffer" });
+    const workbook = XLSX.read(buildGanttExcelTemplate(), { type: "buffer", cellStyles: true });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
     const headers = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1 })[0];
@@ -109,11 +141,15 @@ describe("gantt file transfer", () => {
     expect(headers).toEqual(expect.arrayContaining([
       "任务ID",
       "任务名称",
+      "任务描述",
       "计划开始",
       "预计工时(小时)",
       "实际工时(小时)",
       "紧前任务ID",
+      "备注",
     ]));
+    expect(sheet.A1.s?.fgColor?.rgb).toBe("1F4E78");
+    expect(sheet["!autofilter"]).toEqual({ ref: "A1:Y1" });
   });
 
   it("keeps the system 7.5-hour workday when imported Project metadata used 8 hours", () => {
@@ -167,9 +203,24 @@ describe("gantt file transfer", () => {
 
     expect(imported[0]).toMatchObject({
       startDate: "2024-01-01",
-      finishDate: "2024-01-01",
-      durationDays: 1,
+      finishDate: "",
+      durationDays: 0,
     });
+  });
+
+  it("preserves a half-day duration from the editable Excel workbook", () => {
+    const worksheet = XLSX.utils.json_to_sheet([{
+      任务ID: "Task001",
+      任务名称: "半天评审",
+      计划开始: "2026-07-01",
+      "工期(天)": 0.5,
+    }]);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "项目进度");
+
+    const [imported] = parseGanttExcel(Buffer.from(XLSX.write(workbook, { type: "buffer", bookType: "xlsx" })));
+
+    expect(imported).toMatchObject({ durationDays: 0.5, durationMinutes: 225, finishDate: "2026-07-01" });
   });
 
   it("round-trips task hierarchy through Microsoft Project XML", () => {
@@ -180,6 +231,8 @@ describe("gantt file transfer", () => {
       externalId: "1",
       parentExternalId: null,
       taskName: "总体设计",
+      taskDescription: "明确总体方案与接口边界",
+      remark: "首轮评审前完成",
       progress: 50,
       estimatedWorkHours: 22.5,
       actualWorkHours: 10,

@@ -307,6 +307,7 @@ export const buildAssistantScheduleContextV1 = (params: {
     taskCode: task.taskCode,
     taskCategory: task.taskCategory,
     taskName: task.taskName,
+    taskDescription: "",
     startDate: task.startDate,
     finishDate: task.finishDate,
     durationDays: task.durationDays,
@@ -315,6 +316,7 @@ export const buildAssistantScheduleContextV1 = (params: {
     progress: task.progress,
     predecessorTask: task.predecessorTask,
     predecessorTaskIds: task.predecessorDependencies.map((dependency) => dependency.predecessorTaskId),
+    remark: "",
     sortOrder: task.sortOrder,
   })))];
   const dependencyTaskIds = new Set(dependencies.flatMap((dependency) => [dependency.predecessorTaskId, dependency.successorTaskId]));

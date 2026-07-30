@@ -5,6 +5,7 @@ import { MS_PER_DAY, formatGanttDate, parseGanttDate } from "@/lib/gantt";
 const { isWorkday } = chineseDays;
 
 export const GANTT_HOURS_PER_DAY = 7.5;
+export const GANTT_DURATION_STEP_DAYS = 0.5;
 
 export const GANTT_CALENDAR_MODES = ["CALENDAR_DAYS", "WORKING_DAYS"] as const;
 export type GanttCalendarMode = typeof GANTT_CALENDAR_MODES[number];
@@ -17,8 +18,22 @@ export const roundGanttHours = (value: number): number => (
   Math.round((Number.isFinite(value) ? Math.max(0, value) : 0) * 100) / 100
 );
 
+export const normalizeGanttDurationDays = (value: number): number => {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.max(
+    GANTT_DURATION_STEP_DAYS,
+    Math.round(value / GANTT_DURATION_STEP_DAYS) * GANTT_DURATION_STEP_DAYS,
+  );
+};
+
+export const isValidGanttDurationDays = (value: number): boolean => (
+  Number.isFinite(value)
+  && value >= 0
+  && Math.abs(value / GANTT_DURATION_STEP_DAYS - Math.round(value / GANTT_DURATION_STEP_DAYS)) < 0.000_001
+);
+
 export const estimatedHoursForDuration = (durationDays: number): number => (
-  roundGanttHours(Math.max(1, Math.trunc(durationDays)) * GANTT_HOURS_PER_DAY)
+  roundGanttHours(normalizeGanttDurationDays(durationDays) * GANTT_HOURS_PER_DAY)
 );
 
 const isWorkingDate = (date: Date) => isWorkday(formatGanttDate(date));
@@ -41,15 +56,16 @@ export const calculateTaskFinishDate = (
   durationDays: number,
   mode: GanttCalendarMode,
 ): string => {
-  if (!startDate) return "";
-  const duration = Math.max(1, Math.trunc(durationDays));
+  const duration = normalizeGanttDurationDays(durationDays);
+  if (!startDate || duration <= 0) return "";
+  const occupiedDays = Math.ceil(duration);
   if (mode === "CALENDAR_DAYS") {
-    return formatGanttDate(new Date(parseGanttDate(startDate).getTime() + (duration - 1) * MS_PER_DAY));
+    return formatGanttDate(new Date(parseGanttDate(startDate).getTime() + (occupiedDays - 1) * MS_PER_DAY));
   }
 
   const date = moveToWorkingDate(parseGanttDate(startDate), 1);
   let counted = 1;
-  while (counted < duration) {
+  while (counted < occupiedDays) {
     date.setUTCDate(date.getUTCDate() + 1);
     if (isWorkingDate(date)) counted += 1;
   }
@@ -61,15 +77,16 @@ export const calculateTaskStartDate = (
   durationDays: number,
   mode: GanttCalendarMode,
 ): string => {
-  if (!finishDate) return "";
-  const duration = Math.max(1, Math.trunc(durationDays));
+  const duration = normalizeGanttDurationDays(durationDays);
+  if (!finishDate || duration <= 0) return "";
+  const occupiedDays = Math.ceil(duration);
   if (mode === "CALENDAR_DAYS") {
-    return formatGanttDate(new Date(parseGanttDate(finishDate).getTime() - (duration - 1) * MS_PER_DAY));
+    return formatGanttDate(new Date(parseGanttDate(finishDate).getTime() - (occupiedDays - 1) * MS_PER_DAY));
   }
 
   const date = moveToWorkingDate(parseGanttDate(finishDate), -1);
   let counted = 1;
-  while (counted < duration) {
+  while (counted < occupiedDays) {
     date.setUTCDate(date.getUTCDate() - 1);
     if (isWorkingDate(date)) counted += 1;
   }

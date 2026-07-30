@@ -85,7 +85,7 @@ export function SystemFeedbackProvider({ children }: { children: React.ReactNode
       ...current.slice(-3),
       { id, message, tone: tone ?? inferTone(message) },
     ]);
-    window.setTimeout(() => dismiss(id), 3600);
+    window.setTimeout(() => dismiss(id), 2000);
   }, [dismiss]);
 
   const requestText = useCallback((options: PromptOptions) => new Promise<string | null>((resolve) => {

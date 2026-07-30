@@ -61,7 +61,7 @@ describe("schedule file merge", () => {
     const workbook = XLSX.read(result.workbook, { type: "buffer" });
     expect(workbook.SheetNames).toEqual(["项目进度", "合并说明"]);
     expect(parseGanttExcel(result.workbook, "2026-07-01")).toHaveLength(4);
-    expect(result.warnings.some((warning) => warning.message.includes("按 1 天"))).toBe(true);
+    expect(result.warnings.some((warning) => warning.message.includes("按未排期任务"))).toBe(true);
   });
 
   it("does not invent an unresolved dependency", async () => {

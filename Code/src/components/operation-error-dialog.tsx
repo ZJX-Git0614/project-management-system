@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ComponentProps } from "react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Check, Copy } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -11,11 +12,13 @@ export function OperationErrorDialog({
   title,
   message,
   onOpenChange,
+  container,
 }: {
   open: boolean;
   title: string;
   message: string;
   onOpenChange: (open: boolean) => void;
+  container?: ComponentProps<typeof DialogPrimitive.Portal>["container"];
 }) {
   const [copied, setCopied] = useState(false);
 
@@ -30,7 +33,7 @@ export function OperationErrorDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent container={container} className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>错误信息会保留在此处，便于复制后排查。</DialogDescription>

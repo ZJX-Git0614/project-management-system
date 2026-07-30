@@ -1,6 +1,8 @@
 param(
   [string]$DeploymentDirectory = $PSScriptRoot,
   [int]$Port = 3210,
+  [string]$ProjectPowerShellPath = "",
+  [string]$ProjectProgId = "",
   [switch]$SkipContainerRestart
 )
 
@@ -41,6 +43,52 @@ function New-ServiceToken {
   return [Convert]::ToBase64String($bytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
 }
 
+function Test-ProjectComAutomation([string]$PowerShellPath) {
+  $probe = @'
+$ErrorActionPreference = "Stop"
+$progIds = @("MSProject.Application", "MSProject.Application.16", "MSProject.Application.15", "MSProject.Application.14", "MSProject.Application.12")
+foreach ($progId in $progIds) {
+  $application = $null
+  try {
+    $application = New-Object -ComObject $progId
+    $application.Visible = $false
+    [Console]::Out.Write($progId)
+    exit 0
+  } catch {
+    # Try the next registered Microsoft Project COM ProgID.
+  } finally {
+    if ($application) {
+      try { $application.Quit() } catch {}
+      try { [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($application) } catch {}
+    }
+  }
+}
+exit 1
+'@
+  $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($probe))
+  $output = & $PowerShellPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded 2>$null
+  if ($LASTEXITCODE -ne 0) { return "" }
+  return (($output | Select-Object -Last 1) -as [string]).Trim()
+}
+
+function Find-ProjectAutomationHost {
+  $candidates = @(
+    (Join-Path $env:WINDIR "System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
+    (Join-Path $env:WINDIR "SysWOW64\\WindowsPowerShell\\v1.0\\powershell.exe")
+  )
+  if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+    $candidates += (Join-Path $env:WINDIR "Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe")
+  }
+
+  foreach ($candidate in ($candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique)) {
+    $progId = Test-ProjectComAutomation $candidate
+    if ($progId) {
+      return [pscustomobject]@{ PowerShellPath = $candidate; ProgId = $progId }
+    }
+  }
+  return $null
+}
+
 function Wait-ForServiceHealth([int]$ServicePort, [string]$ServiceToken) {
   $headers = @{ Authorization = "Bearer $ServiceToken" }
   $lastError = "No response"
@@ -75,24 +123,28 @@ $composePath = Join-Path $DeploymentDirectory "docker-compose.yml"
 if (-not (Test-Path $serviceSource)) { throw "Missing mpp-export-service.ps1." }
 if (-not (Test-Path $composePath)) { throw "The deployment docker-compose.yml was not found." }
 
-$projectApplication = $null
-try {
-  $projectApplication = New-Object -ComObject MSProject.Application
-  $projectApplication.Visible = $false
-} catch {
-  Write-Host "Microsoft Project is not installed. MPP export remains disabled; Excel and Project XML export are still available." -ForegroundColor Yellow
-  return
-} finally {
-  if ($projectApplication) {
-    try { $projectApplication.Quit() } catch {}
-    try { [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($projectApplication) } catch {}
+$projectAutomation = $null
+if ($ProjectPowerShellPath -and $ProjectProgId -and (Test-Path $ProjectPowerShellPath)) {
+  $verifiedProgId = Test-ProjectComAutomation $ProjectPowerShellPath
+  if ($verifiedProgId -eq $ProjectProgId) {
+    $projectAutomation = [pscustomobject]@{ PowerShellPath = $ProjectPowerShellPath; ProgId = $ProjectProgId }
   }
+}
+if (-not $projectAutomation) {
+  $projectAutomation = Find-ProjectAutomationHost
+}
+if (-not $projectAutomation) {
+  Write-Host "No usable Microsoft Project COM automation interface was detected. MPP export remains disabled; Excel and Project XML export are still available." -ForegroundColor Yellow
+  Write-Host "The check covers both 32-bit and 64-bit Windows PowerShell. Repair the Microsoft Project installation or run this script under the Windows account that installed Project." -ForegroundColor Yellow
+  return
 }
 
 if (-not (Test-Administrator)) {
   $arguments = @(
     "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"",
-    "-DeploymentDirectory", "`"$DeploymentDirectory`"", "-Port", $Port
+    "-DeploymentDirectory", "`"$DeploymentDirectory`"", "-Port", $Port,
+    "-ProjectPowerShellPath", "`"$($projectAutomation.PowerShellPath)`"",
+    "-ProjectProgId", "`"$($projectAutomation.ProgId)`""
   )
   if ($SkipContainerRestart) { $arguments += "-SkipContainerRestart" }
   $process = Start-Process powershell.exe -Verb RunAs -ArgumentList $arguments -Wait -PassThru
@@ -152,8 +204,8 @@ if ($existingTask) {
     Start-Sleep -Milliseconds 500
   }
 }
-$actionArguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$servicePath`" -Port $Port -ConfigPath `"$envPath`""
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $actionArguments
+$actionArguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$servicePath`" -Port $Port -ConfigPath `"$envPath`" -ProjectProgId `"$($projectAutomation.ProgId)`""
+$action = New-ScheduledTaskAction -Execute $projectAutomation.PowerShellPath -Argument $actionArguments
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 $settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -User $user -RunLevel Highest -Force | Out-Null
@@ -164,4 +216,4 @@ if (-not $SkipContainerRestart) {
   Push-Location $DeploymentDirectory
   try { docker compose up -d --no-deps --force-recreate pms | Out-Null } finally { Pop-Location }
 }
-Write-Host "MPP export service installed and enabled." -ForegroundColor Green
+Write-Host "MPP export service installed and enabled with $($projectAutomation.ProgId)." -ForegroundColor Green
