@@ -4,11 +4,11 @@
   "private": true,
   "scripts": {
     "dev": "next dev --webpack",
-    "dev:local": "PORT=3002 next dev --webpack",
+    "dev:local": "PORT=3001 next dev --webpack",
     "build": "next build --webpack",
     "start": "node scripts/next-cluster-server.mjs",
     "start:single": "PMS_WEB_WORKERS=1 node scripts/next-cluster-server.mjs",
-    "start:local": "PORT=3002 node scripts/next-cluster-server.mjs",
+    "start:local": "PORT=3000 node scripts/next-cluster-server.mjs",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
