@@ -44,6 +44,7 @@ import {
   describeAssistantExportFilters,
   parseAssistantProjectExportIntent,
 } from "@/lib/assistant-export";
+import { itemProgressFields, itemStatusFromProgress } from "@/lib/item-progress";
 
 export type AssistantActionView = {
   id: string;
@@ -174,21 +175,18 @@ const weeklyStatusByLabel: Record<string, string> = {
   "进行中": "IN_PROGRESS",
   "已完成": "DONE",
   "完成": "DONE",
-  "已取消": "CANCELED",
-  "取消": "CANCELED",
 };
 
 const weeklyStatusLabel: Record<string, string> = {
-  PENDING: "待开始",
+  PENDING: "未开始",
   IN_PROGRESS: "进行中",
   DONE: "已完成",
-  CANCELED: "已取消",
 };
 
 export const parseWeeklyItemUpdateIntent = (message: string) => {
   const matterCode = message.match(/Matter\d+/i)?.[0];
   if (!matterCode) return null;
-  const statusLabel = message.match(/(?:状态\s*(?:改为|更新为|设置为|设为)?|改为|更新为|设置为|设为)\s*(待开始|未开始|进行中|已完成|完成(?!度)|已取消|取消)/u)?.[1];
+  const statusLabel = message.match(/(?:状态\s*(?:改为|更新为|设置为|设为)?|改为|更新为|设置为|设为)\s*(待开始|未开始|进行中|已完成|完成(?!度))/u)?.[1];
   const progressText = message.match(/(?:进度|完成度)\s*(?:改为|更新为|设置为|到)?\s*(\d{1,3})\s*%?/u)?.[1];
   const progress = progressText === undefined ? undefined : Number(progressText);
   if (!statusLabel && progress === undefined) return null;
@@ -720,15 +718,24 @@ export const proposeAssistantAction = async (params: {
       select: { id: true, matterCode: true, title: true, status: true, progress: true },
     });
     if (item) {
-      const nextStatus = weeklyIntent.status ?? item.status;
-      const nextProgress = weeklyIntent.progress ?? (nextStatus === "DONE" ? 100 : item.progress);
+      const currentStatus = itemStatusFromProgress(item.progress);
+      const nextProgress = weeklyIntent.progress
+        ?? (weeklyIntent.status === "DONE"
+          ? 100
+          : weeklyIntent.status === "PENDING"
+            ? 0
+            : weeklyIntent.status === "IN_PROGRESS" && item.progress > 0 && item.progress < 100
+              ? item.progress
+              : undefined);
+      if (nextProgress === undefined) return null;
+      const nextStatus = itemStatusFromProgress(nextProgress);
       return createProposal({
         ...params,
         toolId: "weekly.status.update",
         riskLevel: "MEDIUM",
-        args: { weeklyItemId: item.id, status: nextStatus, progress: nextProgress },
+        args: { weeklyItemId: item.id, progress: nextProgress },
         title: "更新项目事项",
-        description: `${item.matterCode} ${item.title}：${weeklyStatusLabel[item.status] || item.status} / ${item.progress}% → ${weeklyStatusLabel[nextStatus] || nextStatus} / ${nextProgress}%`,
+        description: `${item.matterCode} ${item.title}：${weeklyStatusLabel[currentStatus]} / ${item.progress}% → ${weeklyStatusLabel[nextStatus]} / ${nextProgress}%`,
       });
     }
   }
@@ -1336,14 +1343,14 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
 
   if (action.toolId === "weekly.status.update") {
     const weeklyItemId = String(args.weeklyItemId || "");
-    const status = String(args.status || "");
     const progress = Number(args.progress);
-    if (!Object.hasOwn(weeklyStatusLabel, status)) throw new Error("事项状态无效");
-    if (!Number.isFinite(progress) || progress < 0 || progress > 100) throw new Error("事项进度应为 0-100 的数字");
+    if (!Number.isInteger(progress) || progress < 0 || progress > 100) throw new Error("事项进度应为 0-100 的整数");
     const current = await prisma.weeklyItem.findFirst({ where: { id: weeklyItemId, projectId: action.projectId } });
     if (!current) throw new Error("事项不存在");
+    const progressData = itemProgressFields(progress, current.actualEndDate, undefined, current.progress);
+    const currentStatus = itemStatusFromProgress(current.progress);
     const updated = await prisma.$transaction(async (tx) => {
-      const item = await tx.weeklyItem.update({ where: { id: weeklyItemId }, data: { status, progress } });
+      const item = await tx.weeklyItem.update({ where: { id: weeklyItemId }, data: progressData });
       await tx.operationHistory.create({
         data: {
           projectId: action.projectId,
@@ -1351,14 +1358,14 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
           entityId: item.id,
           actionType: "UPDATE",
           operator: user.displayName,
-          detail: `通过智能助手将 ${item.matterCode} ${item.title} 从 ${weeklyStatusLabel[current.status] || current.status} / ${current.progress}% 更新为 ${weeklyStatusLabel[status]} / ${progress}%`,
+          detail: `通过智能助手将 ${item.matterCode} ${item.title} 从 ${weeklyStatusLabel[currentStatus]} / ${current.progress}% 更新为 ${weeklyStatusLabel[progressData.status]} / ${progress}%`,
         },
       });
       return item;
     });
     return prisma.assistantActionRun.update({
       where: { id: action.id },
-      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "事项状态已更新", weeklyItemId: updated.id, navigateUrl: "/weekly-items", navigateLabel: "查看项目事项" }) },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "事项进度已更新", weeklyItemId: updated.id, navigateUrl: "/weekly-items", navigateLabel: "查看项目事项" }) },
     });
   }
 

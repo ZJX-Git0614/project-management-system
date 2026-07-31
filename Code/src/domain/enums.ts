@@ -15,7 +15,6 @@ export enum ItemStatus {
   PENDING = "PENDING",
   IN_PROGRESS = "IN_PROGRESS",
   DONE = "DONE",
-  CANCELED = "CANCELED",
 }
 
 export enum ItemPriority {

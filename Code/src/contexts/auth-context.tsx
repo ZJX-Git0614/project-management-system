@@ -55,6 +55,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(() => {
     setUser(null)
+    if (typeof window !== "undefined") {
+      Object.keys(window.sessionStorage)
+        .filter((key) => key.startsWith("ceastar:gantt-history:"))
+        .forEach((key) => window.sessionStorage.removeItem(key))
+    }
     api.logout()
   }, [])
 

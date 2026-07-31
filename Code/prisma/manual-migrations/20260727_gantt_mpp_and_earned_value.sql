@@ -80,10 +80,13 @@ WITH legacy_links AS (
    AND predecessor."id" <> legacy_links."successorTaskId"
 )
 INSERT INTO "ProjectGanttDependency" (
-  "id", "projectId", "predecessorTaskId", "successorTaskId", "type", "lag", "lagFormat"
+  "id", "createdAt", "updatedAt", "projectId",
+  "predecessorTaskId", "successorTaskId", "type", "lag", "lagFormat"
 )
 SELECT
   'legacy_' || md5("projectId" || ':' || "predecessorTaskId" || ':' || "successorTaskId"),
+  CURRENT_TIMESTAMP,
+  CURRENT_TIMESTAMP,
   "projectId", "predecessorTaskId", "successorTaskId", 1, 0, 7
 FROM unique_matches
 WHERE match_count = 1

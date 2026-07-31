@@ -1,10 +1,11 @@
 import { orderGanttTasksByHierarchy, type GanttTaskCodeSource } from "@/lib/gantt-task-codes";
 import { ganttTaskDepthById } from "@/lib/gantt-task-service";
+import { itemStatusFromProgress } from "@/lib/item-progress";
 
 export type AssistantExportType = "scheduleAnalysis" | "gantt" | "weekly" | "risk" | "budget";
 export type GanttProgressFilter = "NOT_STARTED" | "IN_PROGRESS" | "COMPLETED" | "INCOMPLETE";
 export type WeeklyPriorityFilter = "LOW" | "NORMAL" | "HIGH" | "URGENT";
-export type WeeklyStatusFilter = "PENDING" | "IN_PROGRESS" | "DONE" | "CANCELED";
+export type WeeklyStatusFilter = "PENDING" | "IN_PROGRESS" | "DONE";
 
 export type AssistantProjectExportIntent = {
   exportType: AssistantExportType;
@@ -54,7 +55,6 @@ const parseWeeklyStatus = (message: string): WeeklyStatusFilter | undefined => {
   if (/已完成.{0,14}(?:项目)?事项|(?:项目)?事项.{0,14}已完成/u.test(message)) return "DONE";
   if (/进行中.{0,14}(?:项目)?事项|(?:项目)?事项.{0,14}进行中/u.test(message)) return "IN_PROGRESS";
   if (/(?:未开始|待开始).{0,14}(?:项目)?事项|(?:项目)?事项.{0,14}(?:未开始|待开始)/u.test(message)) return "PENDING";
-  if (/已取消.{0,14}(?:项目)?事项|(?:项目)?事项.{0,14}已取消/u.test(message)) return "CANCELED";
   return undefined;
 };
 
@@ -95,10 +95,9 @@ const weeklyPriorityLabel: Record<WeeklyPriorityFilter, string> = {
 };
 
 const weeklyStatusLabel: Record<WeeklyStatusFilter, string> = {
-  PENDING: "待开始事项",
+  PENDING: "未开始事项",
   IN_PROGRESS: "进行中事项",
   DONE: "已完成事项",
-  CANCELED: "已取消事项",
 };
 
 export const describeAssistantExportFilters = (intent: AssistantProjectExportIntent) => {
@@ -133,7 +132,7 @@ export const selectGanttExportRows = <T extends GanttExportRow>(
 
 type WeeklyExportRow = {
   priority: string;
-  status: string;
+  progress: number;
 };
 
 export const selectWeeklyExportRows = <T extends WeeklyExportRow>(
@@ -141,5 +140,5 @@ export const selectWeeklyExportRows = <T extends WeeklyExportRow>(
   filters: Pick<AssistantProjectExportIntent, "weeklyPriority" | "weeklyStatus">,
 ) => rows.filter((row) => (
   (!filters.weeklyPriority || row.priority === filters.weeklyPriority)
-  && (!filters.weeklyStatus || row.status === filters.weeklyStatus)
+  && (!filters.weeklyStatus || itemStatusFromProgress(row.progress) === filters.weeklyStatus)
 ));

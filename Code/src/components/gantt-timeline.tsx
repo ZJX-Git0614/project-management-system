@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ChevronLeft, ChevronRight, Columns3, CornerDownRight, GripVertical, IndentDecrease, IndentIncrease, ListChecks, ListTree, Plus, Search, Trash2, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronRight as MenuChevronRight, ClipboardPaste, Columns3, Copy, GripVertical, IndentDecrease, IndentIncrease, ListTree, Plus, Scissors, Search, Trash2, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { GanttDateField } from "@/components/gantt-date-field";
@@ -51,6 +51,7 @@ import {
 import { cn } from "@/lib/utils";
 
 interface GanttTimelineProps {
+  projectId?: string;
   tasks: ProjectGanttTask[];
   projectMembers?: ProjectMember[];
   calendarMode?: GanttCalendarMode;
@@ -67,10 +68,40 @@ interface GanttTimelineProps {
   fullScreen?: boolean;
   portalContainer?: HTMLElement | null;
   onCreateTask?: (parentTask?: ProjectGanttTask) => void;
-  onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft) => void | Promise<void>;
+  historyFocusRequest?: GanttHistoryFocusRequest | null;
+  onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft, columnKey?: string) => void | Promise<void>;
   onDeleteSelected?: (taskIds: string[]) => void | Promise<void>;
   onChangeHierarchy?: (taskIds: string[], direction: GanttHierarchyDirection) => void | Promise<void>;
-  onReorderTasks?: (taskIds: string[]) => void | Promise<void>;
+  onInsertTasks?: (
+    anchorTaskId: string,
+    placement: GanttInsertPlacement,
+    count: number,
+  ) => Promise<{ createdTaskIds?: string[] } | void>;
+  onPasteTasks?: (
+    mode: GanttClipboardMode,
+    sourceTaskIds: string[],
+    anchorTaskId: string,
+    position: GanttPastePosition,
+  ) => Promise<{ taskIds?: string[] } | void>;
+  onActionError?: (message: string) => void;
+  onReorderTasks?: (taskIds: string[], movedTaskId?: string) => void | Promise<void>;
+}
+
+interface GanttHistoryFocusRequest {
+  requestId: number;
+  taskIds: string[];
+  columnKey?: string;
+  anchorTaskId?: string;
+}
+
+type GanttInsertPlacement = "SIBLING_BEFORE" | "SIBLING_AFTER" | "CHILD_FIRST" | "CHILD_LAST";
+type GanttPastePosition = "BEFORE" | "AFTER";
+type GanttClipboardMode = "COPY" | "MOVE";
+
+interface GanttClipboardState {
+  projectId: string;
+  mode: GanttClipboardMode;
+  taskIds: string[];
 }
 
 export type GanttTaskDraft = {
@@ -109,6 +140,12 @@ const GANTT_DEPTH_COLORS = [
   { hue: 228, saturation: 48, lightness: 66 },
 ] as const;
 type DropPosition = "before" | "after";
+
+const escapeCssSelector = (value: string) => (
+  typeof CSS !== "undefined" && typeof CSS.escape === "function"
+    ? CSS.escape(value)
+    : value.replace(/["\\]/g, "\\$&")
+);
 
 const GanttDividerToggle = ({
   collapsed,
@@ -246,6 +283,7 @@ const taskDraftEquals = (task: ProjectGanttTask, draft: GanttTaskDraft, calendar
 );
 
 const GanttTimelineContent = ({
+  projectId = "",
   tasks,
   projectMembers = [],
   calendarMode = "CALENDAR_DAYS",
@@ -260,23 +298,32 @@ const GanttTimelineContent = ({
   reordering = false,
   fullScreen = false,
   portalContainer,
+  historyFocusRequest,
   onCreateTask,
   onUpdateTask,
   onDeleteSelected,
   onChangeHierarchy,
+  onInsertTasks,
+  onPasteTasks,
+  onActionError,
   onReorderTasks,
 }: GanttTimelineProps) => {
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
   const dayWidth = ZOOM_LEVELS[zoomIndex];
   const [detailsCollapsed, setDetailsCollapsed] = useState(false);
-  const [selectionMode, setSelectionMode] = useState(false);
-  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+  const [explicitSelectedTaskIds, setExplicitSelectedTaskIds] = useState<string[]>([]);
+  const [selectionAnchorTaskId, setSelectionAnchorTaskId] = useState<string | null>(null);
+  const [clipboard, setClipboard] = useState<GanttClipboardState | null>(null);
+  const selectionDragRef = useRef<{ startIndex: number; active: boolean } | null>(null);
+  const processedHistoryFocusRequestId = useRef<number | null>(null);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [taskDropTarget, setTaskDropTarget] = useState<{ id: string; position: DropPosition } | null>(null);
   const [flashingTaskId, setFlashingTaskId] = useState<string | null>(null);
   const [columnWidths, setColumnWidths] = useState<GanttColumnWidths>({ ...GANTT_COLUMN_MIN_WIDTHS });
   const [hiddenColumnKeys, setHiddenColumnKeys] = useState<Set<GanttColumnKey>>(() => new Set());
   const [contextMenu, setContextMenu] = useState<{ taskId: string; x: number; y: number } | null>(null);
+  const [contextSubmenu, setContextSubmenu] = useState<"paste" | "insert" | null>(null);
+  const [insertCount, setInsertCount] = useState(1);
   const visibleColumnKeys = useMemo(
     () => ganttVisibleColumnKeys(detailsCollapsed, hiddenColumnKeys),
     [detailsCollapsed, hiddenColumnKeys],
@@ -318,6 +365,24 @@ const GanttTimelineContent = ({
   const parentDepths = useMemo(() => [...new Set(rows
     .filter((row) => (childIdsByParentId.get(row.id)?.length ?? 0) > 0)
     .map((row) => taskDepthById.get(row.id) ?? 0))].sort((left, right) => left - right), [childIdsByParentId, rows, taskDepthById]);
+  const linkedSelectedTaskIds = useMemo(() => {
+    const linked = new Set<string>();
+    const explicit = new Set(explicitSelectedTaskIds);
+    explicitSelectedTaskIds.forEach((taskId) => {
+      const stack = [...(childIdsByParentId.get(taskId) ?? [])];
+      while (stack.length > 0) {
+        const childId = stack.shift()!;
+        if (!explicit.has(childId)) linked.add(childId);
+        stack.push(...(childIdsByParentId.get(childId) ?? []));
+      }
+    });
+    return rows.map((row) => row.id).filter((id) => linked.has(id));
+  }, [childIdsByParentId, explicitSelectedTaskIds, rows]);
+  const selectedTaskIds = useMemo(() => {
+    const selected = new Set([...explicitSelectedTaskIds, ...linkedSelectedTaskIds]);
+    return rows.map((row) => row.id).filter((id) => selected.has(id));
+  }, [explicitSelectedTaskIds, linkedSelectedTaskIds, rows]);
+  const explicitSelectedTaskIdSet = useMemo(() => new Set(explicitSelectedTaskIds), [explicitSelectedTaskIds]);
   const selectedCount = selectedTaskIds.length;
   const selectedRootTaskIds = useMemo(() => {
     const selected = new Set(selectedTaskIds);
@@ -341,10 +406,31 @@ const GanttTimelineContent = ({
     return index > 0 && !selectedRootSet.has(siblings[index - 1].id);
   });
   const contextTask = contextMenu ? rowByTaskId.get(contextMenu.taskId) : null;
-  const contextTaskSiblings = contextTask ? rows.filter((row) => (row.parentId ?? null) === (contextTask.parentId ?? null)) : [];
-  const contextTaskSiblingIndex = contextTask ? contextTaskSiblings.findIndex((row) => row.id === contextTask.id) : -1;
-  const canOutdentContextTask = Boolean(contextTask?.parentId);
-  const canIndentContextTask = contextTaskSiblingIndex > 0;
+  const movedClipboardTaskIds = useMemo(() => {
+    if (!clipboard || clipboard.mode !== "MOVE" || clipboard.projectId !== projectId) return new Set<string>();
+    const moved = new Set<string>();
+    const stack = [...clipboard.taskIds];
+    while (stack.length > 0) {
+      const taskId = stack.pop()!;
+      if (moved.has(taskId)) continue;
+      moved.add(taskId);
+      stack.push(...(childIdsByParentId.get(taskId) ?? []));
+    }
+    return moved;
+  }, [childIdsByParentId, clipboard, projectId]);
+  const invalidMovePasteTarget = Boolean(contextTask && movedClipboardTaskIds.has(contextTask.id));
+
+  useEffect(() => {
+    setClipboard(null);
+    setExplicitSelectedTaskIds([]);
+    setSelectionAnchorTaskId(null);
+  }, [projectId]);
+
+  useEffect(() => {
+    const validIds = new Set(rows.map((row) => row.id));
+    setExplicitSelectedTaskIds((current) => current.filter((id) => validIds.has(id)));
+    setSelectionAnchorTaskId((current) => current && validIds.has(current) ? current : null);
+  }, [rows]);
 
   useEffect(() => {
     const fitted = fitGanttColumnWidths(rows);
@@ -398,6 +484,84 @@ const GanttTimelineContent = ({
     };
   }, [updateVirtualRange]);
 
+  useEffect(() => {
+    if (!historyFocusRequest) return;
+    if (processedHistoryFocusRequestId.current === historyFocusRequest.requestId) return;
+    const taskId = historyFocusRequest.taskIds.find((id) => rowByTaskId.has(id))
+      ?? (historyFocusRequest.anchorTaskId && rowByTaskId.has(historyFocusRequest.anchorTaskId)
+        ? historyFocusRequest.anchorTaskId
+        : null);
+    if (!taskId) return;
+    processedHistoryFocusRequestId.current = historyFocusRequest.requestId;
+
+    const nextCollapsed = new Set(collapsedTaskIds);
+    let parentId = rowByTaskId.get(taskId)?.parentId ?? null;
+    while (parentId) {
+      nextCollapsed.delete(parentId);
+      parentId = rowByTaskId.get(parentId)?.parentId ?? null;
+    }
+    setCollapsedTaskIds((current) => (
+      current.size === nextCollapsed.size && [...current].every((id) => nextCollapsed.has(id))
+        ? current
+        : nextCollapsed
+    ));
+    if (historyFocusRequest.columnKey) {
+      const columnKey = historyFocusRequest.columnKey as GanttColumnKey;
+      if (GANTT_EXPANDED_COLUMN_KEYS.includes(columnKey)) {
+        setDetailsCollapsed(false);
+        setHiddenColumnKeys((current) => {
+          if (!current.has(columnKey)) return current;
+          const next = new Set(current);
+          next.delete(columnKey);
+          return next;
+        });
+      }
+    }
+
+    const focusedRows = rows.filter((row) => {
+      let currentParentId = row.parentId ?? null;
+      while (currentParentId) {
+        if (nextCollapsed.has(currentParentId)) return false;
+        currentParentId = rowByTaskId.get(currentParentId)?.parentId ?? null;
+      }
+      return true;
+    });
+    const targetIndex = focusedRows.findIndex((row) => row.id === taskId);
+    if (targetIndex < 0) return;
+    setVirtualRange({ start: Math.max(0, targetIndex - 12), end: Math.min(focusedRows.length, targetIndex + 14) });
+
+    window.setTimeout(() => {
+      const viewport = scrollViewportRef.current;
+      if (!viewport) return;
+      const rowNode = document.querySelector<HTMLElement>(`[data-gantt-task-id="${escapeCssSelector(taskId)}"]`);
+      const viewportRect = viewport.getBoundingClientRect();
+      const rowRect = rowNode?.getBoundingClientRect();
+      const fullyVisible = Boolean(rowRect
+        && rowRect.top >= viewportRect.top + HEADER_HEIGHT
+        && rowRect.bottom <= viewportRect.bottom
+        && rowRect.left >= viewportRect.left
+        && rowRect.right <= viewportRect.right);
+      if (!fullyVisible) {
+        viewport.scrollTop = Math.max(0, HEADER_HEIGHT + targetIndex * ROW_HEIGHT - viewport.clientHeight / 2 + ROW_HEIGHT / 2);
+        updateVirtualRange();
+      }
+      window.requestAnimationFrame(() => {
+        const refreshedRow = document.querySelector<HTMLElement>(`[data-gantt-task-id="${escapeCssSelector(taskId)}"]`);
+        const cell = historyFocusRequest.columnKey
+          ? refreshedRow?.querySelector<HTMLElement>(`[data-gantt-column-key="${escapeCssSelector(historyFocusRequest.columnKey)}"]`)
+          : null;
+        const target = cell ?? refreshedRow;
+        if (!target) return;
+        if (!fullyVisible) target.scrollIntoView({ block: "center", inline: "center" });
+        const className = cell ? "gantt-history-cell-flash" : "gantt-history-row-flash";
+        target.classList.remove(className);
+        void target.offsetWidth;
+        target.classList.add(className);
+        window.setTimeout(() => target.classList.remove(className), 500);
+      });
+    }, 0);
+  }, [collapsedTaskIds, historyFocusRequest, rowByTaskId, rows, updateVirtualRange]);
+
   const resizeColumn = useCallback((key: GanttColumnKey, width: number) => {
     manuallySizedColumns.current.add(key);
     setColumnWidths((current) => ({
@@ -447,18 +611,37 @@ const GanttTimelineContent = ({
     });
   }, [childIdsByParentId, rows, taskDepthById]);
 
-  const getDescendantIds = (taskId: string) => {
-    const result: string[] = [];
-    const stack = [...(childIdsByParentId.get(taskId) ?? [])];
-    while (stack.length > 0) {
-      const childId = stack.shift()!;
-      result.push(childId);
-      stack.push(...(childIdsByParentId.get(childId) ?? []));
-    }
-    return result;
-  };
+  const closeContextMenu = useCallback(() => {
+    setContextMenu(null);
+    setContextSubmenu(null);
+    setInsertCount(1);
+  }, []);
 
-  const closeContextMenu = useCallback(() => setContextMenu(null), []);
+  const clearTaskSelection = useCallback(() => {
+    selectionDragRef.current = null;
+    setExplicitSelectedTaskIds([]);
+    setSelectionAnchorTaskId(null);
+  }, []);
+
+  useEffect(() => {
+    const clearOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      clearTaskSelection();
+      closeContextMenu();
+    };
+    const clearOnBlankPointerDown = (event: globalThis.PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest("[data-gantt-task-id], .gantt-context-menu")) return;
+      clearTaskSelection();
+    };
+    window.addEventListener("keydown", clearOnEscape);
+    document.addEventListener("pointerdown", clearOnBlankPointerDown);
+    return () => {
+      window.removeEventListener("keydown", clearOnEscape);
+      document.removeEventListener("pointerdown", clearOnBlankPointerDown);
+    };
+  }, [clearTaskSelection, closeContextMenu]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -483,9 +666,15 @@ const GanttTimelineContent = ({
   const openTaskContextMenu = (event: ReactMouseEvent, taskId: string) => {
     event.preventDefault();
     event.stopPropagation();
-    const menuWidth = 320;
-    const menuHeight = 300;
+    if (!selectedTaskIds.includes(taskId)) {
+      setExplicitSelectedTaskIds([taskId]);
+      setSelectionAnchorTaskId(taskId);
+    }
+    const menuWidth = 286;
+    const menuHeight = 430;
     const offset = 6;
+    setInsertCount(1);
+    setContextSubmenu(null);
     setContextMenu({
       taskId,
       x: Math.max(8, Math.min(event.clientX + offset, window.innerWidth - menuWidth - 8)),
@@ -493,84 +682,165 @@ const GanttTimelineContent = ({
     });
   };
 
-  const createContextChild = () => {
-    if (!contextTask) return;
-    setDetailsCollapsed(false);
-    setCollapsedTaskIds((current) => {
-      if (!current.has(contextTask.id)) return current;
-      const next = new Set(current);
-      next.delete(contextTask.id);
-      return next;
-    });
-    closeContextMenu();
-    onCreateTask?.(contextTask);
-  };
-
-  const toggleContextSelection = () => {
-    if (!contextTask) return;
-    setSelectionMode(true);
-    toggleTaskSelection(contextTask.id);
-    closeContextMenu();
-  };
-
   const changeContextHierarchy = (direction: GanttHierarchyDirection) => {
-    if (!contextTask || hierarchyChanging) return;
+    if (!contextTask || hierarchyChanging || selectedTaskIds.length === 0) return;
     closeContextMenu();
-    void onChangeHierarchy?.([contextTask.id], direction);
-  };
-
-  const deleteContextTask = () => {
-    if (!contextTask || deletingSelected) return;
-    closeContextMenu();
-    void Promise.resolve(onDeleteSelected?.([contextTask.id]));
-  };
-
-  const isSelectedByAncestor = (taskId: string, selectedIds = selectedTaskIds) => {
-    const selectedSet = new Set(selectedIds);
-    let parentId = rowByTaskId.get(taskId)?.parentId ?? null;
-    while (parentId) {
-      if (selectedSet.has(parentId)) return true;
-      parentId = rowByTaskId.get(parentId)?.parentId ?? null;
-    }
-    return false;
-  };
-
-  const toggleSelectionMode = () => {
-    setSelectionMode((prev) => !prev);
-    setSelectedTaskIds([]);
-  };
-
-  const toggleTaskSelection = (taskId: string) => {
-    if (!rowByTaskId.has(taskId)) return;
-    setSelectedTaskIds((prev) => {
-      if (isSelectedByAncestor(taskId, prev)) return prev;
-      const next = new Set(prev);
-      const linkedIds = [taskId, ...getDescendantIds(taskId)];
-      if (next.has(taskId)) {
-        linkedIds.forEach((id) => next.delete(id));
-      } else {
-        linkedIds.forEach((id) => next.add(id));
-      }
-      return rows.map((row) => row.id).filter((id) => next.has(id));
-    });
-  };
-
-  const deleteSelectedTasks = () => {
-    if (selectedTaskIds.length === 0) return;
-    void Promise.resolve(onDeleteSelected?.(selectedTaskIds)).then(() => {
-      setSelectedTaskIds([]);
-      setSelectionMode(false);
-    });
-  };
-
-  const changeSelectedHierarchy = (direction: GanttHierarchyDirection) => {
-    if (selectedRootTaskIds.length === 0 || hierarchyChanging) return;
     void onChangeHierarchy?.(selectedTaskIds, direction);
   };
 
+  const deleteContextTask = () => {
+    if (!contextTask || deletingSelected || selectedTaskIds.length === 0) return;
+    closeContextMenu();
+    void Promise.resolve(onDeleteSelected?.(selectedTaskIds)).then(() => {
+      setExplicitSelectedTaskIds([]);
+      setSelectionAnchorTaskId(null);
+    });
+  };
+
+  const selectTaskRange = useCallback((fromTaskId: string, toTaskId: string) => {
+    const fromIndex = rows.findIndex((row) => row.id === fromTaskId);
+    const toIndex = rows.findIndex((row) => row.id === toTaskId);
+    if (fromIndex < 0 || toIndex < 0) return;
+    const start = Math.min(fromIndex, toIndex);
+    const end = Math.max(fromIndex, toIndex);
+    setExplicitSelectedTaskIds(rows.slice(start, end + 1).map((row) => row.id));
+  }, [rows]);
+
+  const selectTaskFromSequence = useCallback((
+    taskId: string,
+    index: number,
+    event: Pick<ReactPointerEvent, "metaKey" | "ctrlKey" | "shiftKey">,
+  ) => {
+    if (linkedSelectedTaskIds.includes(taskId) && !explicitSelectedTaskIds.includes(taskId)) return;
+    if (event.shiftKey && selectionAnchorTaskId) {
+      selectTaskRange(selectionAnchorTaskId, taskId);
+      return;
+    }
+    if (event.metaKey || event.ctrlKey) {
+      setExplicitSelectedTaskIds((current) => current.includes(taskId)
+        ? current.filter((id) => id !== taskId)
+        : rows.map((row) => row.id).filter((id) => id === taskId || current.includes(id)));
+      setSelectionAnchorTaskId(taskId);
+      return;
+    }
+    setExplicitSelectedTaskIds([taskId]);
+    setSelectionAnchorTaskId(taskId);
+    selectionDragRef.current = { startIndex: index, active: true };
+  }, [explicitSelectedTaskIds, linkedSelectedTaskIds, rows, selectTaskRange, selectionAnchorTaskId]);
+
+  const extendSequenceSelection = useCallback((index: number, buttons: number) => {
+    const drag = selectionDragRef.current;
+    if (!drag?.active || buttons !== 1) return;
+    const start = Math.min(drag.startIndex, index);
+    const end = Math.max(drag.startIndex, index);
+    setExplicitSelectedTaskIds(rows.slice(start, end + 1).map((row) => row.id));
+  }, [rows]);
+
+  useEffect(() => {
+    const finishSelectionDrag = () => {
+      if (selectionDragRef.current) selectionDragRef.current.active = false;
+    };
+    window.addEventListener("pointerup", finishSelectionDrag);
+    window.addEventListener("pointercancel", finishSelectionDrag);
+    return () => {
+      window.removeEventListener("pointerup", finishSelectionDrag);
+      window.removeEventListener("pointercancel", finishSelectionDrag);
+    };
+  }, []);
+
+  const toggleAllTaskSelection = useCallback(() => {
+    setExplicitSelectedTaskIds((current) => current.length === rows.length ? [] : rows.map((row) => row.id));
+    setSelectionAnchorTaskId(rows[0]?.id ?? null);
+  }, [rows]);
+
+  const performInsert = async (placement: GanttInsertPlacement) => {
+    if (!contextTask || !onInsertTasks) return;
+    const count = Math.max(1, Math.min(100, Math.trunc(insertCount || 1)));
+    if (placement.startsWith("CHILD")) {
+      setDetailsCollapsed(false);
+      setCollapsedTaskIds((current) => {
+        const next = new Set(current);
+        next.delete(contextTask.id);
+        return next;
+      });
+    }
+    closeContextMenu();
+    try {
+      const result = await onInsertTasks(contextTask.id, placement, count);
+      const createdTaskIds = result?.createdTaskIds ?? [];
+      if (createdTaskIds.length > 0) {
+        setExplicitSelectedTaskIds(createdTaskIds);
+        setSelectionAnchorTaskId(createdTaskIds[0]);
+      }
+    } catch (error) {
+      onActionError?.(error instanceof Error ? error.message : "插入任务失败");
+    }
+  };
+
+  const copyOrCutSelection = useCallback((mode: GanttClipboardMode) => {
+    const taskIds = mode === "COPY" ? explicitSelectedTaskIds : selectedRootTaskIds;
+    if (!projectId || taskIds.length === 0) return;
+    setClipboard({ projectId, mode, taskIds });
+    closeContextMenu();
+  }, [closeContextMenu, explicitSelectedTaskIds, projectId, selectedRootTaskIds]);
+
+  const pasteSelection = async (position: GanttPastePosition) => {
+    if (!contextTask || !clipboard || clipboard.projectId !== projectId || !onPasteTasks) return;
+    if (clipboard.mode === "MOVE" && movedClipboardTaskIds.has(contextTask.id)) {
+      onActionError?.("剪切任务不能粘贴到自身或其子任务附近，请选择其他目标行");
+      closeContextMenu();
+      return;
+    }
+    closeContextMenu();
+    try {
+      const result = await onPasteTasks(clipboard.mode, clipboard.taskIds, contextTask.id, position);
+      const taskIds = result?.taskIds ?? [];
+      if (taskIds.length > 0) {
+        setExplicitSelectedTaskIds(taskIds);
+        setSelectionAnchorTaskId(taskIds[0]);
+      }
+      if (clipboard.mode === "MOVE") setClipboard(null);
+    } catch (error) {
+      onActionError?.(error instanceof Error ? error.message : "粘贴任务失败");
+    }
+  };
+
+  useEffect(() => {
+    const handleClipboardShortcut = (event: globalThis.KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const editing = target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || target instanceof HTMLSelectElement
+        || Boolean(target?.isContentEditable);
+      if (editing || (!event.metaKey && !event.ctrlKey)) return;
+      const key = event.key.toLowerCase();
+      if (key === "c" && explicitSelectedTaskIds.length > 0) {
+        event.preventDefault();
+        copyOrCutSelection("COPY");
+      } else if (key === "x" && selectedRootTaskIds.length > 0) {
+        event.preventDefault();
+        copyOrCutSelection("MOVE");
+      } else if (key === "v" && clipboard && selectedTaskIds.length > 0) {
+        event.preventDefault();
+        const taskId = selectedTaskIds[0];
+        const node = document.querySelector<HTMLElement>(`[data-gantt-task-id="${CSS.escape(taskId)}"]`);
+        const rect = node?.getBoundingClientRect();
+        setInsertCount(1);
+        setContextSubmenu("paste");
+        setContextMenu({
+          taskId,
+          x: Math.max(8, Math.min((rect?.left ?? 24) + 36, window.innerWidth - 294)),
+          y: Math.max(8, Math.min((rect?.top ?? 24) + 8, window.innerHeight - 438)),
+        });
+      }
+    };
+    window.addEventListener("keydown", handleClipboardShortcut);
+    return () => window.removeEventListener("keydown", handleClipboardShortcut);
+  }, [clipboard, copyOrCutSelection, explicitSelectedTaskIds, selectedRootTaskIds, selectedTaskIds]);
+
   useEffect(() => {
     if (!flashingTaskId) return;
-    const timer = window.setTimeout(() => setFlashingTaskId(null), 900);
+    const timer = window.setTimeout(() => setFlashingTaskId(null), 500);
     return () => window.clearTimeout(timer);
   }, [flashingTaskId]);
 
@@ -597,7 +867,7 @@ const GanttTimelineContent = ({
     const targetIndexAfterRemoval = nextTaskIds.indexOf(targetTaskId);
     nextTaskIds.splice(position === "after" ? targetIndexAfterRemoval + 1 : targetIndexAfterRemoval, 0, movedTaskId);
     setFlashingTaskId(movedTaskId);
-    void onReorderTasks?.(nextTaskIds);
+    void onReorderTasks?.(nextTaskIds, movedTaskId);
   };
 
   const reorderTaskToEdge = (position: DropPosition) => {
@@ -736,72 +1006,6 @@ const GanttTimelineContent = ({
               </DropdownMenuContent>
             </DropdownMenu>
           )}
-          {canCreate && (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              className="h-7 text-xs"
-              onClick={() => {
-                setDetailsCollapsed(false);
-                onCreateTask?.();
-              }}
-              disabled={creatingParentId === "root"}
-            >
-              新增任务
-            </Button>
-          )}
-          {(canEdit || canDelete) && (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              className="h-7 text-xs"
-              onClick={toggleSelectionMode}
-              disabled={deletingSelected || hierarchyChanging}
-            >
-              {selectionMode ? "取消选择" : "选择"}
-            </Button>
-          )}
-          {canEdit && selectionMode && (
-            <>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-7 gap-1 px-2 text-xs"
-                onClick={() => changeSelectedHierarchy("OUTDENT")}
-                disabled={!canOutdentSelection || hierarchyChanging}
-                title="将所选任务及其全部子任务上移一个层级"
-              >
-                <IndentDecrease className="size-3.5" />
-                上移层级
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-7 gap-1 px-2 text-xs"
-                onClick={() => changeSelectedHierarchy("INDENT")}
-                disabled={!canIndentSelection || hierarchyChanging}
-                title="将所选任务及其全部子任务下移到上一条同级任务下"
-              >
-                <IndentIncrease className="size-3.5" />
-                层级下移
-              </Button>
-            </>
-          )}
-          {canDelete && selectionMode && (
-            <Button
-              size="sm"
-              variant="destructive"
-              className="h-7 text-xs"
-              onClick={deleteSelectedTasks}
-              disabled={selectedCount === 0 || deletingSelected}
-            >
-              {deletingSelected ? "删除中..." : `删除 ${selectedCount}`}
-            </Button>
-          )}
         </div>
       </div>
 
@@ -818,9 +1022,11 @@ const GanttTimelineContent = ({
         >
         <div className="grid min-w-max" style={{ gridTemplateColumns: `${leftWidth}px ${timelineWidth}px` }}>
           <TaskGridHeader
+            allSelected={rows.length > 0 && explicitSelectedTaskIds.length === rows.length}
             columnWidths={columnWidths}
             onAutoFitColumn={autoFitColumn}
             onResizeColumn={resizeColumn}
+            onToggleAllSelection={toggleAllTaskSelection}
             visibleColumnKeys={visibleColumnKeys}
           />
           <TimelineHeader
@@ -857,9 +1063,7 @@ const GanttTimelineContent = ({
             {virtualRows.map(({ row, index }) => (
                 <EditableTaskRow
                   key={row.id}
-                  canCreate={canCreate}
                   canEdit={canEdit}
-                  creatingChild={creatingParentId === row.id}
                   dragged={draggedTaskId === row.id}
                   dropPosition={taskDropTarget?.id === row.id && draggedTaskId !== row.id ? taskDropTarget.position : null}
                   flashing={flashingTaskId === row.id}
@@ -878,29 +1082,21 @@ const GanttTimelineContent = ({
                   onDragStart={() => setDraggedTaskId(row.id)}
                   onDrop={() => reorderTask(row.id, taskDropTarget?.id === row.id ? taskDropTarget.position : "before")}
                   onOpenContextMenu={(event) => openTaskContextMenu(event, row.id)}
-                  onStartChild={() => {
-                    setDetailsCollapsed(false);
-                    setCollapsedTaskIds((current) => {
-                      if (!current.has(row.id)) return current;
-                      const next = new Set(current);
-                      next.delete(row.id);
-                      return next;
-                    });
-                    onCreateTask?.(row);
-                  }}
                   hasChildren={childIdsByParentId.has(row.id)}
                   hierarchyCollapsed={collapsedTaskIds.has(row.id)}
                   onToggleHierarchy={() => toggleTaskCollapsed(row.id)}
-                  onToggleSelected={() => toggleTaskSelection(row.id)}
+                  onSequencePointerDown={(event) => selectTaskFromSequence(row.id, index, event)}
+                  onSequencePointerEnter={(event) => extendSequenceSelection(index, event.buttons)}
                   onUpdateTask={onUpdateTask}
                   projectMembers={projectMembers}
                   calendarMode={calendarMode}
                   predecessorOptions={tasks}
                   row={row}
                   taskDepth={taskDepthById.get(row.id) ?? 0}
-                  selected={selectedTaskIds.includes(row.id)}
-                  selectionLocked={isSelectedByAncestor(row.id)}
-                  selectionMode={selectionMode}
+                  explicitSelected={explicitSelectedTaskIds.includes(row.id)}
+                  linkedSelected={linkedSelectedTaskIds.includes(row.id)}
+                  selectionStart={explicitSelectedTaskIdSet.has(row.id) && !explicitSelectedTaskIdSet.has(visibleRows[index - 1]?.id ?? "")}
+                  selectionEnd={explicitSelectedTaskIdSet.has(row.id) && !explicitSelectedTaskIdSet.has(visibleRows[index + 1]?.id ?? "")}
                   columnWidths={columnWidths}
                   portalContainer={portalContainer}
                   visibleColumnKeys={visibleColumnKeys}
@@ -1024,7 +1220,10 @@ const GanttTimelineContent = ({
           <div
             role="menu"
             aria-label="甘特任务右键菜单"
-            className="gantt-context-menu fixed z-[130] overflow-hidden rounded-md border border-border bg-card text-card-foreground shadow-[var(--app-shadow-popover)]"
+            className={cn(
+              "gantt-context-menu fixed z-[130] rounded-md border border-border bg-card text-card-foreground shadow-[var(--app-shadow-popover)]",
+              contextMenu.x > window.innerWidth / 2 && "gantt-context-menu-open-left",
+            )}
             style={{ left: contextMenu.x, top: contextMenu.y }}
             onClick={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
@@ -1032,60 +1231,134 @@ const GanttTimelineContent = ({
           >
             <div className="gantt-context-menu-header">
               <div className="truncate font-medium text-foreground">{contextTask.taskCode || "未编号"} · {contextTask.taskName || "未命名任务"}</div>
-              <div className="mt-0.5 truncate">{getDescendantIds(contextTask.id).length > 0 ? "含 " + getDescendantIds(contextTask.id).length + " 个子任务" : "无子任务"}</div>
+              <div className="mt-0.5 truncate">已选 {explicitSelectedTaskIds.length} 项，共处理 {selectedCount} 行</div>
             </div>
-            {(canCreate || canEdit || canDelete) && (
-              <div className={cn("gantt-context-menu-grid", (!canCreate || !(canEdit || canDelete)) && "gantt-context-menu-grid-single")}>
-                {canCreate && (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="gantt-context-menu-item"
-                    disabled={creatingParentId === contextTask.id}
-                    onClick={createContextChild}
-                  >
-                    <Plus className="size-4 shrink-0" />
-                    <span>新增子任务</span>
-                  </button>
-                )}
-                {(canEdit || canDelete) && (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="gantt-context-menu-item"
-                    onClick={toggleContextSelection}
-                  >
-                    <ListChecks className="size-4 shrink-0" />
-                    <span>{selectedTaskIds.includes(contextTask.id) ? "取消选择" : "选择任务"}</span>
-                  </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="gantt-context-menu-item"
+              disabled={!canEdit || selectedRootTaskIds.length === 0}
+              onClick={() => copyOrCutSelection("MOVE")}
+            >
+              <Scissors className="size-4 shrink-0" />
+              <span>剪切</span>
+              <kbd>Ctrl/Cmd+X</kbd>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="gantt-context-menu-item"
+              disabled={!canEdit || explicitSelectedTaskIds.length === 0}
+              onClick={() => copyOrCutSelection("COPY")}
+            >
+              <Copy className="size-4 shrink-0" />
+              <span>复制</span>
+              <kbd>Ctrl/Cmd+C</kbd>
+            </button>
+            <div
+              className="gantt-context-menu-submenu-anchor"
+              onMouseEnter={() => setContextSubmenu("paste")}
+              onMouseLeave={() => setContextSubmenu((current) => current === "paste" ? null : current)}
+            >
+              <button
+                type="button"
+                role="menuitem"
+                className="gantt-context-menu-item"
+                disabled={!canEdit || !clipboard || clipboard.projectId !== projectId}
+                onClick={() => setContextSubmenu("paste")}
+              >
+                <ClipboardPaste className="size-4 shrink-0" />
+                <span>粘贴</span>
+                <MenuChevronRight className="ml-auto size-3.5" />
+              </button>
+              {contextSubmenu === "paste" && clipboard?.projectId === projectId && (
+                <div className="gantt-context-submenu" role="menu" aria-label="粘贴位置">
+                  <button type="button" role="menuitem" className="gantt-context-menu-item" disabled={invalidMovePasteTarget} onClick={() => void pasteSelection("BEFORE")}>粘贴到行上方</button>
+                  <button type="button" role="menuitem" className="gantt-context-menu-item" disabled={invalidMovePasteTarget} onClick={() => void pasteSelection("AFTER")}>粘贴到行下方</button>
+                  {invalidMovePasteTarget && <div className="gantt-context-menu-hint">请选择被剪切分支以外的目标行</div>}
+                </div>
+              )}
+            </div>
+            <div className="gantt-context-menu-separator" />
+            {canCreate && (
+              <div
+                className="gantt-context-menu-submenu-anchor"
+                onMouseEnter={() => {
+                  if (contextSubmenu !== "insert") setInsertCount(1);
+                  setContextSubmenu("insert");
+                }}
+                onMouseLeave={() => setContextSubmenu((current) => current === "insert" ? null : current)}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="gantt-context-menu-item"
+                  onClick={() => {
+                    if (contextSubmenu !== "insert") setInsertCount(1);
+                    setContextSubmenu("insert");
+                  }}
+                >
+                  <Plus className="size-4 shrink-0" />
+                  <span>插入</span>
+                  <MenuChevronRight className="ml-auto size-3.5" />
+                </button>
+                {contextSubmenu === "insert" && (
+                  <div className="gantt-context-submenu gantt-context-submenu-wide" role="menu" aria-label="插入任务">
+                    {([
+                      ["SIBLING_BEFORE", "在上方插入", "个同级任务"],
+                      ["SIBLING_AFTER", "在下方插入", "个同级任务"],
+                      ["CHILD_FIRST", "在上方插入", "个子任务"],
+                      ["CHILD_LAST", "在下方插入", "个子任务"],
+                    ] as const).map(([placement, prefix, suffix]) => (
+                      <button
+                        key={placement}
+                        type="button"
+                        role="menuitem"
+                        className="gantt-context-menu-item gantt-context-insert-item"
+                        onClick={() => void performInsert(placement)}
+                      >
+                        <span>{prefix}</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={100}
+                          step={1}
+                          value={insertCount}
+                          aria-label={`${prefix}${suffix}数量`}
+                          onClick={(event) => event.stopPropagation()}
+                          onKeyDown={(event) => event.stopPropagation()}
+                          onChange={(event) => setInsertCount(Math.max(0, Math.min(100, Math.trunc(Number(event.target.value) || 0))))}
+                        />
+                        <span>{suffix}</span>
+                      </button>
+                    ))}
+                  </div>
                 )}
               </div>
             )}
             {canEdit && (
               <>
                 <div className="gantt-context-menu-separator" />
-                <div className="gantt-context-menu-grid">
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="gantt-context-menu-item"
-                    disabled={!canOutdentContextTask || hierarchyChanging}
-                    onClick={() => changeContextHierarchy("OUTDENT")}
-                  >
-                    <IndentDecrease className="size-4 shrink-0" />
-                    <span>上移层级</span>
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="gantt-context-menu-item"
-                    disabled={!canIndentContextTask || hierarchyChanging}
-                    onClick={() => changeContextHierarchy("INDENT")}
-                  >
-                    <IndentIncrease className="size-4 shrink-0" />
-                    <span>层级下移</span>
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="gantt-context-menu-item"
+                  disabled={!canOutdentSelection || hierarchyChanging}
+                  onClick={() => changeContextHierarchy("OUTDENT")}
+                >
+                  <IndentDecrease className="size-4 shrink-0" />
+                  <span>上移层级</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="gantt-context-menu-item"
+                  disabled={!canIndentSelection || hierarchyChanging}
+                  onClick={() => changeContextHierarchy("INDENT")}
+                >
+                  <IndentIncrease className="size-4 shrink-0" />
+                  <span>层级下移</span>
+                </button>
               </>
             )}
             {canDelete && (
@@ -1099,7 +1372,7 @@ const GanttTimelineContent = ({
                   onClick={deleteContextTask}
                 >
                   <Trash2 className="size-4 shrink-0" />
-                  <span>删除任务（含子任务）</span>
+                  <span>删除</span>
                 </button>
               </>
             )}
@@ -1221,30 +1494,17 @@ const EmptyGanttTimeline = ({
             onToggle={onToggleColumn}
             portalContainer={portalContainer}
           />
-          {canCreate && (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              className="h-7 text-xs"
-              onClick={() => {
-                setDetailsCollapsed(false);
-                onCreateTask?.();
-              }}
-              disabled={creatingParentId === "root"}
-            >
-              新增任务
-            </Button>
-          )}
         </div>
       </div>
 
       <div className={cn("gantt-scroll-viewport overflow-x-scroll overflow-y-auto", fullScreen && "min-h-0 flex-1")}>
         <div className="grid min-w-max" style={{ gridTemplateColumns: `${leftWidth}px ${timelineWidth}px` }}>
           <TaskGridHeader
+            allSelected={false}
             columnWidths={columnWidths}
             onAutoFitColumn={onAutoFitColumn}
             onResizeColumn={onResizeColumn}
+            onToggleAllSelection={() => undefined}
             visibleColumnKeys={visibleColumnKeys}
           />
           <TimelineHeader
@@ -1260,7 +1520,24 @@ const EmptyGanttTimeline = ({
               onToggle={() => setDetailsCollapsed((prev) => !prev)}
               className="-right-2 top-1/2 -translate-y-1/2"
             />
-            {emptyText}
+            <div className="flex flex-col items-center gap-2">
+              <span>{emptyText}</span>
+              {canCreate && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs"
+                  onClick={() => {
+                    setDetailsCollapsed(false);
+                    onCreateTask?.();
+                  }}
+                  disabled={creatingParentId === "root"}
+                >
+                  创建首个任务
+                </Button>
+              )}
+            </div>
           </div>
           <div className="relative" style={{ width: timelineWidth, height: bodyHeight }}>
             <svg aria-hidden="true" className="absolute inset-0" height={bodyHeight} width={timelineWidth}>
@@ -1329,14 +1606,18 @@ const ColumnResizeHandle = ({
 };
 
 const TaskGridHeader = ({
+  allSelected,
   columnWidths,
   onAutoFitColumn,
   onResizeColumn,
+  onToggleAllSelection,
   visibleColumnKeys,
 }: {
+  allSelected: boolean;
   columnWidths: GanttColumnWidths;
   onAutoFitColumn: (key: GanttColumnKey) => void;
   onResizeColumn: (key: GanttColumnKey, width: number) => void;
+  onToggleAllSelection: () => void;
   visibleColumnKeys: GanttColumnKey[];
 }) => {
   return (
@@ -1349,9 +1630,28 @@ const TaskGridHeader = ({
       }}
     >
       {visibleColumnKeys.map((key) => (
-        <div key={key} className="group/column relative flex h-full min-w-0 items-center px-2">
-          <span className="whitespace-nowrap">{GANTT_COLUMN_LABELS[key]}</span>
-          {key !== "drag" && (
+        <div
+          key={key}
+          data-gantt-column-key={key}
+          className={cn("group/column relative flex h-full min-w-0 items-center", key === "sequence" ? "px-0" : "px-2")}
+        >
+          {key === "sequence" ? (
+            <button
+              type="button"
+              className={cn(
+                "flex !h-full !min-h-0 w-full items-center justify-center whitespace-nowrap !rounded-none !border-0 !bg-transparent !p-0 text-[11px] !shadow-none transition-colors hover:!bg-transparent hover:text-primary active:!transform-none",
+                allSelected && "text-primary",
+              )}
+              onClick={onToggleAllSelection}
+              aria-label={allSelected ? "取消选择全部任务" : "选择全部任务"}
+              title={allSelected ? "取消全选" : "全选（包含折叠任务）"}
+            >
+              {GANTT_COLUMN_LABELS[key]}
+            </button>
+          ) : (
+            <span className="whitespace-nowrap">{GANTT_COLUMN_LABELS[key]}</span>
+          )}
+          {key !== "drag" && key !== "sequence" && (
             <ColumnResizeHandle
               columnKey={key}
               onAutoFit={onAutoFitColumn}
@@ -1473,9 +1773,7 @@ const ActualWorkHoursInput = ({
 
 const EditableTaskRow = ({
   calendarMode,
-  canCreate,
   canEdit,
-  creatingChild,
   dragged,
   dropPosition,
   flashing,
@@ -1488,26 +1786,25 @@ const EditableTaskRow = ({
   onDragStart,
   onDrop,
   onOpenContextMenu,
-  onStartChild,
+  onSequencePointerDown,
+  onSequencePointerEnter,
   onToggleHierarchy,
-  onToggleSelected,
   onUpdateTask,
   predecessorOptions,
   projectMembers,
   row,
   taskDepth,
   visualTop,
-  selected,
-  selectionLocked,
-  selectionMode,
+  explicitSelected,
+  linkedSelected,
+  selectionStart,
+  selectionEnd,
   columnWidths,
   portalContainer,
   visibleColumnKeys,
 }: {
   calendarMode: GanttCalendarMode;
-  canCreate: boolean;
   canEdit: boolean;
-  creatingChild: boolean;
   dragged: boolean;
   dropPosition: DropPosition | null;
   flashing: boolean;
@@ -1520,18 +1817,19 @@ const EditableTaskRow = ({
   onDragStart: () => void;
   onDrop: () => void;
   onOpenContextMenu: (event: ReactMouseEvent) => void;
-  onStartChild?: () => void;
+  onSequencePointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => void;
+  onSequencePointerEnter: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   onToggleHierarchy: () => void;
-  onToggleSelected: () => void;
-  onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft) => void | Promise<void>;
+  onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft, columnKey?: string) => void | Promise<void>;
   predecessorOptions: ProjectGanttTask[];
   projectMembers: ProjectMember[];
   row: ReturnType<typeof buildGanttRows>[number];
   taskDepth: number;
   visualTop: number;
-  selected: boolean;
-  selectionLocked: boolean;
-  selectionMode: boolean;
+  explicitSelected: boolean;
+  linkedSelected: boolean;
+  selectionStart: boolean;
+  selectionEnd: boolean;
   columnWidths: GanttColumnWidths;
   portalContainer?: HTMLElement | null;
   visibleColumnKeys: GanttColumnKey[];
@@ -1556,9 +1854,9 @@ const EditableTaskRow = ({
     updateDraft("taskName", value.replace(/【关键路径】/g, "").replace(/【关键路径/g, "").replace(/关键路径】/g, ""));
   };
 
-  const commitDraft = () => {
+  const commitDraft = (columnKey?: GanttColumnKey) => {
     if (!canEdit || taskDraftEquals(row, draft, calendarMode)) return;
-    void onUpdateTask?.(row, draft);
+    void onUpdateTask?.(row, draft, columnKey);
   };
 
   const withPlannedStart = (current: GanttTaskDraft, value: string): GanttTaskDraft => ({
@@ -1598,11 +1896,12 @@ const EditableTaskRow = ({
   const commitDateDraft = (
     builder: (current: GanttTaskDraft, value: string) => GanttTaskDraft,
     value: string,
+    columnKey: GanttColumnKey,
   ) => {
     const nextDraft = builder(draft, value);
     setDraft(nextDraft);
     if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
-      void onUpdateTask?.(row, nextDraft);
+      void onUpdateTask?.(row, nextDraft, columnKey);
     }
   };
 
@@ -1622,13 +1921,15 @@ const EditableTaskRow = ({
 
   return (
     <div
+      data-gantt-task-id={row.id}
       className={cn(
         "group relative box-border grid cursor-default items-center border-b border-border text-xs transition-[background,box-shadow,transform] duration-150",
         "bg-[var(--gantt-level-row)] hover:bg-[var(--gantt-level-hover)]",
         row.isCritical
           ? "shadow-[inset_3px_0_0_hsl(var(--destructive))]"
           : "shadow-[inset_2px_0_0_var(--gantt-level-accent)]",
-        selected && "!bg-primary/15 hover:!bg-primary/20",
+        explicitSelected && "!bg-sky-500/12 hover:!bg-sky-500/16",
+        linkedSelected && "!bg-sky-500/8 hover:!bg-sky-500/12",
         dragged && "scale-[0.995] opacity-45 shadow-lg",
         dropPosition && "!bg-primary/10"
       )}
@@ -1656,6 +1957,17 @@ const EditableTaskRow = ({
           className="pointer-events-none absolute inset-0 z-10 bg-sky-400/30 animate-[gantt-row-drop-flash_0.5s_ease-out_forwards]"
         />
       )}
+      {explicitSelected && (
+        <span
+          aria-hidden="true"
+          data-gantt-selection-outline="true"
+          className={cn(
+            "pointer-events-none absolute inset-0 z-[12] border-x-2 border-sky-400/90",
+            selectionStart && "border-t-2",
+            selectionEnd && "border-b-2",
+          )}
+        />
+      )}
       {dropPosition && !dragged && (
         <span
           className={cn(
@@ -1664,7 +1976,28 @@ const EditableTaskRow = ({
           )}
         />
       )}
+      <button
+        type="button"
+        data-gantt-column-key="sequence"
+        className={cn(
+          "flex !h-full !min-h-0 w-full select-none items-center justify-center !rounded-none !border-0 !bg-transparent !p-0 font-mono text-[11px] tabular-nums text-muted-foreground !shadow-none transition-colors hover:!bg-transparent active:!transform-none",
+          explicitSelected && "font-semibold text-primary",
+          linkedSelected && "cursor-not-allowed text-primary/55",
+        )}
+        onPointerDown={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onSequencePointerDown(event);
+        }}
+        onPointerEnter={onSequencePointerEnter}
+        aria-label={`选择第 ${index + 1} 行`}
+        aria-pressed={explicitSelected || linkedSelected}
+        title={linkedSelected ? "由父任务联动选择" : "点击选择，Shift 连选，Ctrl/Cmd 多选"}
+      >
+        {index + 1}
+      </button>
       <span
+        data-gantt-column-key="drag"
         role="button"
         tabIndex={canEdit ? 0 : -1}
         draggable={canEdit}
@@ -1690,18 +2023,7 @@ const EditableTaskRow = ({
         <GripVertical className="h-3.5 w-3.5 transition-transform group-hover:scale-105" strokeWidth={1.7} />
         <span className="sr-only">拖拽排序</span>
       </span>
-      <div className="relative flex min-w-0 items-center gap-1 px-2" style={{ paddingLeft: `${8 + taskDepth * 10}px` }}>
-        {selectionMode && (
-          <input
-            type="checkbox"
-            checked={selected}
-            disabled={selectionLocked}
-            onChange={onToggleSelected}
-            className="h-3.5 w-3.5 rounded border-border bg-background disabled:cursor-not-allowed disabled:opacity-60"
-            onClick={(event) => event.stopPropagation()}
-            title={selectionLocked ? "父任务已选中，子任务随父任务联动选择" : undefined}
-          />
-        )}
+      <div data-gantt-column-key="taskCode" className="relative flex min-w-0 items-center gap-1 px-2" style={{ paddingLeft: `${8 + taskDepth * 10}px` }}>
         {hasChildren ? (
           <button
             type="button"
@@ -1723,35 +2045,12 @@ const EditableTaskRow = ({
         >
           {row.taskCode || `Task${index + 1}`}
         </span>
-        {canCreate && (
-          <button
-            type="button"
-            className="absolute right-0 top-1/2 inline-flex h-5 -translate-y-1/2 items-center gap-0.5 rounded border border-border/70 bg-card/95 px-1.5 text-[10px] text-muted-foreground opacity-0 shadow-sm transition hover:border-primary/50 hover:text-primary focus-visible:opacity-100 group-hover:opacity-100"
-            onClick={(event) => {
-              event.stopPropagation();
-              onStartChild?.();
-            }}
-            disabled={creatingChild}
-            title={creatingChild ? "创建中..." : "新增子任务"}
-            aria-label={creatingChild ? "创建中..." : "新增子任务"}
-            style={{
-              height: 20,
-              minHeight: 20,
-              padding: "0 6px",
-              fontSize: 10,
-              lineHeight: 1,
-              transform: "translateY(-50%)",
-            }}
-          >
-            <CornerDownRight className="h-3 w-3" />
-            <span>子任务</span>
-          </button>
-        )}
       </div>
       {isColumnVisible("taskCategory") && (
         <Input
+          data-gantt-column-key="taskCategory"
           value={draft.taskCategory}
-          onBlur={commitDraft}
+          onBlur={() => commitDraft("taskCategory")}
           onChange={(event) => updateDraft("taskCategory", event.target.value)}
           onKeyDown={handleKeyDown}
           className={inlineFieldClass}
@@ -1759,10 +2058,10 @@ const EditableTaskRow = ({
           placeholder="任务类别"
         />
       )}
-      <div className="relative min-w-0">
+      <div data-gantt-column-key="taskName" className="relative min-w-0">
         <Input
           value={draft.taskName}
-          onBlur={commitDraft}
+          onBlur={() => commitDraft("taskName")}
           onChange={(event) => updateTaskName(event.target.value)}
           onKeyDown={handleKeyDown}
           className={cn(inlineFieldClass, "font-medium", row.isCritical && "pr-[76px] text-destructive")}
@@ -1780,10 +2079,10 @@ const EditableTaskRow = ({
       {isColumnVisible("taskDescription") && (draft.taskDescription.trim() ? (
         <Tooltip>
           <TooltipTrigger asChild>
-            <div className="min-w-0">
+            <div data-gantt-column-key="taskDescription" className="min-w-0">
               <Input
                 value={draft.taskDescription}
-                onBlur={commitDraft}
+                onBlur={() => commitDraft("taskDescription")}
                 onChange={(event) => updateDraft("taskDescription", event.target.value)}
                 onKeyDown={handleKeyDown}
                 className={inlineFieldClass}
@@ -1799,8 +2098,9 @@ const EditableTaskRow = ({
         </Tooltip>
       ) : (
         <Input
+          data-gantt-column-key="taskDescription"
           value={draft.taskDescription}
-          onBlur={commitDraft}
+          onBlur={() => commitDraft("taskDescription")}
           onChange={(event) => updateDraft("taskDescription", event.target.value)}
           onKeyDown={handleKeyDown}
           className={inlineFieldClass}
@@ -1811,13 +2111,14 @@ const EditableTaskRow = ({
       ))}
       {isColumnVisible("owner") && (
           <Select
+            data-gantt-column-key="owner"
             value={draft.ownerMemberId ?? ""}
             aria-label="负责人"
             onChange={(event) => {
               const nextDraft = { ...draft, ownerMemberId: event.target.value || null };
               setDraft(nextDraft);
               if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
-                void onUpdateTask?.(row, nextDraft);
+                void onUpdateTask?.(row, nextDraft, "owner");
               }
             }}
             className={inlineSelectClass}
@@ -1834,6 +2135,7 @@ const EditableTaskRow = ({
           </Select>
       )}
       {isColumnVisible("durationDays") && (
+        <div data-gantt-column-key="durationDays">
           <DurationDaysInput
             value={draft.durationDays}
             disabled={!canEdit || isSaving}
@@ -1846,53 +2148,63 @@ const EditableTaskRow = ({
               };
               setDraft(nextDraft);
               if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
-                void onUpdateTask?.(row, nextDraft);
+                void onUpdateTask?.(row, nextDraft, "durationDays");
               }
             }}
           />
+        </div>
       )}
       {isColumnVisible("startDate") && (
+        <div data-gantt-column-key="startDate">
           <GanttDateField
             value={draft.startDate}
             onChange={(value) => updateDateDraft(withPlannedStart, value)}
-            onCommit={(value) => commitDateDraft(withPlannedStart, value)}
+            onCommit={(value) => commitDateDraft(withPlannedStart, value, "startDate")}
             disabled={!canEdit || isSaving}
             ariaLabel="计划开始"
             required
           />
+        </div>
       )}
       {isColumnVisible("endDate") && (
+        <div data-gantt-column-key="endDate">
           <GanttDateField
             value={draft.endDate}
             onChange={(value) => updateDateDraft(withPlannedEnd, value)}
-            onCommit={(value) => commitDateDraft(withPlannedEnd, value)}
+            onCommit={(value) => commitDateDraft(withPlannedEnd, value, "endDate")}
             disabled={!canEdit || isSaving}
             ariaLabel="计划完成"
             min={draft.startDate}
             required={draft.durationDays > 0}
           />
+        </div>
       )}
       {isColumnVisible("actualStartDate") && (
+        <div data-gantt-column-key="actualStartDate">
           <GanttDateField
             value={draft.actualStartDate}
             onChange={(value) => updateDateDraft(withActualStart, value)}
-            onCommit={(value) => commitDateDraft(withActualStart, value)}
+            onCommit={(value) => commitDateDraft(withActualStart, value, "actualStartDate")}
             disabled={!canEdit || isSaving}
             ariaLabel="实际开始"
           />
+        </div>
       )}
       {isColumnVisible("actualEndDate") && (
+        <div data-gantt-column-key="actualEndDate">
           <GanttDateField
             value={draft.actualEndDate}
             onChange={(value) => updateDateDraft(withActualEnd, value)}
-            onCommit={(value) => commitDateDraft(withActualEnd, value)}
+            onCommit={(value) => commitDateDraft(withActualEnd, value, "actualEndDate")}
             disabled={!canEdit || isSaving}
             ariaLabel="实际完成"
             min={draft.actualStartDate || undefined}
           />
+        </div>
       )}
       {isColumnVisible("estimatedWorkHours") && (
           <Input
+            data-gantt-column-key="estimatedWorkHours"
             type="text"
             value={draft.estimatedWorkHours > 0 ? roundGanttHours(draft.estimatedWorkHours).toFixed(2) : "--"}
             className={durationFieldClass}
@@ -1902,6 +2214,7 @@ const EditableTaskRow = ({
           />
       )}
       {isColumnVisible("actualWorkHours") && (
+        <div data-gantt-column-key="actualWorkHours">
           <ActualWorkHoursInput
             value={draft.actualWorkHours}
             disabled={!canEdit || isSaving}
@@ -1909,19 +2222,20 @@ const EditableTaskRow = ({
               const nextDraft = { ...draft, actualWorkHours: value };
               setDraft(nextDraft);
               if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
-                void onUpdateTask?.(row, nextDraft);
+                void onUpdateTask?.(row, nextDraft, "actualWorkHours");
               }
             }}
           />
+        </div>
       )}
       {isColumnVisible("progress") && (
-          <div className="flex min-w-0 items-center gap-1">
+          <div data-gantt-column-key="progress" className="flex min-w-0 items-center gap-1">
             <Input
               type="text"
               inputMode="numeric"
               pattern="[0-9]*"
               value={draft.progress}
-              onBlur={commitDraft}
+              onBlur={() => commitDraft("progress")}
               onChange={(event) => {
                 const digits = event.target.value.replace(/\D/g, "");
                 updateDraft("progress", digits ? Math.min(100, Number(digits)) : 0);
@@ -1935,13 +2249,14 @@ const EditableTaskRow = ({
           </div>
       )}
       {isColumnVisible("predecessor") && (
+        <div data-gantt-column-key="predecessor">
           <PredecessorSelect
             value={draft.predecessorTaskIds}
             onChange={(predecessorTaskIds) => {
               const nextDraft = { ...draft, predecessorTaskIds };
               setDraft(nextDraft);
               if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
-                void onUpdateTask?.(row, nextDraft);
+                void onUpdateTask?.(row, nextDraft, "predecessor");
               }
             }}
             options={predecessorOptions}
@@ -1949,11 +2264,13 @@ const EditableTaskRow = ({
             disabled={!canEdit || isSaving}
             portalContainer={portalContainer}
           />
+        </div>
       )}
       {isColumnVisible("remark") && (
         <Input
+          data-gantt-column-key="remark"
           value={draft.remark}
-          onBlur={commitDraft}
+          onBlur={() => commitDraft("remark")}
           onChange={(event) => updateDraft("remark", event.target.value)}
           onKeyDown={handleKeyDown}
           className={inlineFieldClass}

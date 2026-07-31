@@ -31,6 +31,10 @@ describe("assistant action intent parsing", () => {
       .toEqual({ matterCode: "Matter007", status: "IN_PROGRESS", progress: 35 });
     expect(parseWeeklyItemUpdateIntent("将 Matter007 完成度设置为 35%"))
       .toEqual({ matterCode: "Matter007", status: undefined, progress: 35 });
+    expect(parseWeeklyItemUpdateIntent("将 Matter007 状态改为已完成"))
+      .toEqual({ matterCode: "Matter007", status: "DONE", progress: undefined });
+    expect(parseWeeklyItemUpdateIntent("将 Matter007 状态改为已取消"))
+      .toBeNull();
     expect(parseWeeklyItemUpdateIntent("查看 Matter007"))
       .toBeNull();
   });

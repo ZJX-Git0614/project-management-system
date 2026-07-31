@@ -1,4 +1,5 @@
 export type GanttColumnKey =
+  | "sequence"
   | "drag"
   | "taskCode"
   | "taskCategory"
@@ -42,6 +43,7 @@ export interface GanttColumnLayoutTask {
 }
 
 export const GANTT_EXPANDED_COLUMN_KEYS: GanttColumnKey[] = [
+  "sequence",
   "drag",
   "taskCode",
   "taskCategory",
@@ -60,15 +62,16 @@ export const GANTT_EXPANDED_COLUMN_KEYS: GanttColumnKey[] = [
   "remark",
 ];
 
-export const GANTT_COLLAPSED_COLUMN_KEYS: GanttColumnKey[] = ["drag", "taskCode", "taskName"];
+export const GANTT_COLLAPSED_COLUMN_KEYS: GanttColumnKey[] = ["sequence", "drag", "taskCode", "taskName"];
 
-export const GANTT_PINNED_COLUMN_KEYS: GanttColumnKey[] = ["drag", "taskCode", "taskName"];
+export const GANTT_PINNED_COLUMN_KEYS: GanttColumnKey[] = ["sequence", "drag", "taskCode", "taskName"];
 
 export const GANTT_HIDEABLE_COLUMN_KEYS: GanttColumnKey[] = GANTT_EXPANDED_COLUMN_KEYS.filter(
   (key) => !GANTT_PINNED_COLUMN_KEYS.includes(key),
 );
 
 export const GANTT_COLUMN_LABELS: Record<GanttColumnKey, string> = {
+  sequence: "序号",
   drag: "",
   taskCode: "任务ID",
   taskCategory: "任务类别",
@@ -88,6 +91,7 @@ export const GANTT_COLUMN_LABELS: Record<GanttColumnKey, string> = {
 };
 
 export const GANTT_COLUMN_MIN_WIDTHS: GanttColumnWidths = {
+  sequence: 50,
   drag: 28,
   taskCode: 112,
   taskCategory: 86,
@@ -107,6 +111,7 @@ export const GANTT_COLUMN_MIN_WIDTHS: GanttColumnWidths = {
 };
 
 const GANTT_COLUMN_MAX_WIDTHS: GanttColumnWidths = {
+  sequence: 72,
   drag: 28,
   taskCode: 720,
   taskCategory: 520,
@@ -161,9 +166,10 @@ export const fitGanttColumnWidth = (
 ) => {
   const headerWidth = textWidth(GANTT_COLUMN_LABELS[key]) + 30;
   const codeById = new Map(tasks.map((task) => [task.id, task.taskCode || task.id]));
-  const values = tasks.map((task) => {
+  const values = tasks.map((task, index) => {
     const depth = depths.get(task.id) ?? 0;
     switch (key) {
+      case "sequence": return textWidth(index + 1) + 26;
       case "drag": return 28;
       case "taskCode": return textWidth(task.taskCode || task.id) + depth * 10 + 92;
       case "taskCategory": return textWidth(task.taskCategory) + 28;

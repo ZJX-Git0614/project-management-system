@@ -5,6 +5,8 @@ PACKAGE_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 IMAGE_FILE="$PACKAGE_DIR/images/ceastar-pms-linux-amd64.tar"
 IMAGE_NAME_FILE="$PACKAGE_DIR/image-name.txt"
 CHECKSUM_FILE="$PACKAGE_DIR/image.sha256"
+DATA_UPDATE_FILE="$PACKAGE_DIR/database/update.sql"
+DATA_CHECKSUM_FILE="$PACKAGE_DIR/database/update.sha256"
 STATE_FILE_NAME=".ceastar-fnos-update.state"
 
 fail() {
@@ -83,6 +85,14 @@ ACTUAL_CHECKSUM="$(checksum "$IMAGE_FILE" | tr 'A-F' 'a-f')"
 [ -n "$NEW_IMAGE" ] || fail "image-name.txt is empty."
 [ "$EXPECTED_CHECKSUM" = "$ACTUAL_CHECKSUM" ] || fail "The update image checksum does not match. Copy the complete update package again."
 
+if [ -f "$DATA_UPDATE_FILE" ] || [ -f "$DATA_CHECKSUM_FILE" ]; then
+  [ -f "$DATA_UPDATE_FILE" ] || fail "Missing database/update.sql. Copy the complete update package again."
+  [ -f "$DATA_CHECKSUM_FILE" ] || fail "Missing database/update.sha256. Copy the complete update package again."
+  EXPECTED_DATA_CHECKSUM="$(awk '{print $1}' "$DATA_CHECKSUM_FILE" | tr 'A-F' 'a-f')"
+  ACTUAL_DATA_CHECKSUM="$(checksum "$DATA_UPDATE_FILE" | tr 'A-F' 'a-f')"
+  [ "$EXPECTED_DATA_CHECKSUM" = "$ACTUAL_DATA_CHECKSUM" ] || fail "The database update checksum does not match. Copy the complete update package again."
+fi
+
 DEPLOY_DIR="$(find_deployment_dir "${1:-}")"
 cd "$DEPLOY_DIR"
 [ -f .env ] || fail "The deployment .env file is missing."
@@ -102,6 +112,16 @@ docker image inspect "$NEW_IMAGE" >/dev/null 2>&1 || fail "The update image was 
 IMAGE_ARCH="$(docker image inspect --format '{{.Architecture}}' "$NEW_IMAGE")"
 [ "$IMAGE_ARCH" = "amd64" ] || fail "The loaded image architecture is $IMAGE_ARCH, expected amd64."
 
+if [ -f "$DATA_UPDATE_FILE" ]; then
+  printf 'Stopping the application briefly for the guarded database data update...\n'
+  docker compose stop pms >/dev/null
+  if ! docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < "$DATA_UPDATE_FILE"; then
+    docker compose start pms >/dev/null 2>&1 || true
+    fail "The database data update failed. The existing application was restarted and the pre-update backup was preserved."
+  fi
+  printf 'Database data update completed.\n'
+fi
+
 cp docker-compose.yml "docker-compose.yml.pre-update"
 if grep -q 'image:.*ceastar-project-management:' docker-compose.yml; then
   sed -i.bak 's|^[[:space:]]*image:.*ceastar-project-management:.*|    image: ${PMS_APP_IMAGE}|' docker-compose.yml
@@ -114,6 +134,7 @@ cat > "$STATE_FILE_NAME" <<EOF
 OLD_IMAGE=${OLD_IMAGE}
 NEW_IMAGE=${NEW_IMAGE}
 UPDATED_AT=$(date '+%Y-%m-%d %H:%M:%S')
+DATA_UPDATE=$([ -f "$DATA_UPDATE_FILE" ] && printf 'applied-or-already-present' || printf 'none')
 EOF
 
 printf 'Recreating only the Ceastar PMS application container...\n'

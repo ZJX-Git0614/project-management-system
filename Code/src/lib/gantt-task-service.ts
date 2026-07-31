@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import {
@@ -30,6 +30,58 @@ const ganttTaskInclude = {
 } satisfies Prisma.ProjectGanttTaskInclude;
 
 type GanttTaskRecord = Prisma.ProjectGanttTaskGetPayload<{ include: typeof ganttTaskInclude }>;
+type GanttWriteClient = Prisma.TransactionClient | typeof prisma;
+
+const bulkUpdateGanttTaskCodes = async (
+  client: GanttWriteClient,
+  rows: Array<{ id: string; taskCode: string }>,
+) => {
+  if (rows.length === 0) return;
+  await client.$executeRaw(Prisma.sql`
+    UPDATE "ProjectGanttTask" AS target
+    SET "taskCode" = source."taskCode",
+        "updatedAt" = NOW()
+    FROM (VALUES ${Prisma.join(rows.map((row) => Prisma.sql`(${row.id}::text, ${row.taskCode}::text)`) )})
+      AS source("id", "taskCode")
+    WHERE target."id" = source."id"
+  `);
+};
+
+const bulkUpdateGanttSortOrders = async (
+  client: GanttWriteClient,
+  rows: Array<{ id: string; sortOrder: number }>,
+) => {
+  if (rows.length === 0) return;
+  await client.$executeRaw(Prisma.sql`
+    UPDATE "ProjectGanttTask" AS target
+    SET "sortOrder" = source."sortOrder",
+        "updatedAt" = NOW()
+    FROM (VALUES ${Prisma.join(rows.map((row) => Prisma.sql`(${row.id}::text, ${row.sortOrder}::integer)`) )})
+      AS source("id", "sortOrder")
+    WHERE target."id" = source."id"
+  `);
+};
+
+const bulkUpdateGanttStructure = async (
+  client: GanttWriteClient,
+  rows: Array<{ id: string; parentId: string | null; sortOrder: number; taskCategory: string }>,
+) => {
+  if (rows.length === 0) return;
+  await client.$executeRaw(Prisma.sql`
+    UPDATE "ProjectGanttTask" AS target
+    SET "parentId" = source."parentId",
+        "sortOrder" = source."sortOrder",
+        "taskCategory" = source."taskCategory",
+        "updatedAt" = NOW()
+    FROM (VALUES ${Prisma.join(rows.map((row) => Prisma.sql`(
+      ${row.id}::text,
+      ${row.parentId}::text,
+      ${row.sortOrder}::integer,
+      ${row.taskCategory}::text
+    )`) )}) AS source("id", "parentId", "sortOrder", "taskCategory")
+    WHERE target."id" = source."id"
+  `);
+};
 
 export const serializeGanttTask = (task: GanttTaskRecord) => {
   const predecessorTaskIds = task.predecessorDependencies.map((dependency) => dependency.predecessorTaskId);
@@ -58,21 +110,13 @@ export const getOrderedGanttTasks = async (projectId: string) => {
     include: ganttTaskInclude,
   });
   const normalizedTasks = assignMissingGanttTaskCodes(tasks);
+  const originalById = new Map(tasks.map((task) => [task.id, task]));
   const taskCodeUpdates = normalizedTasks.filter((task) => {
-    const original = tasks.find((item) => item.id === task.id);
+    const original = originalById.get(task.id);
     return original && original.taskCode !== task.taskCode;
   });
 
-  if (taskCodeUpdates.length > 0) {
-    await prisma.$transaction(
-      taskCodeUpdates.map((task) => (
-        prisma.projectGanttTask.update({
-          where: { id: task.id },
-          data: { taskCode: task.taskCode },
-        })
-      ))
-    );
-  }
+  await bulkUpdateGanttTaskCodes(prisma, taskCodeUpdates);
 
   return orderGanttTasksByHierarchy(normalizedTasks);
 };
@@ -196,21 +240,13 @@ export const renumberProjectGanttTaskCodes = async (projectId: string) => {
     orderBy: [{ sortOrder: "asc" }, { startDate: "asc" }, { createdAt: "asc" }],
   });
   const renumberedTasks = renumberGanttTaskCodes(tasks);
+  const originalById = new Map(tasks.map((task) => [task.id, task]));
   const updates = renumberedTasks.filter((task) => {
-    const original = tasks.find((item) => item.id === task.id);
+    const original = originalById.get(task.id);
     return original && original.taskCode !== task.taskCode;
   });
 
-  if (updates.length === 0) return;
-
-  await prisma.$transaction(
-    updates.map((task) => (
-      prisma.projectGanttTask.update({
-        where: { id: task.id },
-        data: { taskCode: task.taskCode },
-      })
-    ))
-  );
+  await bulkUpdateGanttTaskCodes(prisma, updates);
 };
 
 type GanttTaskHierarchyRecord = {
@@ -326,6 +362,19 @@ type GanttDeletionSnapshot = {
   summary: GanttDeletionSummary;
 };
 
+type GanttPlanHistorySnapshot = {
+  version: 1;
+  project: { ganttCalendarMode: string };
+  tasks: Array<Record<string, unknown>>;
+  dependencies: Array<Record<string, unknown>>;
+  weeklyLinks: Array<{ id: string; ganttTaskId: string | null; taskName: string }>;
+  riskLinks: Array<{ id: string; ganttTaskId: string | null; linkedItemName: string }>;
+  scheduleMetadata: Record<string, unknown> | null;
+};
+
+const GANTT_HISTORY_SOURCE_PREFIX = "__gantt_history__";
+const GANTT_HISTORY_SNAPSHOT_LIMIT = 110;
+
 const taskScalarSelect = {
   id: true,
   createdAt: true,
@@ -378,6 +427,269 @@ const dependencyScalarSelect = {
   lag: true,
   lagFormat: true,
 } satisfies Prisma.ProjectGanttDependencySelect;
+
+const scheduleMetadataScalarSelect = {
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  projectId: true,
+  sourceFileName: true,
+  projectSettings: true,
+  calendars: true,
+  resources: true,
+  assignments: true,
+  taskUidMap: true,
+} satisfies Prisma.ProjectScheduleImportMetadataSelect;
+
+const snapshotTaskDepth = (task: Record<string, unknown>, byId: Map<string, Record<string, unknown>>) => {
+  let depth = 0;
+  let parentId = typeof task.parentId === "string" ? task.parentId : null;
+  const visited = new Set<string>();
+  while (parentId && byId.has(parentId) && !visited.has(parentId)) {
+    visited.add(parentId);
+    depth += 1;
+    parentId = typeof byId.get(parentId)?.parentId === "string" ? String(byId.get(parentId)?.parentId) : null;
+  }
+  return depth;
+};
+
+const taskSnapshotCreateData = (
+  rawTask: Record<string, unknown>,
+  projectId: string,
+  validOwnerIds: ReadonlySet<string>,
+  validBudgetIds: ReadonlySet<string>,
+  validParentIds: ReadonlySet<string>,
+): Prisma.ProjectGanttTaskCreateManyInput => {
+  const rawParentId = typeof rawTask.parentId === "string" ? rawTask.parentId : null;
+  const rawOwnerMemberId = typeof rawTask.ownerMemberId === "string" ? rawTask.ownerMemberId : null;
+  const rawBudgetItemId = typeof rawTask.budgetItemId === "string" ? rawTask.budgetItemId : null;
+  return {
+    id: String(rawTask.id),
+    createdAt: new Date(String(rawTask.createdAt)),
+    updatedAt: new Date(String(rawTask.updatedAt)),
+    projectId,
+    parentId: rawParentId && validParentIds.has(rawParentId) ? rawParentId : null,
+    ownerMemberId: rawOwnerMemberId && validOwnerIds.has(rawOwnerMemberId) ? rawOwnerMemberId : null,
+    taskCode: String(rawTask.taskCode ?? ""),
+    taskCategory: String(rawTask.taskCategory ?? ""),
+    taskName: String(rawTask.taskName ?? ""),
+    taskDescription: String(rawTask.taskDescription ?? ""),
+    startDate: String(rawTask.startDate ?? ""),
+    finishDate: String(rawTask.finishDate ?? ""),
+    durationDays: Number(rawTask.durationDays ?? 0),
+    durationMinutes: Number(rawTask.durationMinutes ?? 0),
+    durationFormat: Number(rawTask.durationFormat ?? 7),
+    actualStartDate: String(rawTask.actualStartDate ?? ""),
+    actualEndDate: String(rawTask.actualEndDate ?? ""),
+    estimatedWorkHours: Number(rawTask.estimatedWorkHours ?? 0),
+    actualWorkHours: Number(rawTask.actualWorkHours ?? 0),
+    progress: Number(rawTask.progress ?? 0),
+    predecessorTask: String(rawTask.predecessorTask ?? ""),
+    taskMode: String(rawTask.taskMode ?? "AUTO"),
+    isMilestone: Boolean(rawTask.isMilestone ?? false),
+    externalUid: String(rawTask.externalUid ?? ""),
+    wbsCode: String(rawTask.wbsCode ?? ""),
+    outlineNumber: String(rawTask.outlineNumber ?? ""),
+    calendarUid: String(rawTask.calendarUid ?? ""),
+    constraintType: rawTask.constraintType === null || rawTask.constraintType === undefined ? null : Number(rawTask.constraintType),
+    constraintDate: String(rawTask.constraintDate ?? ""),
+    baselineStartDate: String(rawTask.baselineStartDate ?? ""),
+    baselineFinishDate: String(rawTask.baselineFinishDate ?? ""),
+    baselineCost: Number(rawTask.baselineCost ?? 0),
+    budgetAtCompletion: Number(rawTask.budgetAtCompletion ?? 0),
+    actualCost: Number(rawTask.actualCost ?? 0),
+    budgetItemId: rawBudgetItemId && validBudgetIds.has(rawBudgetItemId) ? rawBudgetItemId : null,
+    baselines: (rawTask.baselines ?? []) as Prisma.InputJsonValue,
+    remark: String(rawTask.remark ?? ""),
+    sortOrder: Number(rawTask.sortOrder ?? 0),
+  };
+};
+
+export const captureProjectGanttHistorySnapshot = async (params: {
+  projectId: string;
+  sessionId: string;
+  label: string;
+  operator: string;
+}) => {
+  const sessionId = params.sessionId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80);
+  if (!sessionId) throw new Error("操作历史会话无效");
+
+  // There is no concurrent plan editing yet, so parallel reads are both safe and
+  // substantially faster than serializing six full-plan queries on one transaction connection.
+  const [project, tasks, dependencies, weeklyLinks, riskLinks, scheduleMetadata] = await Promise.all([
+    prisma.project.findUnique({ where: { id: params.projectId }, select: { ganttCalendarMode: true } }),
+    prisma.projectGanttTask.findMany({ where: { projectId: params.projectId }, orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }], select: taskScalarSelect }),
+    prisma.projectGanttDependency.findMany({ where: { projectId: params.projectId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], select: dependencyScalarSelect }),
+    prisma.weeklyItem.findMany({ where: { projectId: params.projectId, ganttTaskId: { not: null } }, select: { id: true, ganttTaskId: true, taskName: true } }),
+    prisma.riskRegisterItem.findMany({ where: { projectId: params.projectId, ganttTaskId: { not: null } }, select: { id: true, ganttTaskId: true, linkedItemName: true } }),
+    prisma.projectScheduleImportMetadata.findUnique({ where: { projectId: params.projectId }, select: scheduleMetadataScalarSelect }),
+  ]);
+  if (!project) throw new Error("项目不存在");
+  const payload: GanttPlanHistorySnapshot = {
+    version: 1,
+    project,
+    tasks,
+    dependencies,
+    weeklyLinks,
+    riskLinks,
+    scheduleMetadata,
+  };
+  const snapshot = await prisma.projectScheduleSnapshot.create({
+    data: {
+      projectId: params.projectId,
+      sourceFileName: `${GANTT_HISTORY_SOURCE_PREFIX}:${sessionId}:${params.label.slice(0, 80)}`,
+      schemaVersion: "gantt-history-1",
+      normalizedJson: JSON.stringify(payload),
+      createdBy: params.operator,
+    },
+    select: { id: true, createdAt: true },
+  });
+
+  const staleSnapshots = await prisma.projectScheduleSnapshot.findMany({
+    where: {
+      projectId: params.projectId,
+      sourceFileName: { startsWith: `${GANTT_HISTORY_SOURCE_PREFIX}:${sessionId}:` },
+    },
+    orderBy: { createdAt: "desc" },
+    skip: GANTT_HISTORY_SNAPSHOT_LIMIT,
+    select: { id: true },
+  });
+  if (staleSnapshots.length > 0) {
+    await prisma.projectScheduleSnapshot.deleteMany({ where: { id: { in: staleSnapshots.map((item) => item.id) } } });
+  }
+  return { snapshotId: snapshot.id, createdAt: snapshot.createdAt.toISOString() };
+};
+
+export const restoreProjectGanttHistorySnapshot = async (params: {
+  projectId: string;
+  snapshotId: string;
+  operator: string;
+  actionLabel: string;
+}) => {
+  const snapshotRecord = await prisma.projectScheduleSnapshot.findFirst({
+    where: {
+      id: params.snapshotId,
+      projectId: params.projectId,
+      schemaVersion: "gantt-history-1",
+      sourceFileName: { startsWith: `${GANTT_HISTORY_SOURCE_PREFIX}:` },
+    },
+  });
+  if (!snapshotRecord) throw new Error("撤销快照不存在或已过期");
+  const snapshot = parseJson<GanttPlanHistorySnapshot | null>(snapshotRecord.normalizedJson, null);
+  if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.tasks) || !Array.isArray(snapshot.dependencies)) {
+    throw new Error("撤销快照内容不可用");
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    const project = await tx.project.findUniqueOrThrow({
+      where: { id: params.projectId },
+      select: { name: true, code: true },
+    });
+    const ownerIds = [...new Set(snapshot.tasks.map((task) => typeof task.ownerMemberId === "string" ? task.ownerMemberId : "").filter(Boolean))];
+    const budgetIds = [...new Set(snapshot.tasks.map((task) => typeof task.budgetItemId === "string" ? task.budgetItemId : "").filter(Boolean))];
+    const [owners, budgetItems] = await Promise.all([
+      ownerIds.length ? tx.projectMember.findMany({ where: { projectId: params.projectId, id: { in: ownerIds } }, select: { id: true } }) : Promise.resolve([]),
+      budgetIds.length ? tx.projectBudgetItem.findMany({ where: { projectId: params.projectId, id: { in: budgetIds } }, select: { id: true } }) : Promise.resolve([]),
+    ]);
+    const validOwnerIds = new Set(owners.map((item) => item.id));
+    const validBudgetIds = new Set(budgetItems.map((item) => item.id));
+    const taskById = new Map(snapshot.tasks.map((task) => [String(task.id), task]));
+    const taskIds = new Set(taskById.keys());
+    const tasksByDepth = new Map<number, Array<Record<string, unknown>>>();
+    snapshot.tasks.forEach((task) => {
+      const depth = snapshotTaskDepth(task, taskById);
+      tasksByDepth.set(depth, [...(tasksByDepth.get(depth) ?? []), task]);
+    });
+
+    await Promise.all([
+      tx.weeklyItem.updateMany({ where: { projectId: params.projectId, ganttTaskId: { not: null } }, data: { ganttTaskId: null, taskName: "" } }),
+      tx.riskRegisterItem.updateMany({ where: { projectId: params.projectId, ganttTaskId: { not: null } }, data: { ganttTaskId: null, linkedItemName: "" } }),
+    ]);
+    await tx.projectGanttDependency.deleteMany({ where: { projectId: params.projectId } });
+    await tx.projectGanttTask.deleteMany({ where: { projectId: params.projectId } });
+
+    for (const depth of [...tasksByDepth.keys()].sort((left, right) => left - right)) {
+      const rows = tasksByDepth.get(depth) ?? [];
+      if (rows.length === 0) continue;
+      await tx.projectGanttTask.createMany({
+        data: rows.map((task) => taskSnapshotCreateData(task, params.projectId, validOwnerIds, validBudgetIds, taskIds)),
+      });
+    }
+
+    const dependencies = snapshot.dependencies
+      .filter((dependency) => taskIds.has(String(dependency.predecessorTaskId)) && taskIds.has(String(dependency.successorTaskId)))
+      .map((dependency): Prisma.ProjectGanttDependencyCreateManyInput => ({
+        id: String(dependency.id),
+        createdAt: new Date(String(dependency.createdAt)),
+        updatedAt: new Date(String(dependency.updatedAt)),
+        projectId: params.projectId,
+        predecessorTaskId: String(dependency.predecessorTaskId),
+        successorTaskId: String(dependency.successorTaskId),
+        type: Number(dependency.type ?? 1),
+        lag: Number(dependency.lag ?? 0),
+        lagFormat: Number(dependency.lagFormat ?? 7),
+      }));
+    if (dependencies.length > 0) await tx.projectGanttDependency.createMany({ data: dependencies });
+
+    for (const link of snapshot.weeklyLinks) {
+      if (!link.ganttTaskId || !taskIds.has(link.ganttTaskId)) continue;
+      await tx.weeklyItem.updateMany({ where: { id: link.id, projectId: params.projectId }, data: { ganttTaskId: link.ganttTaskId, taskName: link.taskName } });
+    }
+    for (const link of snapshot.riskLinks) {
+      if (!link.ganttTaskId || !taskIds.has(link.ganttTaskId)) continue;
+      await tx.riskRegisterItem.updateMany({ where: { id: link.id, projectId: params.projectId }, data: { ganttTaskId: link.ganttTaskId, linkedItemName: link.linkedItemName } });
+    }
+
+    if (snapshot.scheduleMetadata) {
+      const metadata = snapshot.scheduleMetadata;
+      await tx.projectScheduleImportMetadata.upsert({
+        where: { projectId: params.projectId },
+        create: {
+          id: String(metadata.id),
+          createdAt: new Date(String(metadata.createdAt)),
+          updatedAt: new Date(String(metadata.updatedAt)),
+          projectId: params.projectId,
+          sourceFileName: String(metadata.sourceFileName ?? ""),
+          projectSettings: (metadata.projectSettings ?? {}) as Prisma.InputJsonValue,
+          calendars: (metadata.calendars ?? {}) as Prisma.InputJsonValue,
+          resources: (metadata.resources ?? {}) as Prisma.InputJsonValue,
+          assignments: (metadata.assignments ?? {}) as Prisma.InputJsonValue,
+          taskUidMap: (metadata.taskUidMap ?? {}) as Prisma.InputJsonValue,
+        },
+        update: {
+          sourceFileName: String(metadata.sourceFileName ?? ""),
+          projectSettings: (metadata.projectSettings ?? {}) as Prisma.InputJsonValue,
+          calendars: (metadata.calendars ?? {}) as Prisma.InputJsonValue,
+          resources: (metadata.resources ?? {}) as Prisma.InputJsonValue,
+          assignments: (metadata.assignments ?? {}) as Prisma.InputJsonValue,
+          taskUidMap: (metadata.taskUidMap ?? {}) as Prisma.InputJsonValue,
+        },
+      });
+    } else {
+      await tx.projectScheduleImportMetadata.deleteMany({ where: { projectId: params.projectId } });
+    }
+
+    await tx.project.update({
+      where: { id: params.projectId },
+      data: {
+        ganttCalendarMode: snapshot.project.ganttCalendarMode,
+        ganttRevision: { increment: 1 },
+      },
+    });
+    const detail = `${params.actionLabel}：按操作快照恢复 ${snapshot.tasks.length} 条甘特任务和 ${dependencies.length} 条依赖。`;
+    await Promise.all([
+      tx.operationHistory.create({
+        data: { projectId: params.projectId, entityType: "PROJECT_GANTT_TASK", entityId: params.snapshotId, actionType: "RESTORE", operator: params.operator, detail },
+      }),
+      tx.adminAuditLog.create({
+        data: { actionType: "RESTORE_GANTT_HISTORY", operator: params.operator, projectId: params.projectId, projectName: project.name || project.code, detail },
+      }),
+    ]);
+    return { restoredTaskCount: snapshot.tasks.length, restoredDependencyCount: dependencies.length };
+  }, { timeout: 30_000, maxWait: 10_000 });
+
+  return { message: params.actionLabel, ...result };
+};
 
 export const markProjectGanttChanged = async (projectId: string) => {
   await prisma.project.update({
@@ -963,7 +1275,7 @@ export const changeProjectGanttTaskHierarchy = async (params: {
   }
 
   const changed = changeGanttTaskHierarchy(tasks, params.taskIds, params.direction);
-  const synchronizedTasks = synchronizeGanttTaskCategories(changed.tasks, changed.movedTaskIds);
+  const synchronizedTasks = synchronizeGanttTaskCategories(changed.tasks, changed.changedTasks.map((task) => task.id));
   const originalById = new Map(tasks.map((task) => [task.id, task]));
   const updates = synchronizedTasks.filter((task) => {
     const original = originalById.get(task.id);
@@ -985,6 +1297,10 @@ export const changeProjectGanttTaskHierarchy = async (params: {
           taskCategory: task.taskCategory,
         },
       })),
+      prisma.project.update({
+        where: { id: params.projectId },
+        data: { ganttRevision: { increment: 1 } },
+      }),
       prisma.operationHistory.create({
         data: {
           projectId: params.projectId,
@@ -1003,4 +1319,281 @@ export const changeProjectGanttTaskHierarchy = async (params: {
     tasks: (await getOrderedGanttTasks(params.projectId)).map(serializeGanttTask),
     movedTaskIds: changed.movedTaskIds,
   };
+};
+
+export type GanttInsertPlacement = "SIBLING_BEFORE" | "SIBLING_AFTER" | "CHILD_FIRST" | "CHILD_LAST";
+export type GanttPastePosition = "BEFORE" | "AFTER";
+
+const normalizeStructureTaskIds = (taskIds: string[]) => [...new Set(taskIds.map((id) => String(id || "").trim()).filter(Boolean))];
+
+const selectedStructureRoots = (
+  tasks: Array<{ id: string; parentId: string | null; sortOrder: number; createdAt?: Date | string }>,
+  selectedTaskIds: string[],
+) => {
+  const selected = new Set(selectedTaskIds);
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  return orderGanttTasksByHierarchy(tasks).filter((task) => {
+    if (!selected.has(task.id)) return false;
+    let parentId = task.parentId;
+    while (parentId) {
+      if (selected.has(parentId)) return false;
+      parentId = byId.get(parentId)?.parentId ?? null;
+    }
+    return true;
+  }).map((task) => task.id);
+};
+
+const cloneGanttTaskData = (
+  task: Prisma.ProjectGanttTaskGetPayload<{ select: typeof taskScalarSelect }>,
+  parentId: string | null,
+  sortOrder: number,
+): Prisma.ProjectGanttTaskUncheckedCreateInput => ({
+  projectId: task.projectId,
+  parentId,
+  ownerMemberId: task.ownerMemberId,
+  taskCode: "",
+  taskCategory: task.taskCategory,
+  taskName: task.taskName,
+  taskDescription: task.taskDescription,
+  startDate: task.startDate,
+  finishDate: task.finishDate,
+  durationDays: task.durationDays,
+  durationMinutes: task.durationMinutes,
+  durationFormat: task.durationFormat,
+  actualStartDate: task.actualStartDate,
+  actualEndDate: task.actualEndDate,
+  estimatedWorkHours: task.estimatedWorkHours,
+  actualWorkHours: task.actualWorkHours,
+  progress: task.progress,
+  predecessorTask: "",
+  taskMode: task.taskMode,
+  isMilestone: task.isMilestone,
+  externalUid: "",
+  wbsCode: "",
+  outlineNumber: "",
+  calendarUid: task.calendarUid,
+  constraintType: task.constraintType,
+  constraintDate: task.constraintDate,
+  baselineStartDate: task.baselineStartDate,
+  baselineFinishDate: task.baselineFinishDate,
+  baselineCost: task.baselineCost,
+  budgetAtCompletion: task.budgetAtCompletion,
+  actualCost: task.actualCost,
+  budgetItemId: task.budgetItemId,
+  baselines: task.baselines as Prisma.InputJsonValue,
+  remark: task.remark,
+  sortOrder,
+});
+
+export const insertProjectGanttTasks = async (params: {
+  projectId: string;
+  anchorTaskId: string;
+  placement: GanttInsertPlacement;
+  count: number;
+  operator: string;
+}) => {
+  const count = Math.max(1, Math.min(100, Math.floor(params.count)));
+  const createdTaskIds = await prisma.$transaction(async (tx) => {
+    const anchor = await tx.projectGanttTask.findFirst({ where: { id: params.anchorTaskId, projectId: params.projectId } });
+    if (!anchor) throw new Error("插入位置对应的任务不存在");
+    const childPlacement = params.placement === "CHILD_FIRST" || params.placement === "CHILD_LAST";
+    const parentId = childPlacement ? anchor.id : anchor.parentId;
+    const siblings = await tx.projectGanttTask.findMany({
+      where: { projectId: params.projectId, parentId },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+      select: { id: true, sortOrder: true },
+    });
+    const anchorIndex = childPlacement ? -1 : siblings.findIndex((task) => task.id === anchor.id);
+    const insertIndex = params.placement === "SIBLING_BEFORE"
+      ? Math.max(0, anchorIndex)
+      : params.placement === "SIBLING_AFTER"
+        ? Math.max(0, anchorIndex + 1)
+        : params.placement === "CHILD_FIRST"
+          ? 0
+          : siblings.length;
+    const createdTasks = await tx.projectGanttTask.createManyAndReturn({
+      data: Array.from({ length: count }, (_, index) => ({
+          projectId: params.projectId,
+          parentId,
+          taskCode: "",
+          taskCategory: anchor.taskCategory,
+          taskName: "",
+          taskDescription: "",
+          startDate: "",
+          finishDate: "",
+          durationDays: 0,
+          durationMinutes: 0,
+          estimatedWorkHours: 0,
+          actualWorkHours: 0,
+          progress: 0,
+          predecessorTask: "",
+          remark: "",
+          sortOrder: insertIndex + index + 1,
+      })),
+      select: { id: true, sortOrder: true },
+    });
+    const ids = createdTasks
+      .sort((left, right) => left.sortOrder - right.sortOrder)
+      .map((task) => task.id);
+    const orderedSiblingIds = siblings.map((task) => task.id);
+    orderedSiblingIds.splice(insertIndex, 0, ...ids);
+    await bulkUpdateGanttSortOrders(tx, orderedSiblingIds.map((taskId, index) => ({ id: taskId, sortOrder: index + 1 })));
+    await Promise.all([
+      tx.project.update({ where: { id: params.projectId }, data: { ganttRevision: { increment: 1 } } }),
+      tx.operationHistory.create({
+        data: {
+          projectId: params.projectId,
+          entityType: "PROJECT_GANTT_TASK",
+          entityId: ids.join(","),
+          actionType: "CREATE",
+          operator: params.operator,
+          detail: `在任务 ${anchor.taskCode || anchor.taskName || anchor.id} ${params.placement.includes("BEFORE") || params.placement === "CHILD_FIRST" ? "上方" : "下方"}批量插入 ${count} 条${childPlacement ? "子任务" : "同级任务"}`,
+        },
+      }),
+    ]);
+    return ids;
+  }, { timeout: 30_000, maxWait: 10_000 });
+  await renumberProjectGanttTaskCodes(params.projectId);
+  return { tasks: (await getOrderedGanttTasks(params.projectId)).map(serializeGanttTask), createdTaskIds };
+};
+
+export const copyProjectGanttTasks = async (params: {
+  projectId: string;
+  sourceTaskIds: string[];
+  anchorTaskId: string;
+  position: GanttPastePosition;
+  operator: string;
+}) => {
+  const sourceTaskIds = normalizeStructureTaskIds(params.sourceTaskIds);
+  if (sourceTaskIds.length === 0) throw new Error("请先复制需要粘贴的任务");
+  const createdTaskIds = await prisma.$transaction(async (tx) => {
+    const [anchor, allTasks, selectedTasks, dependencies] = await Promise.all([
+      tx.projectGanttTask.findFirst({ where: { id: params.anchorTaskId, projectId: params.projectId } }),
+      tx.projectGanttTask.findMany({ where: { projectId: params.projectId }, select: { id: true, parentId: true, sortOrder: true, createdAt: true } }),
+      tx.projectGanttTask.findMany({ where: { projectId: params.projectId, id: { in: sourceTaskIds } }, select: taskScalarSelect }),
+      tx.projectGanttDependency.findMany({ where: { projectId: params.projectId, successorTaskId: { in: sourceTaskIds } }, select: dependencyScalarSelect }),
+    ]);
+    if (!anchor) throw new Error("粘贴位置对应的任务不存在");
+    if (selectedTasks.length !== sourceTaskIds.length) throw new Error("部分待复制任务不存在");
+    const selectedSet = new Set(sourceTaskIds);
+    const sourceById = new Map(selectedTasks.map((task) => [task.id, task]));
+    const orderedSource = orderGanttTasksByHierarchy(allTasks).filter((task) => selectedSet.has(task.id)).map((task) => sourceById.get(task.id)!);
+    const roots = selectedStructureRoots(allTasks, sourceTaskIds);
+    const rootSet = new Set(roots);
+    const targetParentId = anchor.parentId;
+    const targetSiblings = orderGanttTasksByHierarchy(allTasks).filter((task) => (task.parentId ?? null) === (targetParentId ?? null)).map((task) => task.id);
+    const targetIndex = targetSiblings.indexOf(anchor.id);
+    const insertIndex = params.position === "BEFORE" ? targetIndex : targetIndex + 1;
+    const newIdByOldId = new Map<string, string>();
+    const rootIds: string[] = [];
+    const childCursor = new Map<string, number>();
+    for (const source of orderedSource) {
+      const copiedParentId = source.parentId && selectedSet.has(source.parentId) ? newIdByOldId.get(source.parentId) ?? null : targetParentId;
+      const rootIndex = rootSet.has(source.id) ? rootIds.length : 0;
+      const nextChildOrder = copiedParentId && !rootSet.has(source.id) ? (childCursor.get(copiedParentId) ?? 0) + 1 : 0;
+      if (copiedParentId && !rootSet.has(source.id)) childCursor.set(copiedParentId, nextChildOrder);
+      const created = await tx.projectGanttTask.create({
+        data: cloneGanttTaskData(source, copiedParentId, rootSet.has(source.id) ? insertIndex + rootIndex + 1 : nextChildOrder),
+      });
+      newIdByOldId.set(source.id, created.id);
+      if (rootSet.has(source.id)) rootIds.push(created.id);
+    }
+    targetSiblings.splice(insertIndex, 0, ...rootIds);
+    await bulkUpdateGanttSortOrders(tx, targetSiblings.map((taskId, index) => ({ id: taskId, sortOrder: index + 1 })));
+    const dependencyRows = dependencies.map((dependency) => ({
+      projectId: params.projectId,
+      predecessorTaskId: newIdByOldId.get(dependency.predecessorTaskId) ?? dependency.predecessorTaskId,
+      successorTaskId: newIdByOldId.get(dependency.successorTaskId)!,
+      type: dependency.type,
+      lag: dependency.lag,
+      lagFormat: dependency.lagFormat,
+    })).filter((dependency) => dependency.successorTaskId && dependency.predecessorTaskId !== dependency.successorTaskId);
+    if (dependencyRows.length > 0) await tx.projectGanttDependency.createMany({ data: dependencyRows, skipDuplicates: true });
+    const ids = orderedSource.map((task) => newIdByOldId.get(task.id)!).filter(Boolean);
+    await Promise.all([
+      tx.project.update({ where: { id: params.projectId }, data: { ganttRevision: { increment: 1 } } }),
+      tx.operationHistory.create({
+        data: { projectId: params.projectId, entityType: "PROJECT_GANTT_TASK", entityId: ids.join(","), actionType: "CREATE", operator: params.operator, detail: `复制并粘贴 ${ids.length} 条甘特任务` },
+      }),
+    ]);
+    return ids;
+  }, { timeout: 30_000, maxWait: 10_000 });
+  await renumberProjectGanttTaskCodes(params.projectId);
+  await recalculateProjectGanttSchedule(params.projectId);
+  return { tasks: (await getOrderedGanttTasks(params.projectId)).map(serializeGanttTask), createdTaskIds };
+};
+
+export const moveProjectGanttTaskBranches = async (params: {
+  projectId: string;
+  sourceTaskIds: string[];
+  anchorTaskId: string;
+  position: GanttPastePosition;
+  operator: string;
+}) => {
+  const sourceTaskIds = normalizeStructureTaskIds(params.sourceTaskIds);
+  if (sourceTaskIds.length === 0) throw new Error("请先剪切需要移动的任务");
+  const movedTaskIds = await prisma.$transaction(async (tx) => {
+    const tasks = await tx.projectGanttTask.findMany({
+      where: { projectId: params.projectId },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+      select: { id: true, parentId: true, sortOrder: true, createdAt: true, taskCategory: true, taskName: true },
+    });
+    const taskById = new Map(tasks.map((task) => [task.id, task]));
+    const anchor = taskById.get(params.anchorTaskId);
+    if (!anchor) throw new Error("粘贴位置对应的任务不存在");
+    const roots = selectedStructureRoots(tasks, sourceTaskIds);
+    if (roots.length === 0) throw new Error("待移动任务不存在");
+    const childIds = new Map<string, string[]>();
+    tasks.forEach((task) => task.parentId && childIds.set(task.parentId, [...(childIds.get(task.parentId) ?? []), task.id]));
+    const movedSet = new Set<string>();
+    const collect = (taskId: string) => {
+      if (movedSet.has(taskId)) return;
+      movedSet.add(taskId);
+      (childIds.get(taskId) ?? []).forEach(collect);
+    };
+    roots.forEach(collect);
+    if (movedSet.has(anchor.id)) throw new Error("不能将剪切任务粘贴到自身或其子任务附近");
+
+    const updated = new Map(tasks.map((task) => [task.id, { ...task }]));
+    const targetParentId = anchor.parentId;
+    const affectedParentIds = new Set<string | null>([targetParentId]);
+    roots.forEach((rootId) => affectedParentIds.add(updated.get(rootId)?.parentId ?? null));
+    const rootSet = new Set(roots);
+    const rootsInOrder = orderGanttTasksByHierarchy(tasks).filter((task) => rootSet.has(task.id)).map((task) => task.id);
+    for (const parentId of affectedParentIds) {
+      const siblings = orderGanttTasksByHierarchy(tasks)
+        .filter((task) => (task.parentId ?? null) === (parentId ?? null) && !rootSet.has(task.id))
+        .map((task) => task.id);
+      if ((parentId ?? null) === (targetParentId ?? null)) {
+        const anchorIndex = siblings.indexOf(anchor.id);
+        const insertIndex = params.position === "BEFORE" ? anchorIndex : anchorIndex + 1;
+        siblings.splice(insertIndex, 0, ...rootsInOrder);
+      }
+      siblings.forEach((taskId, index) => {
+        const task = updated.get(taskId);
+        if (task) updated.set(taskId, { ...task, parentId, sortOrder: index + 1 });
+      });
+    }
+    const synchronized = synchronizeGanttTaskCategories([...updated.values()], rootsInOrder);
+    const originalById = new Map(tasks.map((task) => [task.id, task]));
+    const changes = synchronized.filter((task) => {
+      const original = originalById.get(task.id)!;
+      return (original.parentId ?? null) !== (task.parentId ?? null) || original.sortOrder !== task.sortOrder || original.taskCategory !== task.taskCategory;
+    });
+    await bulkUpdateGanttStructure(tx, changes.map((task) => ({
+      id: task.id,
+      parentId: task.parentId ?? null,
+      sortOrder: task.sortOrder,
+      taskCategory: task.taskCategory,
+    })));
+    await Promise.all([
+      tx.project.update({ where: { id: params.projectId }, data: { ganttRevision: { increment: 1 } } }),
+      tx.operationHistory.create({
+        data: { projectId: params.projectId, entityType: "PROJECT_GANTT_TASK", entityId: rootsInOrder.join(","), actionType: "UPDATE", operator: params.operator, detail: `剪切并移动 ${movedSet.size} 条甘特任务` },
+      }),
+    ]);
+    return [...movedSet];
+  }, { timeout: 30_000, maxWait: 10_000 });
+  await renumberProjectGanttTaskCodes(params.projectId);
+  return { tasks: (await getOrderedGanttTasks(params.projectId)).map(serializeGanttTask), movedTaskIds };
 };

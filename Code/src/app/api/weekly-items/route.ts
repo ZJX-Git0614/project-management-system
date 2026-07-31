@@ -2,7 +2,7 @@ import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { getUserFromRequest } from "@/lib/auth"
 import { ok, err, unauthorized } from "@/lib/api-utils"
-import { ItemStatus } from "@/domain/enums"
+import { isValidItemProgress, itemProgressFields, itemStatusFromProgress } from "@/lib/item-progress"
 import { nextWeeklyMatterCode, renumberWeeklyMatterCodesByProject } from "@/lib/weekly-matter-codes"
 
 const SERIALIZE_KEYS = [
@@ -32,6 +32,7 @@ function serializeItem(item: Record<string, unknown>) {
   for (const k of SERIALIZE_KEYS) {
     out[k] = item[k]
   }
+  out.status = itemStatusFromProgress(Number(item.progress) || 0)
   const linkedTask = item.ganttTask as { taskName?: string } | null | undefined
   out.ganttTaskId = item.ganttTaskId ?? null
   out.taskName = linkedTask?.taskName ?? item.taskName ?? ""
@@ -123,6 +124,12 @@ export async function POST(req: NextRequest) {
   if (!body.projectId) return err("项目 ID 不能为空")
   if (!body.title) return err("事项名称不能为空")
   if (!body.owner) return err("负责人不能为空")
+  const progress = body.progress ?? 0
+  if (!isValidItemProgress(progress)) return err("事项进度应为 0-100 的整数")
+  const progressData = itemProgressFields(
+    progress,
+    typeof body.actualEndDate === "string" ? body.actualEndDate : "",
+  )
 
   const project = await prisma.project.findUnique({ where: { id: body.projectId } })
   if (!project) return err("项目不存在")
@@ -160,10 +167,10 @@ export async function POST(req: NextRequest) {
       taskName: linkedTask?.taskName ?? "",
       description: body.description || "",
       dueDate: typeof body.dueDate === "string" ? body.dueDate : "",
-      status: body.status || ItemStatus.PENDING,
       owner: body.owner,
       priority: body.priority || "NORMAL",
       ...buildExtraData(body),
+      ...progressData,
     },
     include: {
       project: { select: { id: true, name: true, code: true, status: true } },

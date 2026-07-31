@@ -2,6 +2,7 @@ import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { getUserFromRequest } from "@/lib/auth"
 import { ok, err, unauthorized, notFound } from "@/lib/api-utils"
+import { isValidItemProgress, itemProgressFields, itemStatusFromProgress } from "@/lib/item-progress"
 import { renumberWeeklyMatterCodes } from "@/lib/weekly-matter-codes"
 
 const SERIALIZE_KEYS = [
@@ -31,6 +32,7 @@ function serializeItem(item: Record<string, unknown>) {
   for (const k of SERIALIZE_KEYS) {
     out[k] = item[k]
   }
+  out.status = itemStatusFromProgress(Number(item.progress) || 0)
   const linkedTask = item.ganttTask as { taskName?: string } | null | undefined
   out.ganttTaskId = item.ganttTaskId ?? null
   out.taskName = linkedTask?.taskName ?? item.taskName ?? ""
@@ -45,7 +47,7 @@ function serializeItem(item: Record<string, unknown>) {
 }
 
 const PUTTABLE_FIELDS: readonly string[] = [
-  "title", "description", "dueDate", "status", "owner", "priority",
+  "title", "description", "dueDate", "owner", "priority",
   "plannedStartDate", "actualStartDate", "plannedEndDate", "actualEndDate",
   "progress", "health", "issueAndAction", "dependency", "remark",
 ]
@@ -68,10 +70,21 @@ export async function PUT(
   }
 
   const body = await req.json()
+  const progress = body.progress === undefined ? existing.progress : body.progress
+  if (!isValidItemProgress(progress)) return err("事项进度应为 0-100 的整数")
+  const progressData = itemProgressFields(
+    progress,
+    body.actualEndDate === undefined
+      ? existing.actualEndDate
+      : typeof body.actualEndDate === "string" ? body.actualEndDate : "",
+    undefined,
+    existing.progress,
+  )
   const updateData: Record<string, unknown> = {}
   for (const k of PUTTABLE_FIELDS) {
     if (body[k] !== undefined) updateData[k] = body[k]
   }
+  Object.assign(updateData, progressData)
 
   if (body.ganttTaskId !== undefined) {
     const requestedTaskId = typeof body.ganttTaskId === "string" ? body.ganttTaskId.trim() : ""
@@ -101,10 +114,10 @@ export async function PUT(
       projectId: item.projectId,
       entityType: "WEEKLY_ITEM",
       entityId: item.id,
-      actionType: body.status && body.status !== existing.status ? "STATUS_CHANGED" : "UPDATE",
+      actionType: progressData.status !== existing.status ? "STATUS_CHANGED" : "UPDATE",
       operator: user.displayName,
-      detail: body.status && body.status !== existing.status
-        ? `项目事项「${item.title}」状态变更为 ${body.status}`
+      detail: progressData.status !== existing.status
+        ? `项目事项「${item.title}」状态随进度变更为 ${progressData.status}`
         : `更新项目事项「${item.title}」`,
     },
   })

@@ -5,7 +5,7 @@ import {
   synchronizeGanttTaskCategories,
   type GanttHierarchyTask,
 } from "@/lib/gantt-hierarchy";
-import { renumberGanttTaskCodes } from "@/lib/gantt-task-codes";
+import { orderGanttTasksByHierarchy, renumberGanttTaskCodes } from "@/lib/gantt-task-codes";
 
 const task = (
   id: string,
@@ -55,6 +55,25 @@ describe("changeGanttTaskHierarchy", () => {
     expect(numbered.find((item) => item.id === "last")).toMatchObject({ parentId: null, taskCode: "Task3" });
   });
 
+  it("keeps the visible preorder unchanged when the first child is outdented", () => {
+    const source = [
+      task("root", null, 1),
+      task("first-child", "root", 1),
+      task("second-child", "root", 2),
+      task("last", null, 2),
+    ];
+
+    const before = orderGanttTasksByHierarchy(source).map((item) => item.id);
+    const result = changeGanttTaskHierarchy(source, ["first-child"], "OUTDENT");
+    const after = orderGanttTasksByHierarchy(result.tasks).map((item) => item.id);
+    const numbered = renumberGanttTaskCodes(result.tasks);
+
+    expect(after).toEqual(before);
+    expect(numbered.find((item) => item.id === "first-child")).toMatchObject({ parentId: null, taskCode: "Task2" });
+    expect(numbered.find((item) => item.id === "second-child")).toMatchObject({ parentId: "first-child", taskCode: "Task2.1" });
+    expect(numbered.find((item) => item.id === "last")).toMatchObject({ parentId: null, taskCode: "Task3" });
+  });
+
   it("outdents multiple sibling roots in their existing order", () => {
     const source = [
       task("root", null, 1),
@@ -81,6 +100,24 @@ describe("changeGanttTaskHierarchy", () => {
     const source = [task("first", null, 1), task("second", null, 2), task("third", null, 3)];
     const result = changeGanttTaskHierarchy(source, ["first", "second"], "INDENT");
     expect(result.movedTaskIds).toEqual([]);
+  });
+
+  it("keeps visible preorder unchanged when indenting a branch", () => {
+    const source = [
+      task("first", null, 1),
+      task("first-child", "first", 1),
+      task("second", null, 2),
+      task("second-child", "second", 1),
+      task("third", null, 3),
+    ];
+
+    const before = orderGanttTasksByHierarchy(source).map((item) => item.id);
+    const result = changeGanttTaskHierarchy(source, ["second"], "INDENT");
+    const after = orderGanttTasksByHierarchy(result.tasks).map((item) => item.id);
+
+    expect(after).toEqual(before);
+    expect(result.tasks.find((item) => item.id === "second")).toMatchObject({ parentId: "first" });
+    expect(result.tasks.find((item) => item.id === "second-child")).toMatchObject({ parentId: "second" });
   });
 
   it("rebuilds only the moved branch's category path", () => {

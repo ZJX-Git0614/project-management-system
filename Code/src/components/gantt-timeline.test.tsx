@@ -63,6 +63,7 @@ describe("GanttTimeline performance", () => {
     await waitFor(() => expect(onUpdateTask).toHaveBeenCalledWith(
       expect.objectContaining({ id: "task-1" }),
       expect.objectContaining({ predecessorTaskIds: ["task-2", "task-3"] }),
+      "predecessor",
     ));
   });
 
@@ -92,7 +93,7 @@ describe("GanttTimeline performance", () => {
     fireEvent.contextMenu(screen.getByText("Task001"));
 
     expect(screen.getByRole("menu", { name: "甘特任务右键菜单" })).toBeInTheDocument();
-    expect(screen.getByText("含 1 个子任务")).toBeInTheDocument();
+    expect(screen.getByText("已选 1 项，共处理 2 行")).toBeInTheDocument();
 
     fireEvent.click(document.body);
     expect(screen.queryByRole("menu", { name: "甘特任务右键菜单" })).not.toBeInTheDocument();
@@ -104,9 +105,167 @@ describe("GanttTimeline performance", () => {
 
     fireEvent.contextMenu(screen.getByText("Task001"));
 
-    await userEvent.click(screen.getByRole("menuitem", { name: "删除任务（含子任务）" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "删除" }));
 
-    expect(onDeleteSelected).toHaveBeenCalledWith(["task-1"]);
+    expect(onDeleteSelected).toHaveBeenCalledWith(["task-1", "task-2"]);
+  });
+
+  it("selects rows from the sequence column and locks descendants selected by a parent", async () => {
+    render(<GanttTimeline
+      tasks={[
+        task(1, { taskName: "父任务" }),
+        task(2, { parentId: "task-1", taskCode: "Task001.001", taskName: "子任务" }),
+        task(3, { taskName: "同级任务" }),
+      ]}
+      canEdit
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: "选择第 1 行" }));
+
+    expect(screen.getByRole("button", { name: "选择第 1 行" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "选择第 2 行" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "选择第 2 行" })).toHaveAttribute("title", "由父任务联动选择");
+
+    await userEvent.click(screen.getByRole("button", { name: "选择第 2 行" }));
+    expect(screen.getByRole("button", { name: "选择第 2 行" })).toHaveAttribute("aria-pressed", "true");
+
+    await userEvent.click(screen.getByRole("button", { name: "选择全部任务" }));
+    expect(screen.getByRole("button", { name: "取消选择全部任务" })).toBeInTheDocument();
+  });
+
+  it("draws the Excel-style outline only through explicitly selected rows", async () => {
+    render(<GanttTimeline
+      tasks={[
+        task(1, { taskName: "父任务" }),
+        task(2, { parentId: "task-1", taskCode: "Task001.001", taskName: "子任务" }),
+        task(3, { taskName: "同级任务" }),
+      ]}
+      canEdit
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: "选择第 1 行" }));
+
+    const firstOutline = document.querySelector('[data-gantt-task-id="task-1"] [data-gantt-selection-outline="true"]');
+    const secondOutline = document.querySelector('[data-gantt-task-id="task-2"] [data-gantt-selection-outline="true"]');
+    expect(firstOutline).toHaveClass("border-t-2");
+    expect(firstOutline).toHaveClass("border-b-2");
+    expect(secondOutline).not.toBeInTheDocument();
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "选择第 3 行" }), { shiftKey: true });
+    const rangeFirstOutline = document.querySelector('[data-gantt-task-id="task-1"] [data-gantt-selection-outline="true"]');
+    const rangeSecondOutline = document.querySelector('[data-gantt-task-id="task-2"] [data-gantt-selection-outline="true"]');
+    const rangeThirdOutline = document.querySelector('[data-gantt-task-id="task-3"] [data-gantt-selection-outline="true"]');
+    expect(rangeFirstOutline).toHaveClass("border-t-2");
+    expect(rangeFirstOutline).not.toHaveClass("border-b-2");
+    expect(rangeSecondOutline).not.toHaveClass("border-t-2", "border-b-2");
+    expect(rangeThirdOutline).not.toHaveClass("border-t-2");
+    expect(rangeThirdOutline).toHaveClass("border-b-2");
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByRole("button", { name: "选择第 1 行" })).toHaveAttribute("aria-pressed", "false");
+
+    await userEvent.click(screen.getByRole("button", { name: "选择第 3 行" }));
+    fireEvent.pointerDown(document.body);
+    expect(screen.getByRole("button", { name: "选择第 3 行" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("keeps sequence cells visually flat like the other table columns", () => {
+    render(<GanttTimeline tasks={[task(1)]} canEdit />);
+
+    expect(screen.getByRole("button", { name: "选择全部任务" })).toHaveClass("!rounded-none", "!border-0", "!bg-transparent");
+    expect(screen.getByRole("button", { name: "选择第 1 行" })).toHaveClass("!rounded-none", "!border-0", "!bg-transparent");
+  });
+
+  it("inserts a chosen number of sibling tasks from the Excel-style submenu", async () => {
+    const onInsertTasks = vi.fn().mockResolvedValue({ createdTaskIds: ["created-1", "created-2", "created-3"] });
+    render(<GanttTimeline
+      projectId="project-1"
+      tasks={[task(1)]}
+      canCreate
+      canEdit
+      onInsertTasks={onInsertTasks}
+    />);
+
+    fireEvent.contextMenu(screen.getByText("Task001"));
+    await userEvent.hover(screen.getByRole("menuitem", { name: "插入" }));
+    const countInput = screen.getByRole("spinbutton", { name: "在下方插入个同级任务数量" });
+    await userEvent.clear(countInput);
+    await userEvent.type(countInput, "3");
+    await userEvent.click(screen.getByRole("menuitem", { name: /在下方插入.*个同级任务/ }));
+
+    await waitFor(() => expect(onInsertTasks).toHaveBeenCalledWith("task-1", "SIBLING_AFTER", 3));
+  });
+
+  it("resets the insert quantity to one whenever the insert menu is reopened", async () => {
+    render(<GanttTimeline
+      projectId="project-1"
+      tasks={[task(1)]}
+      canCreate
+      canEdit
+      onInsertTasks={vi.fn()}
+    />);
+
+    fireEvent.contextMenu(screen.getByText("Task001"));
+    await userEvent.hover(screen.getByRole("menuitem", { name: "插入" }));
+    const countInput = screen.getByRole("spinbutton", { name: "在下方插入个同级任务数量" });
+    await userEvent.clear(countInput);
+    await userEvent.type(countInput, "7");
+    expect(countInput).toHaveValue(7);
+
+    fireEvent.pointerDown(document.body);
+    fireEvent.contextMenu(screen.getByText("Task001"));
+    await userEvent.hover(screen.getByRole("menuitem", { name: "插入" }));
+    expect(screen.getByRole("spinbutton", { name: "在下方插入个同级任务数量" })).toHaveValue(1);
+  });
+
+  it("copies only explicitly selected tasks and asks for a paste position", async () => {
+    const onPasteTasks = vi.fn().mockResolvedValue({ taskIds: ["copied-1"] });
+    render(<GanttTimeline
+      projectId="project-1"
+      tasks={[
+        task(1, { taskName: "父任务" }),
+        task(2, { parentId: "task-1", taskCode: "Task001.001", taskName: "子任务" }),
+        task(3, { taskName: "目标任务" }),
+      ]}
+      canEdit
+      onPasteTasks={onPasteTasks}
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: "选择第 1 行" }));
+    fireEvent.keyDown(window, { key: "c", ctrlKey: true });
+    await userEvent.click(screen.getByRole("button", { name: "选择第 3 行" }));
+    fireEvent.keyDown(window, { key: "v", ctrlKey: true });
+
+    expect(screen.getByRole("menu", { name: "粘贴位置" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("menuitem", { name: "粘贴到行下方" }));
+    await waitFor(() => expect(onPasteTasks).toHaveBeenCalledWith("COPY", ["task-1"], "task-3", "AFTER"));
+  });
+
+  it("blocks moving a cut branch beside itself without calling the server", async () => {
+    const onPasteTasks = vi.fn();
+    const onActionError = vi.fn();
+    render(<GanttTimeline
+      projectId="project-1"
+      tasks={[
+        task(1, { taskName: "父任务" }),
+        task(2, { parentId: "task-1", taskCode: "Task001.001", taskName: "子任务" }),
+        task(3, { taskName: "其他任务" }),
+      ]}
+      canEdit
+      onActionError={onActionError}
+      onPasteTasks={onPasteTasks}
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: "选择第 1 行" }));
+    fireEvent.keyDown(window, { key: "x", ctrlKey: true });
+    fireEvent.contextMenu(screen.getByText("Task001.001"));
+    await userEvent.hover(screen.getByRole("menuitem", { name: "粘贴" }));
+
+    expect(screen.getByRole("menuitem", { name: "粘贴到行上方" })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: "粘贴到行下方" })).toBeDisabled();
+    expect(screen.getByText("请选择被剪切分支以外的目标行")).toBeInTheDocument();
+    expect(onPasteTasks).not.toHaveBeenCalled();
+    expect(onActionError).not.toHaveBeenCalled();
   });
 
   it("uses the native horizontal scrollbar and keeps the divider control fixed", async () => {
@@ -176,6 +335,7 @@ describe("GanttTimeline performance", () => {
     await waitFor(() => expect(onUpdateTask).toHaveBeenCalledWith(
       expect.objectContaining({ id: "task-1" }),
       expect.objectContaining({ durationDays: 0.5, estimatedWorkHours: 3.75 }),
+      "durationDays",
     ));
   });
 });

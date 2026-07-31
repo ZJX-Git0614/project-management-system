@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma"
 import type { JwtPayload } from "@/lib/auth"
 import { buildAssistantScheduleContextV1 } from "@/lib/assistant-schedule-adapter"
+import { itemStatusFromProgress } from "@/lib/item-progress"
 
 export type AssistantMessageInput = {
   role: "user" | "assistant"
@@ -17,10 +18,9 @@ const PROJECT_STATUS_LABEL: Record<string, string> = {
 }
 
 const ITEM_STATUS_LABEL: Record<string, string> = {
-  PENDING: "待开始",
+  PENDING: "未开始",
   IN_PROGRESS: "进行中",
   DONE: "已完成",
-  CANCELED: "已取消",
 }
 
 const PRIORITY_LABEL: Record<string, string> = {
@@ -279,7 +279,7 @@ export const buildProjectAssistantContext = async (params: {
       taskName: item.taskName,
       owner: item.owner,
       priority: PRIORITY_LABEL[item.priority] || item.priority,
-      status: ITEM_STATUS_LABEL[item.status] || item.status,
+      status: ITEM_STATUS_LABEL[itemStatusFromProgress(item.progress)],
       plannedStart: item.plannedStartDate,
       plannedEnd: item.plannedEndDate,
       actualStart: item.actualStartDate,

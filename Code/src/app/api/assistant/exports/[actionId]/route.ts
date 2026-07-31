@@ -8,6 +8,8 @@ import {
   selectWeeklyExportRows,
   type AssistantProjectExportIntent,
 } from "@/lib/assistant-export";
+import { ITEM_STATUS_LABEL } from "@/lib/constants";
+import { itemStatusFromProgress } from "@/lib/item-progress";
 
 const csvCell = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
 const toCsv = (headers: string[], rows: unknown[][]) => `\uFEFF${[headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
@@ -58,7 +60,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ acti
     const allRows = await prisma.weeklyItem.findMany({ where: { projectId: action.projectId }, orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] });
     const rows = selectWeeklyExportRows(allRows, args);
     fileLabel = "项目事项";
-    csv = toCsv(["事项ID", "事项名称", "责任人", "优先级", "状态", "进度"], rows.map((item) => [item.matterCode, item.title, item.owner, item.priority, item.status, `${item.progress}%`]));
+    csv = toCsv(["事项ID", "事项名称", "责任人", "优先级", "状态", "进度"], rows.map((item) => [item.matterCode, item.title, item.owner, item.priority, ITEM_STATUS_LABEL[itemStatusFromProgress(item.progress)], `${item.progress}%`]));
   } else if (args.exportType === "risk") {
     const rows = await prisma.riskRegisterItem.findMany({ where: { projectId: action.projectId }, orderBy: { sortOrder: "asc" } });
     fileLabel = "风险登记册";

@@ -59,11 +59,12 @@ describe("assistant project export", () => {
 
   it("filters matters by priority and status without changing their current order", () => {
     const rows = [
-      { id: "m1", priority: "URGENT", status: "IN_PROGRESS" },
-      { id: "m2", priority: "HIGH", status: "IN_PROGRESS" },
-      { id: "m3", priority: "URGENT", status: "DONE" },
+      { id: "m1", priority: "URGENT", status: "DONE", progress: 35 },
+      { id: "m2", priority: "HIGH", status: "IN_PROGRESS", progress: 60 },
+      { id: "m3", priority: "URGENT", status: "PENDING", progress: 100 },
     ];
     expect(selectWeeklyExportRows(rows, { weeklyPriority: "URGENT" }).map((row) => row.id)).toEqual(["m1", "m3"]);
     expect(selectWeeklyExportRows(rows, { weeklyPriority: "URGENT", weeklyStatus: "IN_PROGRESS" }).map((row) => row.id)).toEqual(["m1"]);
+    expect(selectWeeklyExportRows(rows, { weeklyPriority: "URGENT", weeklyStatus: "DONE" }).map((row) => row.id)).toEqual(["m3"]);
   });
 });

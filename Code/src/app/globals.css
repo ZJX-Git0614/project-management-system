@@ -113,6 +113,28 @@ body {
   }
 }
 
+@keyframes gantt-history-row-flash {
+  0% { background-color: rgba(56, 189, 248, 0.08); }
+  38% { background-color: rgba(56, 189, 248, 0.38); }
+  100% { background-color: transparent; }
+}
+
+@keyframes gantt-history-cell-flash {
+  0% { box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.2); background-color: rgba(56, 189, 248, 0.08); }
+  38% { box-shadow: inset 0 0 0 2px rgba(56, 189, 248, 0.85); background-color: rgba(56, 189, 248, 0.34); }
+  100% { box-shadow: inset 0 0 0 0 rgba(56, 189, 248, 0); background-color: transparent; }
+}
+
+.gantt-history-row-flash {
+  animation: gantt-history-row-flash 0.5s ease-out both;
+}
+
+.gantt-history-cell-flash {
+  position: relative;
+  z-index: 24;
+  animation: gantt-history-cell-flash 0.5s ease-out both;
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -162,8 +184,8 @@ body {
 }
 
 .gantt-context-menu {
-  width: min(320px, calc(100vw - 16px));
-  padding: 8px;
+  width: min(286px, calc(100vw - 16px));
+  padding: 6px;
 }
 
 .gantt-context-menu-header {
@@ -172,19 +194,9 @@ body {
   font-size: 12px;
 }
 
-.gantt-context-menu-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px;
-}
-
-.gantt-context-menu-grid-single {
-  grid-template-columns: minmax(0, 1fr);
-}
-
 .gantt-context-menu-separator {
   height: 1px;
-  margin: 8px 0;
+  margin: 5px 2px;
   background: var(--app-border);
 }
 
@@ -192,17 +204,37 @@ body {
   display: flex;
   width: 100% !important;
   min-width: 0;
-  min-height: 36px !important;
+  min-height: 32px !important;
   align-items: center;
   justify-content: flex-start;
   gap: 8px;
   overflow: hidden;
-  border: 1px solid var(--app-border);
-  border-radius: 6px;
-  padding: 0 10px;
+  border: 0;
+  border-radius: 4px;
+  padding: 0 8px;
+  background: transparent;
   text-align: left;
   font-size: 13px;
   white-space: nowrap;
+}
+
+.gantt-context-menu-item:hover:not(:disabled),
+.gantt-context-menu-item:focus-visible:not(:disabled) {
+  background: hsl(var(--accent));
+  color: hsl(var(--accent-foreground));
+  outline: none;
+}
+
+.gantt-context-menu-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.gantt-context-menu-item kbd {
+  margin-left: auto;
+  color: var(--app-text-dim);
+  font-size: 10px;
+  font-family: inherit;
 }
 
 .gantt-context-menu-item > span {
@@ -213,6 +245,65 @@ body {
 
 .gantt-context-menu-item-danger {
   color: hsl(var(--destructive));
+}
+
+.gantt-context-menu-submenu-anchor {
+  position: relative;
+}
+
+.gantt-context-submenu {
+  position: absolute;
+  top: -6px;
+  left: calc(100% + 6px);
+  z-index: 1;
+  width: 196px;
+  padding: 6px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-panel);
+  box-shadow: var(--app-shadow-popover);
+}
+
+.gantt-context-menu-open-left .gantt-context-submenu {
+  right: calc(100% + 6px);
+  left: auto;
+}
+
+.gantt-context-submenu-wide {
+  width: 300px;
+}
+
+.gantt-context-menu-hint {
+  padding: 5px 8px 2px;
+  color: var(--app-text-dim);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.gantt-context-insert-item {
+  display: grid;
+  grid-template-columns: max-content 46px minmax(0, 1fr);
+  gap: 6px;
+}
+
+.gantt-context-menu-item.gantt-context-insert-item > span {
+  overflow: visible;
+  white-space: nowrap;
+  text-overflow: clip;
+}
+
+.gantt-context-insert-item input {
+  width: 46px !important;
+  min-width: 46px !important;
+  max-width: 46px !important;
+  height: 24px;
+  padding: 0 4px !important;
+  border: 1px solid var(--app-border);
+  border-radius: 4px;
+  background: var(--app-panel-strong);
+  color: var(--app-text);
+  text-align: center;
+  font: inherit;
 }
 
 a {

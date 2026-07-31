@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { isAutomaticBackupDue, postgresToolConnectionUrl, selectBackupIdsForPruning } from "@/lib/system-backup";
+import {
+  databaseRestoreCommandPlan,
+  isAutomaticBackupDue,
+  postgresToolConnectionUrl,
+  selectBackupIdsForPruning,
+} from "@/lib/system-backup";
 
 const settings = {
   automaticBackupEnabled: true,
@@ -21,6 +26,50 @@ describe("system backup schedule", () => {
   it("removes Prisma-only schema parameters for PostgreSQL command-line tools", () => {
     expect(postgresToolConnectionUrl("postgresql://user:pass@localhost:5432/pms?schema=public&sslmode=require"))
       .toBe("postgresql://user:pass@localhost:5432/pms?sslmode=require");
+  });
+
+  it("restores through a clean public schema inside one transaction", () => {
+    const plan = databaseRestoreCommandPlan(
+      "postgresql://user:pass@localhost:5432/pms?schema=public",
+      "/backups/database.dump",
+      "/tmp/database.restore.sql",
+    );
+
+    expect(plan.render).toEqual({
+      command: "pg_restore",
+      args: [
+        "--no-owner",
+        "--no-privileges",
+        "--exit-on-error",
+        "--file=/tmp/database.restore.sql",
+        "/backups/database.dump",
+      ],
+    });
+    expect(plan.apply.command).toBe("psql");
+    expect(plan.apply.args).toContain("--single-transaction");
+    expect(plan.apply.args).toContain("--set=ON_ERROR_STOP=1");
+    expect(plan.apply.args).toContain("--command=DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;");
+    expect(plan.apply.args).toContain("--command=SET search_path TO public;");
+    expect(plan.apply.args).not.toContain("--clean");
+  });
+
+  it("applies post-backup schema migrations in filename order inside the restore transaction", () => {
+    const plan = databaseRestoreCommandPlan(
+      "postgresql://user:pass@localhost:5432/pms?schema=public",
+      "/backups/database.dump",
+      "/tmp/database.restore.sql",
+      [
+        "/app/prisma/manual-migrations/20260730_latest.sql",
+        "/app/prisma/manual-migrations/20260724_earlier.sql",
+      ],
+    );
+
+    expect(plan.apply.args.slice(-4)).toEqual([
+      "--file=/tmp/database.restore.sql",
+      "--command=SET search_path TO public;",
+      "--file=/app/prisma/manual-migrations/20260724_earlier.sql",
+      "--file=/app/prisma/manual-migrations/20260730_latest.sql",
+    ]);
   });
 
   it("prunes oldest backups until the total is within the byte limit", () => {

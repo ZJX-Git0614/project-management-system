@@ -31,6 +31,12 @@ import { api } from "@/lib/api-client";
 import { useAuth } from "@/contexts/auth-context";
 import { useCurrentProject } from "@/contexts/current-project-context";
 import { useDraftedState } from "@/lib/use-drafted-state";
+import {
+  ITEM_STATUS_VALUES,
+  itemProgressFields,
+  itemProgressInputValue,
+  itemStatusFromProgress,
+} from "@/lib/item-progress";
 
 export type ItemKind = "monthly" | "weekly";
 
@@ -91,6 +97,11 @@ interface ItemRecord {
   };
 }
 
+const normalizeItemRecord = (item: ItemRecord): ItemRecord => ({
+  ...item,
+  status: itemStatusFromProgress(item.progress),
+});
+
 interface LinkedRisk {
   id: string;
   riskCode: string;
@@ -116,6 +127,22 @@ const RiskDetailField = ({ label, value, wide = false }: { label: string; value?
   </div>
 );
 
+const ItemStatusReadout = ({ progress, className }: { progress: number; className?: string }) => {
+  const status = itemStatusFromProgress(progress);
+  return (
+    <div
+      aria-readonly="true"
+      className={cn(
+        "flex h-8 items-center rounded-md border border-input bg-muted/40 px-2 text-xs text-muted-foreground",
+        status === ItemStatus.DONE && "text-emerald-400",
+        className,
+      )}
+    >
+      {ITEM_STATUS_LABEL[status]}
+    </div>
+  );
+};
+
 type EditableField =
   | "title"
   | "description"
@@ -127,7 +154,6 @@ type EditableField =
   | "plannedEndDate"
   | "actualEndDate"
   | "progress"
-  | "status"
   | "health"
   | "issueAndAction"
   | "dependency";
@@ -284,7 +310,7 @@ export const ItemPanel = ({
     if (!view) return;
     setKeyword(view.keyword);
     setProjectFilter(view.projectFilter);
-    setStatusFilter(view.statusFilter);
+    setStatusFilter(ITEM_STATUS_VALUES.includes(view.statusFilter as ItemStatus) ? view.statusFilter : "ALL");
     setHealthFilter(view.healthFilter);
     setViewName(view.name);
   };
@@ -322,12 +348,12 @@ export const ItemPanel = ({
     setViewName("");
   };
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async ({ showLoading = true }: { showLoading?: boolean } = {}) => {
     if (!canView) {
       setLoading(false);
       return;
     }
-    setLoading(true);
+    if (showLoading) setLoading(true);
     try {
       const dateQuery = dateRange.start || dateRange.end
         ? `?startDate=${encodeURIComponent(dateRange.start)}&endDate=${encodeURIComponent(dateRange.end)}`
@@ -336,17 +362,17 @@ export const ItemPanel = ({
         api.get<ItemRecord[]>(`${apiPath}${dateQuery}`),
         api.get<Project[]>("/api/projects"),
       ]);
-      setItems(itemList);
+      setItems(itemList.map(normalizeItemRecord));
       setProjects(projectList);
     } catch {
       // handled
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   }, [canView, apiPath, dateRange.start, dateRange.end]);
 
   useEffect(() => {
-    fetchData();
+    void fetchData();
   }, [fetchData]);
 
   const filtered = useMemo(() => {
@@ -358,7 +384,7 @@ export const ItemPanel = ({
         || (item.matterCode ?? "").toLowerCase().includes(kw)
         || (item.taskName ?? "").toLowerCase().includes(kw);
       const hitProject = projectFilter === "ALL" || item.projectId === projectFilter;
-      const hitStatus = statusFilter === "ALL" || item.status === statusFilter;
+      const hitStatus = statusFilter === "ALL" || itemStatusFromProgress(item.progress) === statusFilter;
       const hitHealth = healthFilter === "ALL" || item.health === healthFilter;
       return hitKw && hitProject && hitStatus && hitHealth;
     });
@@ -405,7 +431,7 @@ export const ItemPanel = ({
         it.actualEndDate || "-",
         startDev === null ? "-" : (startDev === 0 ? "0" : (startDev > 0 ? `+${startDev}` : `${startDev}`)),
         `${it.progress}%`,
-        ITEM_STATUS_LABEL[it.status as ItemStatus] ?? it.status,
+        ITEM_STATUS_LABEL[itemStatusFromProgress(it.progress)],
         ITEM_HEALTH_LABEL[it.health as ItemHealth] ?? it.health,
         it.issueAndAction || "-",
         it.dependency || "-",
@@ -481,7 +507,7 @@ export const ItemPanel = ({
     }
     setEditingId(item.id);
     setEditingField(field);
-    setDraft({ ...item });
+    setDraft({ ...item, status: itemStatusFromProgress(item.progress) });
   };
 
   const cancelEdit = () => {
@@ -492,6 +518,13 @@ export const ItemPanel = ({
 
   const updateDraft = <K extends keyof ItemRecord>(key: K, value: ItemRecord[K]) => {
     setDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
+  };
+
+  const updateDraftProgress = (progress: number) => {
+    setDraft((prev) => (prev ? {
+      ...prev,
+      ...itemProgressFields(progress, prev.actualEndDate, undefined, prev.progress),
+    } : prev));
   };
 
   const commitSelectChange = async <K extends keyof ItemRecord>(key: K, value: ItemRecord[K], itemOverride?: ItemRecord) => {
@@ -519,11 +552,13 @@ export const ItemPanel = ({
     try {
       const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, linkedRisks: _lr, ...payload } = updated;
       void _id; void _ca; void _ua; void _p; void _mc; void _lr;
-      await api.put(`${apiPath}/${updated.id}`, payload);
+      const savedItem = normalizeItemRecord(
+        await api.put<ItemRecord>(`${apiPath}/${updated.id}`, payload),
+      );
+      setItems((prev) => prev.map((item) => (item.id === savedItem.id ? savedItem : item)));
       flushSync(() => {
         cancelEdit();
       });
-      await fetchData();
     } catch (error) {
       if (previousItems) {
         setItems(previousItems);
@@ -641,9 +676,9 @@ export const ItemPanel = ({
     try {
       const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, linkedRisks: _lr, ...payload } = draft;
       void _id; void _ca; void _ua; void _p; void _mc; void _lr;
-      await api.post(apiPath, payload);
+      const savedItem = normalizeItemRecord(await api.post<ItemRecord>(apiPath, payload));
+      setItems((prev) => [...prev.filter((item) => item.id !== savedItem.id), savedItem]);
       clearDraft();
-      await fetchData();
     } catch (error) {
       alert(error instanceof Error ? error.message : "保存失败");
     } finally {
@@ -661,9 +696,11 @@ export const ItemPanel = ({
     try {
       const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, linkedRisks: _lr, ...payload } = draft;
       void _id; void _ca; void _ua; void _p; void _mc; void _lr;
-      await api.put(`${apiPath}/${draft.id}`, payload);
+      const savedItem = normalizeItemRecord(
+        await api.put<ItemRecord>(`${apiPath}/${draft.id}`, payload),
+      );
+      setItems((prev) => prev.map((item) => (item.id === savedItem.id ? savedItem : item)));
       cancelEdit();
-      await fetchData();
     } catch (error) {
       alert(error instanceof Error ? error.message : "保存失败");
     } finally {
@@ -715,7 +752,7 @@ export const ItemPanel = ({
       await Promise.all(selectedItems.map((item) => api.delete(`${apiPath}/${item.id}`)));
       setSelectedIds([]);
       setSelectionMode(false);
-      await fetchData();
+      await fetchData({ showLoading: false });
     } catch (err) {
       alert(err instanceof Error ? err.message : "删除失败");
     } finally {
@@ -750,10 +787,10 @@ export const ItemPanel = ({
 
     try {
       await api.post("/api/weekly-items/reorder", { itemIds: nextItemIds });
-      await fetchData();
+      await fetchData({ showLoading: false });
     } catch (error) {
       alert(error instanceof Error ? error.message : "排序保存失败");
-      await fetchData();
+      await fetchData({ showLoading: false });
     } finally {
       setReordering(false);
       setDraggedItemId(null);
@@ -840,7 +877,7 @@ export const ItemPanel = ({
               className="h-8 text-xs"
             >
               <option value="ALL">全部</option>
-              {Object.values(ItemStatus).map((s) => (
+              {ITEM_STATUS_VALUES.map((s) => (
                 <option key={s} value={s}>{ITEM_STATUS_LABEL[s]}</option>
               ))}
             </Select>
@@ -1124,8 +1161,8 @@ export const ItemPanel = ({
                           type="number"
                           min={0}
                           max={100}
-                          value={draft.progress}
-                          onChange={(e) => updateDraft("progress", Math.min(100, Math.max(0, Number.parseInt(e.target.value, 10) || 0)))}
+                          value={itemProgressInputValue(draft.progress)}
+                          onChange={(e) => updateDraftProgress(Math.min(100, Math.max(0, Number.parseInt(e.target.value, 10) || 0)))}
                           onKeyDown={handleCreateKeyDown}
                           className={`${INLINE_INPUT_CLASS} w-[64px]`}
                         />
@@ -1133,16 +1170,7 @@ export const ItemPanel = ({
                       </div>
                     </TableCell>
                     <TableCell>
-                      <Select
-                        value={draft.status}
-                        onChange={(e) => updateDraft("status", e.target.value as ItemStatus)}
-                        onKeyDown={handleCreateKeyDown}
-                        className={`${INLINE_SELECT_CLASS} w-[88px]`}
-                      >
-                        {Object.values(ItemStatus).map((status) => (
-                          <option key={status} value={status}>{ITEM_STATUS_LABEL[status]}</option>
-                        ))}
-                      </Select>
+                      <ItemStatusReadout progress={draft.progress} className="h-7 w-[88px]" />
                     </TableCell>
                     <TableCell>
                       <Select
@@ -1315,7 +1343,10 @@ export const ItemPanel = ({
                         ) : (
                           <>
                             <div
-                              className={canEdit ? "cursor-pointer rounded px-1 py-0.5 font-medium text-xs leading-tight hover:bg-primary/10" : "font-medium text-xs leading-tight"}
+                              className={cn(
+                                canEdit ? "cursor-pointer rounded px-1 py-0.5 font-medium text-xs leading-tight hover:bg-primary/10" : "font-medium text-xs leading-tight",
+                                item.progress >= 100 && "text-muted-foreground line-through",
+                              )}
                               {...editTriggerProps(item, "title")}
                             >
                               {item.title}
@@ -1442,8 +1473,8 @@ export const ItemPanel = ({
                               type="number"
                               min={0}
                               max={100}
-                              value={row.progress}
-                              onChange={(e) => updateDraft("progress", Math.min(100, Math.max(0, Number.parseInt(e.target.value, 10) || 0)))}
+                              value={itemProgressInputValue(row.progress)}
+                              onChange={(e) => updateDraftProgress(Math.min(100, Math.max(0, Number.parseInt(e.target.value, 10) || 0)))}
                               onKeyDown={handleEditKeyDown}
                               className={`${INLINE_INPUT_CLASS} w-[64px]`}
                               autoFocus
@@ -1463,16 +1494,10 @@ export const ItemPanel = ({
                         )}
                       </TableCell>
                       <TableCell>
-                        <Select
-                          variant="ghost"
-                          value={item.status}
-                          onChange={(e) => commitSelectChange("status", e.target.value as ItemStatus, item)}
-                          className={`${GHOST_SELECT_CLASS} w-[92px]`}
-                        >
-                          {Object.values(ItemStatus).map((status) => (
-                            <option key={status} value={status}>{ITEM_STATUS_LABEL[status]}</option>
-                          ))}
-                        </Select>
+                        <ItemStatusReadout
+                          progress={row.progress}
+                          className="h-7 w-[92px] border-0 bg-transparent"
+                        />
                       </TableCell>
                       <TableCell>
                         <Select
@@ -1711,15 +1736,7 @@ export const ItemPanel = ({
                 </select>
               </FormField>
               <FormField label="状态">
-                <select
-                  value={draft.status}
-                  onChange={(e) => commitSelectChange("status", e.target.value as ItemStatus)}
-                  className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
-                >
-                  {Object.values(ItemStatus).map((s) => (
-                    <option key={s} value={s}>{ITEM_STATUS_LABEL[s]}</option>
-                  ))}
-                </select>
+                <ItemStatusReadout progress={draft.progress} />
               </FormField>
               <FormField label="健康状态">
                 <select
@@ -1752,7 +1769,7 @@ export const ItemPanel = ({
                   max={100}
                   step={5}
                   value={draft.progress}
-                  onChange={(e) => updateDraft("progress", Number.parseInt(e.target.value, 10))}
+                  onChange={(e) => updateDraftProgress(Number.parseInt(e.target.value, 10))}
                   className="block h-8 w-full"
                 />
               </FormField>
@@ -1871,15 +1888,7 @@ export const ItemPanel = ({
                 </select>
               </FormField>
               <FormField label="状态">
-                <select
-                  value={draft.status}
-                  onChange={(e) => commitSelectChange("status", e.target.value as ItemStatus)}
-                  className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
-                >
-                  {Object.values(ItemStatus).map((s) => (
-                    <option key={s} value={s}>{ITEM_STATUS_LABEL[s]}</option>
-                  ))}
-                </select>
+                <ItemStatusReadout progress={draft.progress} />
               </FormField>
               <FormField label="健康状态">
                 <select
@@ -1912,7 +1921,7 @@ export const ItemPanel = ({
                   max={100}
                   step={5}
                   value={draft.progress}
-                  onChange={(e) => updateDraft("progress", Number.parseInt(e.target.value, 10))}
+                  onChange={(e) => updateDraftProgress(Number.parseInt(e.target.value, 10))}
                   className="block h-8 w-full"
                 />
               </FormField>

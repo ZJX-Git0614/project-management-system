@@ -21,6 +21,7 @@ export const CLOUD_BACKUP_LIMIT_BYTES = 20 * 1024 * 1024 * 1024;
 export const DEFAULT_SYSTEM_BACKUP_ROOT = path.resolve(
   process.env.SYSTEM_BACKUP_DIR?.trim() || path.join(process.cwd(), ".local-runtime", "system-backups"),
 );
+const MANUAL_MIGRATION_DIRECTORY = path.join(process.cwd(), "prisma", "manual-migrations");
 
 let backupInProgress = false;
 
@@ -29,6 +30,44 @@ export const postgresToolConnectionUrl = (databaseUrl: string) => {
   url.searchParams.delete("schema");
   return url.toString();
 };
+
+export const databaseRestoreCommandPlan = (
+  databaseUrl: string,
+  dumpPath: string,
+  sqlPath: string,
+  migrationPaths: string[] = [],
+) => ({
+  render: {
+    command: "pg_restore",
+    args: [
+      "--no-owner",
+      "--no-privileges",
+      "--exit-on-error",
+      `--file=${sqlPath}`,
+      dumpPath,
+    ],
+  },
+  apply: {
+    command: "psql",
+    args: [
+      "--no-psqlrc",
+      "--set=ON_ERROR_STOP=1",
+      "--single-transaction",
+      `--dbname=${postgresToolConnectionUrl(databaseUrl)}`,
+      "--command=DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;",
+      `--file=${sqlPath}`,
+      "--command=SET search_path TO public;",
+      ...[...migrationPaths]
+        .sort((left, right) => left.localeCompare(right))
+        .map((migrationPath) => `--file=${migrationPath}`),
+    ],
+  },
+});
+
+const getManualMigrationPaths = async () => (await readdir(MANUAL_MIGRATION_DIRECTORY, { withFileTypes: true }))
+  .filter((entry) => entry.isFile() && entry.name.endsWith(".sql"))
+  .map((entry) => path.join(MANUAL_MIGRATION_DIRECTORY, entry.name))
+  .sort((left, right) => left.localeCompare(right));
 
 const timestamp = (date = new Date()) => date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 
@@ -467,16 +506,16 @@ export const syncLatestSystemBackupToCloud = async ({ operator }: { operator: st
 
 export const restoreDatabaseDump = async (dumpPath: string) => {
   if (!process.env.DATABASE_URL) throw new Error("服务器未配置 DATABASE_URL");
+  const sqlPath = `${dumpPath}.${process.pid}.${Date.now()}.restore.sql`;
+  const migrationPaths = await getManualMigrationPaths();
+  const plan = databaseRestoreCommandPlan(process.env.DATABASE_URL, dumpPath, sqlPath, migrationPaths);
   await prisma.$disconnect();
-  await runCommand("pg_restore", [
-    "--clean",
-    "--if-exists",
-    "--no-owner",
-    "--no-privileges",
-    "--exit-on-error",
-    `--dbname=${postgresToolConnectionUrl(process.env.DATABASE_URL)}`,
-    dumpPath,
-  ]);
+  try {
+    await runCommand(plan.render.command, plan.render.args);
+    await runCommand(plan.apply.command, plan.apply.args);
+  } finally {
+    await rm(sqlPath, { force: true }).catch(() => undefined);
+  }
 };
 
 export const validateDatabaseDump = async (dumpPath: string) => {

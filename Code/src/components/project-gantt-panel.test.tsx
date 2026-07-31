@@ -35,12 +35,14 @@ vi.mock("@/components/gantt-timeline", () => ({
     creatingParentId,
     onDeleteSelected,
     onCreateTask,
+    onInsertTasks,
     projectMembers,
     tasks,
   }: {
     creatingParentId: string | null;
     onDeleteSelected?: (taskIds: string[]) => void | Promise<void>;
     onCreateTask?: (parentTask?: ProjectGanttTask) => void;
+    onInsertTasks?: (anchorTaskId: string, placement: "SIBLING_AFTER", count: number) => void | Promise<void>;
     projectMembers: Array<{ id: string }>;
     tasks: ProjectGanttTask[];
   }) => (
@@ -56,6 +58,9 @@ vi.mock("@/components/gantt-timeline", () => ({
       </button>
       <button type="button" onClick={() => void onDeleteSelected?.(tasks.map((task) => task.id))}>
         测试删除父子任务
+      </button>
+      <button type="button" onClick={() => void onInsertTasks?.(tasks[0].id, "SIBLING_AFTER", 2)}>
+        测试批量插入任务
       </button>
     </div>
   ),
@@ -100,6 +105,7 @@ function deferred<T>() {
 
 describe("ProjectGanttPanel", () => {
   beforeEach(() => {
+    window.sessionStorage.clear();
     mocks.get.mockReset();
     mocks.post.mockReset();
     mocks.put.mockReset();
@@ -120,7 +126,14 @@ describe("ProjectGanttPanel", () => {
       taskRequestCount += 1;
       return taskRequestCount === 1 ? Promise.resolve([rootTask]) : refresh.promise;
     });
-    mocks.post.mockResolvedValue({});
+    let snapshotCount = 0;
+    mocks.post.mockImplementation((url: string) => {
+      if (url.endsWith("/history/snapshots")) {
+        snapshotCount += 1;
+        return Promise.resolve({ snapshotId: `snapshot-${snapshotCount}` });
+      }
+      return Promise.resolve({ ...rootTask, id: "created-task" });
+    });
 
     render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
 
@@ -128,7 +141,10 @@ describe("ProjectGanttPanel", () => {
     await screen.findByTestId("gantt-timeline");
     await user.click(screen.getByRole("button", { name: buttonName }));
 
-    await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledWith(
+      "/api/projects/project-1/gantt-tasks",
+      expect.objectContaining({ parentId: expectedParentId === "root" ? null : rootTask.id }),
+    ));
     expect(screen.getByTestId("gantt-timeline")).toBeInTheDocument();
     expect(screen.queryByText("加载中...")).not.toBeInTheDocument();
     expect(screen.getByTestId("creating-parent")).toHaveTextContent(expectedParentId);
@@ -149,7 +165,17 @@ describe("ProjectGanttPanel", () => {
       taskRequestCount += 1;
       return Promise.resolve(taskRequestCount === 1 ? [rootTask, childTask] : []);
     });
-    mocks.delete.mockResolvedValue({});
+    mocks.post.mockImplementation((url: string) => {
+      if (url.endsWith("/deletions")) {
+        return Promise.resolve({
+          deletionBatchId: "batch-1",
+          deletedTaskCount: 2,
+          detachedWeeklyItemCount: 0,
+          detachedRiskCount: 0,
+        });
+      }
+      return Promise.resolve({});
+    });
 
     render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
 
@@ -157,8 +183,10 @@ describe("ProjectGanttPanel", () => {
     await waitFor(() => expect(screen.getByTestId("task-count")).toHaveTextContent("2"));
     await user.click(screen.getByRole("button", { name: "测试删除父子任务" }));
 
-    await waitFor(() => expect(mocks.delete).toHaveBeenCalledTimes(1));
-    expect(mocks.delete).toHaveBeenCalledWith("/api/projects/project-1/gantt-tasks/task-1");
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledWith(
+      "/api/projects/project-1/gantt-tasks/deletions",
+      { rootTaskIds: [rootTask.id] },
+    ));
     await waitFor(() => expect(screen.getByTestId("task-count")).toHaveTextContent("0"));
   });
 
@@ -169,6 +197,14 @@ describe("ProjectGanttPanel", () => {
       if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
       if (url.endsWith("/deletions")) return Promise.resolve([]);
       return Promise.resolve([rootTask]);
+    });
+    let snapshotCount = 0;
+    mocks.post.mockImplementation((url: string) => {
+      if (url.endsWith("/history/snapshots")) {
+        snapshotCount += 1;
+        return Promise.resolve({ snapshotId: `calendar-snapshot-${snapshotCount}` });
+      }
+      return Promise.resolve({});
     });
     mocks.put.mockResolvedValue({ calendarMode: "WORKING_DAYS", hoursPerDay: 7.5 });
 
@@ -194,51 +230,87 @@ describe("ProjectGanttPanel", () => {
     await waitFor(() => expect(workingDayButton).toHaveAttribute("aria-pressed", "true"));
   });
 
-  it("uses compact toolbar buttons to undo and redo the latest deletion", async () => {
-    const deletionBatch = {
-      id: "batch-1",
-      createdAt: "2026-07-30T00:00:00.000Z",
-      updatedAt: "2026-07-30T00:00:00.000Z",
-      projectId: "project-1",
-      operatorUserId: "user-1",
-      operatorName: "张三",
-      status: "AVAILABLE",
-      rootTaskIds: ["task-1"],
-      summary: {
-        rootTaskIds: ["task-1"],
-        rootTasks: [{ id: "task-1", taskCode: "Task001", taskName: "根任务" }],
-        taskIds: ["task-1"],
-        deletedTaskCount: 1,
-        descendantTaskCount: 0,
-        dependencyCount: 0,
-        internalDependencyCount: 0,
-        externalDependencyCount: 0,
-        detachedWeeklyItemCount: 0,
-        detachedRiskCount: 0,
-        clearedPredecessorCount: 0,
-        ganttRevision: 3,
-      },
-      revisionBeforeDelete: 3,
-      revisionAfterDelete: 4,
-      expiresAt: "2026-08-29T00:00:00.000Z",
-      restoredAt: null,
-    };
+  it("records structure changes as snapshots and restores the before snapshot on undo", async () => {
     mocks.get.mockImplementation((url: string) => {
       if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
       if (url.endsWith("/members")) return Promise.resolve([]);
       if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
-      if (url.endsWith("/deletions")) return Promise.resolve([deletionBatch]);
-      return Promise.resolve([]);
+      return Promise.resolve([rootTask]);
     });
-    mocks.post.mockResolvedValue({ message: "已恢复 1 条甘特任务", restoredTaskCount: 1 });
+    let snapshotCount = 0;
+    mocks.post.mockImplementation((url: string) => {
+      if (url.endsWith("/history/snapshots")) {
+        snapshotCount += 1;
+        return Promise.resolve({ snapshotId: `structure-snapshot-${snapshotCount}` });
+      }
+      if (url.endsWith("/structure")) {
+        return Promise.resolve({ tasks: [rootTask], createdTaskIds: ["created-1", "created-2"] });
+      }
+      if (url.endsWith("/history/restore")) return Promise.resolve({ restoredTaskCount: 1 });
+      return Promise.resolve({});
+    });
 
     render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
 
     const user = userEvent.setup();
-    const undoButton = await screen.findByRole("button", { name: "撤销删除" });
-    const redoButton = screen.getByRole("button", { name: "取消撤销" });
-    expect(screen.queryByText("最近删除可撤销")).not.toBeInTheDocument();
-    expect(undoButton).toBeEnabled();
+    await screen.findByTestId("gantt-timeline");
+    await user.click(screen.getByRole("button", { name: "测试批量插入任务" }));
+
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledWith(
+      "/api/projects/project-1/gantt-tasks/structure",
+      {
+        operation: "INSERT",
+        anchorTaskId: rootTask.id,
+        placement: "SIBLING_AFTER",
+        count: 2,
+      },
+    ));
+    const undoButton = screen.getByRole("button", { name: "撤销" });
+    await waitFor(() => expect(undoButton).toBeEnabled());
+    await user.click(undoButton);
+
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledWith(
+      "/api/projects/project-1/gantt-tasks/history/restore",
+      {
+        snapshotId: "structure-snapshot-1",
+        actionLabel: "撤销：插入 2 条同级任务",
+      },
+    ));
+  });
+
+  it("uses compact toolbar buttons to undo and redo the current session history", async () => {
+    window.sessionStorage.setItem("ceastar:gantt-history:v1:project-1", JSON.stringify({
+      entries: [{
+        id: "entry-1",
+        kind: "DELETION",
+        label: "删除任务",
+        deletionBatchId: "batch-1",
+        target: { taskIds: [rootTask.id], anchorTaskId: rootTask.id },
+      }],
+      cursor: 0,
+    }));
+    mocks.get.mockImplementation((url: string) => {
+      if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      return Promise.resolve([]);
+    });
+    mocks.post.mockImplementation((url: string) => {
+      if (url.endsWith("/restore")) {
+        return Promise.resolve({ message: "已恢复 1 条甘特任务", restoredTaskCount: 1 });
+      }
+      if (url.endsWith("/redo")) {
+        return Promise.resolve({ deletionBatchId: "batch-2", deletedTaskCount: 1 });
+      }
+      return Promise.resolve({});
+    });
+
+    render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
+
+    const user = userEvent.setup();
+    const undoButton = await screen.findByRole("button", { name: "撤销" });
+    const redoButton = screen.getByRole("button", { name: "重做" });
+    await waitFor(() => expect(undoButton).toBeEnabled());
     expect(redoButton).toBeDisabled();
     expect(undoButton).toHaveClass("size-8");
     expect(redoButton).toHaveClass("size-8");

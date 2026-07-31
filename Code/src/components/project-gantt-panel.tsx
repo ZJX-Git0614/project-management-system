@@ -36,9 +36,17 @@ import {
   synchronizeGanttTaskCategories,
   type GanttHierarchyDirection,
 } from "@/lib/gantt-hierarchy";
+import {
+  emptyGanttHistoryState,
+  parseGanttHistoryState,
+  pushGanttHistoryEntry,
+  type GanttHistoryEntry,
+  type GanttHistoryFocusTarget,
+  type GanttHistoryState,
+} from "@/lib/gantt-history";
 import { cn } from "@/lib/utils";
 import { ProjectStatus } from "@/domain/enums";
-import type { ProjectGanttDeletionBatch, ProjectGanttTask, ProjectMember } from "@/domain/models";
+import type { ProjectGanttTask, ProjectMember } from "@/domain/models";
 
 interface ProjectGanttPanelProps {
   projectId: string;
@@ -72,6 +80,21 @@ interface GanttRestoreResult {
   message: string;
   restoredTaskCount: number;
   warnings?: string[];
+}
+
+interface GanttStructureResult {
+  tasks: ProjectGanttTask[];
+  createdTaskIds?: string[];
+  movedTaskIds?: string[];
+}
+
+interface GanttHistorySnapshotResult {
+  snapshotId: string;
+  createdAt: string;
+}
+
+export interface GanttHistoryFocusRequest extends GanttHistoryFocusTarget {
+  requestId: number;
 }
 
 type ScheduleImportPreview = {
@@ -109,10 +132,9 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
   const [mppExportAvailable, setMppExportAvailable] = useState(false);
   const [importPreview, setImportPreview] = useState<ScheduleImportPreview | null>(null);
-  const [deletionBatches, setDeletionBatches] = useState<ProjectGanttDeletionBatch[]>([]);
-  const [restoringBatchId, setRestoringBatchId] = useState<string | null>(null);
-  const [redoDeletionBatchId, setRedoDeletionBatchId] = useState<string | null>(null);
-  const [redoingBatchId, setRedoingBatchId] = useState<string | null>(null);
+  const [historySession, setHistorySession] = useState<{ projectId: string; state: GanttHistoryState }>({ projectId: "", state: emptyGanttHistoryState() });
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyFocusRequest, setHistoryFocusRequest] = useState<GanttHistoryFocusRequest | null>(null);
   const [operationError, setOperationError] = useState<{ title: string; message: string } | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const ganttCardRef = useRef<HTMLDivElement>(null);
@@ -150,32 +172,21 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     }
   }, [projectId]);
 
-  const fetchDeletionBatches = useCallback(async () => {
-    if (!canDelete) {
-      setDeletionBatches([]);
-      return [];
-    }
-    try {
-      const data = await api.get<ProjectGanttDeletionBatch[]>("/api/projects/" + projectId + "/gantt-tasks/deletions");
-      setDeletionBatches(data);
-      return data;
-    } catch {
-      setDeletionBatches([]);
-      return [];
-    }
-  }, [canDelete, projectId]);
-
   useEffect(() => {
     void Promise.resolve().then(() => fetchTasks({ showLoading: true, clearOnError: true }));
   }, [fetchTasks]);
 
   useEffect(() => {
-    void fetchDeletionBatches();
-  }, [fetchDeletionBatches]);
+    const state = typeof window === "undefined"
+      ? emptyGanttHistoryState()
+      : parseGanttHistoryState(window.sessionStorage.getItem(`ceastar:gantt-history:v1:${projectId}`));
+    setHistorySession({ projectId, state });
+  }, [projectId]);
 
   useEffect(() => {
-    setRedoDeletionBatchId(null);
-  }, [projectId]);
+    if (typeof window === "undefined" || historySession.projectId !== projectId) return;
+    window.sessionStorage.setItem(`ceastar:gantt-history:v1:${projectId}`, JSON.stringify(historySession.state));
+  }, [historySession, projectId]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -200,6 +211,58 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     document.addEventListener("fullscreenchange", handleFullscreenChange);
     return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
   }, []);
+
+  const currentHistory = historySession.projectId === projectId ? historySession.state : emptyGanttHistoryState();
+  const setCurrentHistory = (updater: (state: GanttHistoryState) => GanttHistoryState) => {
+    setHistorySession((current) => ({
+      projectId,
+      state: updater(current.projectId === projectId ? current.state : emptyGanttHistoryState()),
+    }));
+  };
+  const historySessionId = () => {
+    const key = "ceastar:gantt-history-session:v1";
+    const existing = window.sessionStorage.getItem(key);
+    if (existing) return existing;
+    const created = typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    window.sessionStorage.setItem(key, created);
+    return created;
+  };
+  const captureHistorySnapshot = async (label: string) => api.post<GanttHistorySnapshotResult>(
+    `/api/projects/${projectId}/gantt-tasks/history/snapshots`,
+    { sessionId: historySessionId(), label },
+  );
+  const signalHistoryTarget = (target: GanttHistoryFocusTarget) => {
+    setHistoryFocusRequest({ ...target, requestId: Date.now() + Math.random() });
+  };
+  const commitHistoryEntry = (entry: GanttHistoryEntry) => {
+    setCurrentHistory((state) => pushGanttHistoryEntry(state, entry));
+  };
+  const runWithSnapshotHistory = async <T,>(
+    label: string,
+    target: GanttHistoryFocusTarget,
+    action: () => Promise<T>,
+  ): Promise<T> => {
+    const before = await captureHistorySnapshot(`${label}:before`);
+    const result = await action();
+    void captureHistorySnapshot(`${label}:after`).then((after) => {
+      commitHistoryEntry({
+        id: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+        kind: "SNAPSHOT",
+        label,
+        beforeSnapshotId: before.snapshotId,
+        afterSnapshotId: after.snapshotId,
+        target,
+      });
+    }).catch((error) => {
+      setOperationError({
+        title: "操作已完成，但未能加入撤销历史",
+        message: error instanceof Error ? error.message : "保存操作历史失败",
+      });
+    });
+    return result;
+  };
 
   const handleImportFile = async (file?: File) => {
     if (!file) return;
@@ -226,20 +289,26 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
 
   const applyImport = async (mode: "APPEND" | "MERGE") => {
     if (!importPreview) return;
-    setRedoDeletionBatchId(null);
     setImporting(true);
     try {
-      const formData = new FormData();
-      formData.append("file", importPreview.file);
-      formData.append("mode", mode);
-      const response = await fetch(`/api/projects/${projectId}/gantt-tasks/import`, {
-        method: "POST",
-        headers: api.getToken() ? { Authorization: `Bearer ${api.getToken()}` } : {},
-        body: formData,
-      });
-      const body = await response.json();
-      if (!response.ok || !body.success) throw new Error(body.error || "导入失败");
-      await fetchTasks();
+      const body = await runWithSnapshotHistory(
+        mode === "MERGE" ? "合并更新计划文件" : "追加导入计划文件",
+        { taskIds: [] },
+        async () => {
+          const formData = new FormData();
+          formData.append("file", importPreview.file);
+          formData.append("mode", mode);
+          const response = await fetch(`/api/projects/${projectId}/gantt-tasks/import`, {
+            method: "POST",
+            headers: api.getToken() ? { Authorization: `Bearer ${api.getToken()}` } : {},
+            body: formData,
+          });
+          const responseBody = await response.json();
+          if (!response.ok || !responseBody.success) throw new Error(responseBody.error || "导入失败");
+          await fetchTasks();
+          return responseBody;
+        },
+      );
       setImportPreview(null);
       alert(mode === "MERGE"
         ? `已合并更新 ${body.data.updatedCount} 个任务，新增 ${body.data.createdCount} 个任务`
@@ -280,27 +349,30 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
 
   const startCreate = async (parentTask?: ProjectGanttTask) => {
     const parentId = parentTask?.id ?? null;
-    setRedoDeletionBatchId(null);
     setCreatingParentId(parentId ?? "root");
     try {
       const startDate = parentTask?.startDate || new Date().toISOString().slice(0, 10);
-      await api.post(`/api/projects/${projectId}/gantt-tasks`, {
-        parentId,
-        taskCategory: parentTask?.taskCategory ?? "",
-        taskName: "",
-        taskDescription: "",
-        startDate,
-        durationDays: 0,
-        ownerMemberId: null,
-        actualStartDate: "",
-        actualEndDate: "",
-        estimatedWorkHours: 0,
-        actualWorkHours: 0,
-        progress: 0,
-        predecessorTaskIds: [],
-        remark: "",
+      await runWithSnapshotHistory("新增任务", { taskIds: [], anchorTaskId: parentTask?.id }, async () => {
+        const created = await api.post<ProjectGanttTask>(`/api/projects/${projectId}/gantt-tasks`, {
+          parentId,
+          taskCategory: parentTask?.taskCategory ?? "",
+          taskName: "",
+          taskDescription: "",
+          startDate,
+          durationDays: 0,
+          ownerMemberId: null,
+          actualStartDate: "",
+          actualEndDate: "",
+          estimatedWorkHours: 0,
+          actualWorkHours: 0,
+          progress: 0,
+          predecessorTaskIds: [],
+          remark: "",
+        });
+        await fetchTasks();
+        signalHistoryTarget({ taskIds: [created.id], columnKey: "taskName" });
+        return created;
       });
-      await fetchTasks();
     } catch (error) {
       alert(error instanceof Error ? error.message : "新建失败");
     } finally {
@@ -308,9 +380,9 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     }
   };
 
-  const handleUpdateTask = async (task: ProjectGanttTask, draft: GanttTaskDraft) => {
-    if (!draft.startDate || !isValidGanttDurationDays(draft.durationDays)) {
-      alert("请填写计划开始时间，工期留空或按 0.5 天为单位填写");
+  const handleUpdateTask = async (task: ProjectGanttTask, draft: GanttTaskDraft, columnKey?: string) => {
+    if (!isValidGanttDurationDays(draft.durationDays) || (!draft.startDate && draft.durationDays > 0)) {
+      alert("工期留空或按 0.5 天为单位填写；填写工期时需要计划开始时间");
       return;
     }
     if (draft.progress < 0 || draft.progress > 100) {
@@ -321,11 +393,12 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       alert("预计工时和实际工时不能小于 0");
       return;
     }
-    setRedoDeletionBatchId(null);
     setSavingTaskId(task.id);
     try {
-      await api.put<ProjectGanttTask>(`/api/projects/${projectId}/gantt-tasks/${task.id}`, draft);
-      await fetchTasks();
+      await runWithSnapshotHistory("编辑任务字段", { taskIds: [task.id], columnKey }, async () => {
+        await api.put<ProjectGanttTask>(`/api/projects/${projectId}/gantt-tasks/${task.id}`, draft);
+        await fetchTasks();
+      });
     } catch (error) {
       alert(error instanceof Error ? error.message : "保存失败");
       await fetchTasks();
@@ -341,8 +414,6 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       ? window.confirm(`确认删除选中的 ${selectedTasks.length} 个甘特任务？`)
       : await confirm(`确认删除选中的 ${selectedTasks.length} 个甘特任务？`);
     if (!confirmed) return;
-    setRedoDeletionBatchId(null);
-
     const selectedIdSet = new Set(selectedTasks.map((task) => task.id));
     const taskById = new Map(tasks.map((task) => [task.id, task]));
     const deleteRoots = selectedTasks.filter((task) => {
@@ -356,58 +427,75 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
 
     setDeletingSelected(true);
     try {
-      const results: GanttDeleteResult[] = [];
-      for (const task of deleteRoots) {
-        results.push(await api.delete<GanttDeleteResult>("/api/projects/" + projectId + "/gantt-tasks/" + task.id));
+      const result = await api.post<GanttDeleteResult>(`/api/projects/${projectId}/gantt-tasks/deletions`, {
+        rootTaskIds: deleteRoots.map((task) => task.id),
+      });
+      const deletedTaskCount = result.deletedTaskCount ?? 0;
+      const detachedWeeklyItemCount = result.detachedWeeklyItemCount ?? 0;
+      const detachedRiskCount = result.detachedRiskCount ?? 0;
+      if (result.deletionBatchId) {
+        commitHistoryEntry({
+          id: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+          kind: "DELETION",
+          label: "删除任务",
+          deletionBatchId: result.deletionBatchId,
+          target: { taskIds: deleteRoots.map((task) => task.id), anchorTaskId: deleteRoots[0]?.id },
+        });
       }
-      const deletedTaskCount = results.reduce((sum, item) => sum + (item.deletedTaskCount ?? 0), 0);
-      const detachedWeeklyItemCount = results.reduce((sum, item) => sum + (item.detachedWeeklyItemCount ?? 0), 0);
-      const detachedRiskCount = results.reduce((sum, item) => sum + (item.detachedRiskCount ?? 0), 0);
       if (deletedTaskCount > 0 && (detachedWeeklyItemCount > 0 || detachedRiskCount > 0)) {
         alert("已删除 " + deletedTaskCount + " 条甘特任务，并解除 " + detachedWeeklyItemCount + " 条事项、" + detachedRiskCount + " 条风险关联；可在最近删除中撤销。");
       }
     } catch (error) {
       alert(error instanceof Error ? error.message : "删除失败");
     } finally {
-      await Promise.all([fetchTasks(), fetchDeletionBatches()]);
+      await fetchTasks();
       setDeletingSelected(false);
     }
   };
 
-  const handleRestoreDeletion = async (batchId: string) => {
-    setRestoringBatchId(batchId);
-    try {
-      const result = await api.post<GanttRestoreResult>("/api/projects/" + projectId + "/gantt-tasks/deletions/" + batchId + "/restore");
-      await Promise.all([fetchTasks(), fetchDeletionBatches()]);
-      setRedoDeletionBatchId(batchId);
-      if (result.warnings?.length) {
-        alert(result.message + "\n\n注意：\n" + result.warnings.join("\n"));
-      }
-    } catch (error) {
-      setOperationError({ title: "撤销删除失败", message: error instanceof Error ? error.message : "恢复失败" });
-      await fetchDeletionBatches();
-    } finally {
-      setRestoringBatchId(null);
-    }
+  const handleInsertTasks = async (
+    anchorTaskId: string,
+    placement: "SIBLING_BEFORE" | "SIBLING_AFTER" | "CHILD_FIRST" | "CHILD_LAST",
+    count: number,
+  ) => {
+    const label = placement.startsWith("CHILD") ? `插入 ${count} 条子任务` : `插入 ${count} 条同级任务`;
+    return runWithSnapshotHistory(label, { taskIds: [], anchorTaskId, columnKey: "taskName" }, async () => {
+      const result = await api.post<GanttStructureResult>(`/api/projects/${projectId}/gantt-tasks/structure`, {
+        operation: "INSERT",
+        anchorTaskId,
+        placement,
+        count,
+      });
+      setTasks(result.tasks);
+      const createdTaskIds = result.createdTaskIds ?? [];
+      signalHistoryTarget({ taskIds: createdTaskIds, anchorTaskId, columnKey: "taskName" });
+      return { createdTaskIds };
+    });
   };
 
-  const handleRedoDeletion = async (batchId: string) => {
-    setRedoingBatchId(batchId);
-    try {
-      await api.post<GanttDeleteResult>("/api/projects/" + projectId + "/gantt-tasks/deletions/" + batchId + "/redo");
-      setRedoDeletionBatchId(null);
-      await Promise.all([fetchTasks(), fetchDeletionBatches()]);
-    } catch (error) {
-      setRedoDeletionBatchId(null);
-      setOperationError({ title: "取消撤销失败", message: error instanceof Error ? error.message : "重新删除失败" });
-      await Promise.all([fetchTasks(), fetchDeletionBatches()]);
-    } finally {
-      setRedoingBatchId(null);
-    }
-  };
+  const handlePasteTasks = async (
+    mode: "COPY" | "MOVE",
+    sourceTaskIds: string[],
+    anchorTaskId: string,
+    position: "BEFORE" | "AFTER",
+  ) => runWithSnapshotHistory(
+    mode === "COPY" ? "复制粘贴任务" : "剪切移动任务",
+    { taskIds: sourceTaskIds, anchorTaskId },
+    async () => {
+      const result = await api.post<GanttStructureResult>(`/api/projects/${projectId}/gantt-tasks/structure`, {
+        operation: mode,
+        sourceTaskIds,
+        anchorTaskId,
+        position,
+      });
+      setTasks(result.tasks);
+      const taskIds = mode === "COPY" ? result.createdTaskIds ?? [] : result.movedTaskIds ?? [];
+      signalHistoryTarget({ taskIds, anchorTaskId });
+      return { taskIds };
+    },
+  );
 
-  const handleReorderTasks = async (taskIds: string[]) => {
-    setRedoDeletionBatchId(null);
+  const handleReorderTasks = async (taskIds: string[], movedTaskId?: string) => {
     setTasks((prev) => {
       const taskById = new Map(prev.map((task) => [task.id, task]));
       return renumberGanttTaskCodes(
@@ -416,8 +504,10 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     });
     setReordering(true);
     try {
-      await api.put(`/api/projects/${projectId}/gantt-tasks/reorder`, { taskIds });
-      await fetchTasks();
+      await runWithSnapshotHistory("拖拽排序任务", { taskIds: movedTaskId ? [movedTaskId] : [] }, async () => {
+        await api.put(`/api/projects/${projectId}/gantt-tasks/reorder`, { taskIds });
+        await fetchTasks();
+      });
     } catch (error) {
       alert(error instanceof Error ? error.message : "排序保存失败");
       await fetchTasks();
@@ -429,15 +519,16 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const handleChangeHierarchy = async (taskIds: string[], direction: GanttHierarchyDirection) => {
     const optimistic = changeGanttTaskHierarchy(tasks, taskIds, direction);
     if (optimistic.movedTaskIds.length === 0) return;
-    setRedoDeletionBatchId(null);
-    setTasks(renumberGanttTaskCodes(synchronizeGanttTaskCategories(optimistic.tasks, optimistic.movedTaskIds)));
+    setTasks(renumberGanttTaskCodes(synchronizeGanttTaskCategories(optimistic.tasks, optimistic.changedTasks.map((task) => task.id))));
     setHierarchyChanging(true);
     try {
-      const result = await api.put<{ tasks: ProjectGanttTask[]; movedTaskIds: string[]; message: string }>(
-        `/api/projects/${projectId}/gantt-tasks/hierarchy`,
-        { taskIds, direction },
-      );
-      setTasks(result.tasks);
+      await runWithSnapshotHistory(direction === "INDENT" ? "任务层级下移" : "任务层级上移", { taskIds: optimistic.movedTaskIds }, async () => {
+        const result = await api.put<{ tasks: ProjectGanttTask[]; movedTaskIds: string[]; message: string }>(
+          `/api/projects/${projectId}/gantt-tasks/hierarchy`,
+          { taskIds, direction },
+        );
+        setTasks(result.tasks);
+      });
     } catch (error) {
       alert(error instanceof Error ? error.message : "任务层级调整失败");
       await fetchTasks();
@@ -460,14 +551,15 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
 
   const changeCalendarMode = async (nextMode: GanttCalendarMode) => {
     if (nextMode === calendarMode || savingCalendarMode || !canEdit) return;
-    setRedoDeletionBatchId(null);
     setSavingCalendarMode(true);
     try {
-      const settings = await api.put<GanttSettings>(`/api/projects/${projectId}/gantt-settings`, {
-        calendarMode: nextMode,
+      await runWithSnapshotHistory("修改工期计算方式", { taskIds: [] }, async () => {
+        const settings = await api.put<GanttSettings>(`/api/projects/${projectId}/gantt-settings`, {
+          calendarMode: nextMode,
+        });
+        setCalendarMode(settings.calendarMode);
+        await fetchTasks();
       });
-      setCalendarMode(settings.calendarMode);
-      await fetchTasks();
     } catch (error) {
       alert(error instanceof Error ? error.message : "工期计算方式保存失败");
     } finally {
@@ -475,13 +567,89 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     }
   };
 
+  const handleUndo = async () => {
+    const entry = currentHistory.entries[currentHistory.cursor];
+    if (!entry || historyBusy) return;
+    setHistoryBusy(true);
+    try {
+      if (entry.kind === "SNAPSHOT") {
+        await api.post(`/api/projects/${projectId}/gantt-tasks/history/restore`, {
+          snapshotId: entry.beforeSnapshotId,
+          actionLabel: `撤销：${entry.label}`,
+        });
+      } else {
+        const result = await api.post<GanttRestoreResult>(`/api/projects/${projectId}/gantt-tasks/deletions/${entry.deletionBatchId}/restore`);
+        if (result.warnings?.length) alert(`${result.message}\n\n注意：\n${result.warnings.join("\n")}`);
+      }
+      await fetchTasks();
+      setCurrentHistory((state) => ({ ...state, cursor: Math.max(-1, state.cursor - 1) }));
+      signalHistoryTarget(entry.target);
+    } catch (error) {
+      setOperationError({ title: "撤销失败", message: error instanceof Error ? error.message : "撤销操作失败" });
+    } finally {
+      setHistoryBusy(false);
+    }
+  };
+
+  const handleRedo = async () => {
+    const entryIndex = currentHistory.cursor + 1;
+    const entry = currentHistory.entries[entryIndex];
+    if (!entry || historyBusy) return;
+    setHistoryBusy(true);
+    try {
+      if (entry.kind === "SNAPSHOT") {
+        await api.post(`/api/projects/${projectId}/gantt-tasks/history/restore`, {
+          snapshotId: entry.afterSnapshotId,
+          actionLabel: `重做：${entry.label}`,
+        });
+      } else {
+        const result = await api.post<GanttDeleteResult>(`/api/projects/${projectId}/gantt-tasks/deletions/${entry.deletionBatchId}/redo`);
+        if (result.deletionBatchId) {
+          setCurrentHistory((state) => ({
+            ...state,
+            entries: state.entries.map((item, index) => index === entryIndex && item.kind === "DELETION"
+              ? { ...item, deletionBatchId: result.deletionBatchId! }
+              : item),
+          }));
+        }
+      }
+      await fetchTasks();
+      setCurrentHistory((state) => ({ ...state, cursor: Math.min(state.entries.length - 1, state.cursor + 1) }));
+      signalHistoryTarget(entry.target);
+    } catch (error) {
+      setOperationError({ title: "重做失败", message: error instanceof Error ? error.message : "重做操作失败" });
+    } finally {
+      setHistoryBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
+      const modifier = event.metaKey || event.ctrlKey;
+      if (!modifier || event.altKey) return;
+      const key = event.key.toLowerCase();
+      if (key === "z" && !event.shiftKey) {
+        event.preventDefault();
+        void handleUndo();
+      } else if ((key === "z" && event.shiftKey) || key === "y") {
+        event.preventDefault();
+        void handleRedo();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
+
   if (loading) {
     return <div className="text-sm text-muted-foreground">加载中...</div>;
   }
 
   const range = getGanttDateRange(tasks);
   const criticalCount = buildGanttRows(tasks).filter((row) => row.isCritical).length;
-  const latestDeletionBatch = deletionBatches[0];
+  const undoEntry = currentHistory.entries[currentHistory.cursor];
+  const redoEntry = currentHistory.entries[currentHistory.cursor + 1];
 
   return (
     <div className="space-y-4">
@@ -516,17 +684,17 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   </div>
                 </div>
               )}
-              {canDelete && (
+              {(canCreate || canEdit || canDelete) && (
                 <div className="flex items-center gap-2" role="group" aria-label="撤销与取消撤销">
                   <Button
                     type="button"
                     size="icon"
                     variant="outline"
                     className="size-8"
-                    disabled={!latestDeletionBatch || Boolean(restoringBatchId) || Boolean(redoingBatchId)}
-                    onClick={() => latestDeletionBatch && void handleRestoreDeletion(latestDeletionBatch.id)}
-                    title="撤销删除"
-                    aria-label="撤销删除"
+                    disabled={!undoEntry || historyBusy}
+                    onClick={() => void handleUndo()}
+                    title={undoEntry ? `撤销：${undoEntry.label}` : "没有可撤销的操作"}
+                    aria-label="撤销"
                   >
                     <Undo2 className="size-3.5" />
                   </Button>
@@ -535,10 +703,10 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                     size="icon"
                     variant="outline"
                     className="size-8"
-                    disabled={!redoDeletionBatchId || Boolean(restoringBatchId) || Boolean(redoingBatchId)}
-                    onClick={() => redoDeletionBatchId && void handleRedoDeletion(redoDeletionBatchId)}
-                    title="取消撤销"
-                    aria-label="取消撤销"
+                    disabled={!redoEntry || historyBusy}
+                    onClick={() => void handleRedo()}
+                    title={redoEntry ? `重做：${redoEntry.label}` : "没有可重做的操作"}
+                    aria-label="重做"
                   >
                     <Redo2 className="size-3.5" />
                   </Button>
@@ -659,11 +827,16 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
             portalContainer={fullScreen ? ganttPortalContainer : undefined}
             calendarMode={calendarMode}
             hierarchyChanging={hierarchyChanging}
+            historyFocusRequest={historyFocusRequest}
             onChangeHierarchy={handleChangeHierarchy}
             onCreateTask={startCreate}
             onDeleteSelected={handleDeleteSelected}
+            onInsertTasks={handleInsertTasks}
+            onPasteTasks={handlePasteTasks}
+            onActionError={(message) => setOperationError({ title: "甘特任务操作失败", message })}
             onReorderTasks={handleReorderTasks}
             onUpdateTask={handleUpdateTask}
+            projectId={projectId}
             projectMembers={projectMembers}
             reordering={reordering}
             savingTaskId={savingTaskId}

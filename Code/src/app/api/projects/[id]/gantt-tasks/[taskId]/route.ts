@@ -42,11 +42,12 @@ export async function PUT(
   const taskDescription = String(body.taskDescription ?? existing.taskDescription ?? "").trim();
   const requestedStartDate = String(body.startDate ?? "").trim();
   const durationDays = Number(body.durationDays ?? 0);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(requestedStartDate)) return err("计划开始时间格式应为 YYYY-MM-DD");
+  if (requestedStartDate && !/^\d{4}-\d{2}-\d{2}$/.test(requestedStartDate)) return err("计划开始时间格式应为 YYYY-MM-DD");
   if (!isValidGanttDurationDays(durationDays)) return err("工期只能为空或以 0.5 天为单位填写");
+  if (!requestedStartDate && durationDays > 0) return err("填写工期时需要计划开始时间");
   const calendarMode = await getProjectGanttCalendarMode(id);
-  const startDate = normalizeTaskStartDate(requestedStartDate, calendarMode);
-  const finishDate = calculateTaskFinishDate(startDate, durationDays, calendarMode);
+  const startDate = requestedStartDate ? normalizeTaskStartDate(requestedStartDate, calendarMode) : "";
+  const finishDate = startDate ? calculateTaskFinishDate(startDate, durationDays, calendarMode) : "";
   const actualStartDate = String(body.actualStartDate ?? "").trim();
   const actualEndDate = String(body.actualEndDate ?? "").trim();
   const estimatedWorkHours = estimatedHoursForDuration(durationDays);
