@@ -44,6 +44,7 @@ interface Project {
 interface ProjectMember {
   id: string;
   projectId: string;
+  accountId?: string | null;
   roleName: string;
   personName: string;
   createdAt: string;
@@ -499,7 +500,12 @@ const AddMemberDialog = ({
     }
     setSubmitting(true);
     try {
-      await api.post(`/api/projects/${projectId}/members`, { roleName, personName });
+      const account = candidates.find((candidate) => candidate.displayName === personName);
+      await api.post(`/api/projects/${projectId}/members`, {
+        roleName,
+        personName,
+        accountId: account?.id,
+      });
       await onSuccess();
     } catch (err) {
       alert(err instanceof Error ? err.message : "添加失败");

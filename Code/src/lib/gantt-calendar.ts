@@ -51,6 +51,11 @@ export const normalizeTaskStartDate = (value: string, mode: GanttCalendarMode): 
   return formatGanttDate(moveToWorkingDate(parseGanttDate(value), 1));
 };
 
+export const normalizeTaskFinishDate = (value: string, mode: GanttCalendarMode): string => {
+  if (!value || mode === "CALENDAR_DAYS") return value;
+  return formatGanttDate(moveToWorkingDate(parseGanttDate(value), -1));
+};
+
 export const calculateTaskFinishDate = (
   startDate: string,
   durationDays: number,

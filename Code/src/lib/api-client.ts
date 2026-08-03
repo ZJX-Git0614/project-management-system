@@ -137,7 +137,37 @@ async function request<T>(
   return body.data as T
 }
 
-async function requestBlob(url: string, retryOnExpired = true): Promise<Blob> {
+const cleanDownloadFileName = (value: string) => {
+  const name = value
+    .replace(/^['"]|['"]$/g, "")
+    .split(/[\\/]/)
+    .pop()
+    ?.replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+  return name || undefined
+}
+
+export const parseDownloadFileName = (contentDisposition: string | null) => {
+  if (!contentDisposition) return undefined
+  const encoded = contentDisposition.match(/filename\*\s*=\s*(?:UTF-8'')?([^;]+)/i)?.[1]
+  if (encoded) {
+    try {
+      return cleanDownloadFileName(decodeURIComponent(encoded.replace(/^['"]|['"]$/g, "")))
+    } catch {
+      // Fall through to the legacy filename parameter.
+    }
+  }
+  const plain = contentDisposition.match(/filename\s*=\s*("(?:[^"\\]|\\.)*"|[^;]+)/i)?.[1]
+  if (!plain) return undefined
+  return cleanDownloadFileName(plain.replace(/\\"/g, "\"").trim())
+}
+
+export type DownloadResponse = {
+  blob: Blob
+  fileName?: string
+}
+
+async function requestDownload(url: string, retryOnExpired = true): Promise<DownloadResponse> {
   const token = getToken()
   const res = await fetch(url, {
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
@@ -146,14 +176,21 @@ async function requestBlob(url: string, retryOnExpired = true): Promise<Blob> {
   if (!res.ok) {
     if (res.status === 401 && retryOnExpired) {
       const newToken = await refreshToken()
-      if (newToken) return requestBlob(url, false)
+      if (newToken) return requestDownload(url, false)
     }
     const body = await res.json().catch(() => ({ error: "下载失败" }))
     if (res.status === 401) redirectToLogin()
     throw new Error(body.error || "下载失败")
   }
 
-  return res.blob()
+  return {
+    blob: await res.blob(),
+    fileName: parseDownloadFileName(res.headers.get("Content-Disposition")),
+  }
+}
+
+async function requestBlob(url: string): Promise<Blob> {
+  return (await requestDownload(url)).blob
 }
 
 export const api = {
@@ -168,6 +205,7 @@ export const api = {
   upload: <T>(url: string, data: FormData) =>
     request<T>(url, { method: "POST", body: data }),
   download: (url: string) => requestBlob(url),
+  downloadFile: (url: string) => requestDownload(url),
   getToken,
   getStoredUser,
   saveAuth,

@@ -46,6 +46,7 @@ describe("assistant settings foundations", () => {
       "todo.complete",
       "weekly.status.update",
       "risk.create",
+      "risk.create.batch",
       "risk.status.update",
       "schedule.compare.file",
       "schedule.convert.file",
@@ -76,5 +77,13 @@ describe("assistant settings foundations", () => {
     expect(validateAssistantToolArgs("weekly.status.update", { weeklyItemId: "item-1", status: "DONE", progress: 100 })).toMatchObject({ ok: false });
     expect(validateAssistantToolArgs("todo.create", { title: "核对计划", targetPersonName: "张三", injected: true })).toMatchObject({ ok: false });
     expect(validateAssistantToolArgs("schedule.merge.files", { attachmentIds: ["only-one"] })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("project.export", { exportType: "gantt", taskDepths: [1, 2, 3] })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("project.export", { exportType: "gantt", taskCategoryKeywords: ["前端"], includeProgressReport: true })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("project.export", { exportType: "budget", includeVisualization: true })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("project.export", { exportType: "gantt", includeProgressReport: "true" })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("project.export", { exportType: "gantt", taskDepths: [0, 2] })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("project.export", { exportType: "gantt", taskDepths: [1.5] })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("risk.create.batch", { risks: [{ riskName: "供应商延期风险" }] })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("risk.create.batch", { risks: [] })).toMatchObject({ ok: false });
   });
 });

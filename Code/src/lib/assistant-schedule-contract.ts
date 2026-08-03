@@ -40,6 +40,13 @@ export interface AssistantScheduleTaskV1 {
   taskName: string;
   startDate: string;
   finishDate: string;
+  earlyStartDate?: string;
+  earlyFinishDate?: string;
+  lateStartDate?: string;
+  lateFinishDate?: string;
+  totalFloatMinutes?: number | null;
+  freeFloatMinutes?: number | null;
+  scheduleStatus?: string;
   durationDays: number;
   durationMinutes: number;
   durationFormat: number;

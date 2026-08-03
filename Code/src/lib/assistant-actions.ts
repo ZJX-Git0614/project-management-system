@@ -41,10 +41,32 @@ import { analyzeSchedule } from "@/lib/schedule-analysis";
 import { buildImportedScheduleSnapshot, getCurrentScheduleSnapshot } from "@/lib/schedule-snapshot";
 import { isDocumentRevisionRequest, reviseDocumentsWithSmallModel } from "@/lib/assistant-document-revision";
 import {
+  assistantExportPlanPreservesRequest,
+  buildGanttProgressReport,
   describeAssistantExportFilters,
+  normalizeAssistantProjectExportIntent,
   parseAssistantProjectExportIntent,
+  selectGanttExportRows,
+  selectWeeklyExportRows,
+  type AssistantProjectExportIntent,
 } from "@/lib/assistant-export";
 import { itemProgressFields, itemStatusFromProgress } from "@/lib/item-progress";
+import { getAssistantBudgetWorkbookSheetNames } from "@/lib/assistant-project-export-workbook";
+import { callAssistantProviderModel } from "@/lib/assistant-provider-client";
+import { buildProjectAssistantContext } from "@/lib/project-assistant";
+import {
+  buildProjectAssistantQueryIntent,
+  buildProjectAssistantVisibleContext,
+} from "@/lib/project-assistant-query";
+import {
+  synchronizeGanttTaskCategories,
+  synchronizeGanttTaskCategoriesAfterNameChange,
+} from "@/lib/gantt-hierarchy";
+import {
+  extractAssistantRiskDrafts,
+  isContextualRiskRegistrationRequest,
+  normalizeAssistantRiskDrafts,
+} from "@/lib/assistant-risk-drafts";
 
 export type AssistantActionView = {
   id: string;
@@ -108,13 +130,12 @@ export const parseGanttTaskCreateIntent = (message: string) => {
   const taskName = parseCommandField(message, ["任务名称", "任务"])
     || message.match(/[“"']([^”"']{1,100})[”"']/u)?.[1]?.trim()
     || "";
-  const taskCategory = parseCommandField(message, ["任务类别", "类别"]);
   const startDate = message.match(/(?:计划开始|开始日期|开始时间)\s*(?:为|[:：])?\s*(\d{4}-\d{2}-\d{2})/u)?.[1] || "";
   const durationText = message.match(/(?:工期|持续时间)\s*(?:为|[:：])?\s*(\d+(?:\.5)?)/u)?.[1];
   const durationDays = durationText === undefined ? Number.NaN : Number(durationText);
   const parentTaskCode = message.match(/(?:父任务|上级任务|父级)\s*(?:为|[:：])?\s*(Task\d+(?:\.\d+)*)/iu)?.[1] || undefined;
-  if (!taskName || !taskCategory || !/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !isValidGanttDurationDays(durationDays)) return null;
-  return { taskName, taskCategory, startDate, durationDays, parentTaskCode };
+  if (!taskName || !/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !isValidGanttDurationDays(durationDays)) return null;
+  return { taskName, startDate, durationDays, parentTaskCode };
 };
 
 export const parseGanttTaskTextUpdateIntent = (message: string) => {
@@ -251,6 +272,7 @@ export const parseRiskDeleteIntent = (message: string) => {
 };
 
 export const parseRiskCreationName = (message: string) => {
+  if (isContextualRiskRegistrationRequest(message)) return null;
   if (!/(创建|新增|新建|登记).{0,8}风险|风险.{0,8}(创建|新增|新建|登记)/u.test(message)) return null;
   if (/(分析结论|计划分析|冲突).*(转为|创建|新增|登记).*风险/u.test(message)) return null;
   const name = message
@@ -327,6 +349,29 @@ const createProposal = async (params: {
   return serializeAssistantAction(action);
 };
 
+const countAssistantProjectExportRows = async (
+  projectId: string,
+  intent: AssistantProjectExportIntent,
+) => {
+  if (intent.exportType === "gantt") {
+    const rows = await prisma.projectGanttTask.findMany({
+      where: { projectId },
+      select: { id: true, parentId: true, taskCode: true, taskCategory: true, taskName: true, sortOrder: true, createdAt: true, progress: true },
+    });
+    return selectGanttExportRows(rows, intent).length;
+  }
+  if (intent.exportType === "weekly") {
+    const rows = await prisma.weeklyItem.findMany({
+      where: { projectId },
+      select: { priority: true, progress: true },
+    });
+    return selectWeeklyExportRows(rows, intent).length;
+  }
+  if (intent.exportType === "risk") return prisma.riskRegisterItem.count({ where: { projectId } });
+  if (intent.exportType === "budget") return prisma.projectBudgetItem.count({ where: { projectId } });
+  return 0;
+};
+
 export const proposeAssistantAction = async (params: {
   message: string;
   projectId: string;
@@ -335,6 +380,7 @@ export const proposeAssistantAction = async (params: {
   history?: Array<{ role: "user" | "assistant"; content: string }>;
   attachmentIds?: string[];
   expectedToolId?: string;
+  plannedArgs?: Record<string, unknown>;
 }): Promise<AssistantActionView | null> => {
   if (!params.runtime.agentEnabled || !params.projectId) return null;
   if (!(await ensureProjectAccess(params.user, params.projectId))) return null;
@@ -615,13 +661,12 @@ export const proposeAssistantAction = async (params: {
         riskLevel: "MEDIUM",
         args: {
           taskName: ganttTaskCreateIntent.taskName,
-          taskCategory: ganttTaskCreateIntent.taskCategory,
           startDate: ganttTaskCreateIntent.startDate,
           durationDays: ganttTaskCreateIntent.durationDays,
           ...(parent ? { parentTaskId: parent.id } : {}),
         },
         title: "新增甘特任务",
-        description: `新增任务「${ganttTaskCreateIntent.taskName}」：类别 ${ganttTaskCreateIntent.taskCategory}，计划开始 ${ganttTaskCreateIntent.startDate}，工期 ${ganttTaskCreateIntent.durationDays} 天${parent ? `，父任务为 ${parent.taskCode} ${parent.taskName}` : ""}`,
+        description: `新增任务「${ganttTaskCreateIntent.taskName}」：计划开始 ${ganttTaskCreateIntent.startDate}，工期 ${ganttTaskCreateIntent.durationDays} 天${parent ? `，父任务为 ${parent.taskCode} ${parent.taskName}` : ""}；任务类别由层级自动生成`,
       });
     }
   }
@@ -806,6 +851,25 @@ export const proposeAssistantAction = async (params: {
     }
   }
 
+  const plannedRiskDrafts = params.expectedToolId === "risk.create.batch"
+    ? normalizeAssistantRiskDrafts(params.plannedArgs?.risks)
+    : [];
+  const contextualRiskDrafts = isContextualRiskRegistrationRequest(params.message)
+    ? extractAssistantRiskDrafts(params.history ?? [])
+    : [];
+  const riskDrafts = contextualRiskDrafts.length > 0 ? contextualRiskDrafts : plannedRiskDrafts;
+  if (canUse("risk.create.batch") && riskDrafts.length > 0) {
+    const names = riskDrafts.slice(0, 5).map((risk) => risk.riskName).join("、");
+    return createProposal({
+      ...params,
+      toolId: "risk.create.batch",
+      riskLevel: "MEDIUM",
+      args: { risks: riskDrafts },
+      title: `登记 ${riskDrafts.length} 条项目风险`,
+      description: `${names}${riskDrafts.length > 5 ? ` 等 ${riskDrafts.length} 条风险` : ""}；同名风险不会重复创建`,
+    });
+  }
+
   const riskName = parseRiskCreationName(params.message);
   if (canUse("risk.create") && riskName) {
     return createProposal({
@@ -818,19 +882,48 @@ export const proposeAssistantAction = async (params: {
     });
   }
 
-  const exportIntent = parseAssistantProjectExportIntent(params.message);
+  const requestedExportIntent = parseAssistantProjectExportIntent(params.message);
+  const plannedExportIntent = params.expectedToolId === "project.export" && params.plannedArgs
+    ? normalizeAssistantProjectExportIntent(params.plannedArgs)
+    : null;
+  const exportIntent = plannedExportIntent
+    && (!requestedExportIntent || assistantExportPlanPreservesRequest(requestedExportIntent, plannedExportIntent))
+    ? plannedExportIntent
+    : params.expectedToolId === "project.export" && params.plannedArgs
+      ? null
+      : requestedExportIntent;
   const projectExportType = exportIntent && exportIntent.exportType !== "scheduleAnalysis" ? exportIntent.exportType : null;
   if (canUse("project.export") && exportIntent && projectExportType) {
     const label = { gantt: "任务进度", weekly: "项目事项", risk: "风险登记册", budget: "项目预算" }[projectExportType];
     const filters = describeAssistantExportFilters(exportIntent);
+    const matchedRowCount = await countAssistantProjectExportRows(params.projectId, exportIntent);
+    const format = projectExportType === "gantt" || projectExportType === "budget" ? "Excel 工作簿" : "CSV 文件";
     return createProposal({
       ...params,
       toolId: "project.export",
       riskLevel: "LOW",
       args: exportIntent,
       title: `导出${label}`,
-      description: `生成当前项目的${label} CSV 文件${filters.length > 0 ? `，仅包含${filters.join("、")}` : ""}`,
+      description: `生成当前项目的${label}${format}${filters.length > 0 ? `，仅包含${filters.join("、")}` : ""}；当前命中 ${matchedRowCount} 条记录`,
     });
+  }
+  if (canUse("project.report.generate") && params.expectedToolId === "project.report.generate" && params.plannedArgs) {
+    const title = String(params.plannedArgs.title || "").trim();
+    const instructions = String(params.plannedArgs.instructions || "").trim();
+    const domains = Array.isArray(params.plannedArgs.domains)
+      ? Array.from(new Set(params.plannedArgs.domains.map((value) => String(value || "").trim()).filter(Boolean)))
+      : [];
+    const intent = buildProjectAssistantQueryIntent(domains);
+    if (title && instructions && intent) {
+      return createProposal({
+        ...params,
+        toolId: "project.report.generate",
+        riskLevel: "LOW",
+        args: { title, instructions, domains: intent.domains },
+        title: `生成${title}`,
+        description: `读取当前账号已授权的${intent.label}数据，按要求分析并生成独立 Markdown 报告`,
+      });
+    }
   }
   return null;
 };
@@ -1001,20 +1094,23 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
 
   if (action.toolId === "gantt.task.create") {
     const taskName = String(args.taskName || "").trim();
-    const taskCategory = String(args.taskCategory || "").trim();
     const requestedStartDate = String(args.startDate || "").trim();
     const durationDays = Number(args.durationDays);
     const parentTaskId = args.parentTaskId ? String(args.parentTaskId) : null;
-    if (!taskName || !taskCategory || !/^\d{4}-\d{2}-\d{2}$/.test(requestedStartDate) || !isValidGanttDurationDays(durationDays)) {
-      throw new Error("新增任务需要有效的任务名称、任务类别、计划开始日期和以 0.5 天为单位的工期");
+    if (!taskName || !/^\d{4}-\d{2}-\d{2}$/.test(requestedStartDate) || !isValidGanttDurationDays(durationDays)) {
+      throw new Error("新增任务需要有效的任务名称、计划开始日期和以 0.5 天为单位的工期");
     }
     const calendarMode = await getProjectGanttCalendarMode(action.projectId);
     const startDate = normalizeTaskStartDate(requestedStartDate, calendarMode);
     const finishDate = calculateTaskFinishDate(startDate, durationDays, calendarMode);
     const parent = parentTaskId
-      ? await prisma.projectGanttTask.findFirst({ where: { id: parentTaskId, projectId: action.projectId }, select: { id: true } })
+      ? await prisma.projectGanttTask.findFirst({
+          where: { id: parentTaskId, projectId: action.projectId },
+          select: { id: true, taskCategory: true, taskName: true },
+        })
       : null;
     if (parentTaskId && !parent) throw new Error("父任务不存在或不属于当前项目");
+    const taskCategory = parent ? parent.taskCategory.trim() || parent.taskName.trim() : taskName;
     const siblings = await prisma.projectGanttTask.findMany({
       where: { projectId: action.projectId, parentId: parentTaskId },
       orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
@@ -1034,6 +1130,7 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
           taskCode: "",
           taskCategory,
           taskName,
+          taskDescription: "无",
           startDate,
           finishDate,
           durationDays,
@@ -1067,7 +1164,7 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     const taskId = String(args.taskId || "");
     const data = {
       ...(typeof args.taskName === "string" ? { taskName: args.taskName.trim() } : {}),
-      ...(typeof args.taskDescription === "string" ? { taskDescription: args.taskDescription.trim() } : {}),
+      ...(typeof args.taskDescription === "string" ? { taskDescription: args.taskDescription.trim() || "无" } : {}),
       ...(typeof args.remark === "string" ? { remark: args.remark.trim() } : {}),
     };
     if (Object.keys(data).length === 0 || ("taskName" in data && !data.taskName)) {
@@ -1077,6 +1174,27 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     if (!current) throw new Error("任务不存在");
     const updated = await prisma.$transaction(async (tx) => {
       const task = await tx.projectGanttTask.update({ where: { id: taskId }, data });
+      const nextTaskName = typeof data.taskName === "string" ? data.taskName : null;
+      if (nextTaskName !== null && nextTaskName !== current.taskName) {
+        const projectTasks = await tx.projectGanttTask.findMany({
+          where: { projectId: action.projectId },
+          orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+          select: { id: true, parentId: true, sortOrder: true, createdAt: true, taskCategory: true, taskName: true },
+        });
+        const synchronized = synchronizeGanttTaskCategoriesAfterNameChange(
+          projectTasks,
+          taskId,
+          current.taskName,
+          nextTaskName,
+        );
+        const previousCategoryById = new Map(projectTasks.map((item) => [item.id, item.taskCategory]));
+        await Promise.all(synchronized
+          .filter((item) => previousCategoryById.get(item.id) !== item.taskCategory)
+          .map((item) => tx.projectGanttTask.update({
+            where: { id: item.id },
+            data: { taskCategory: item.taskCategory },
+          })));
+      }
       await tx.operationHistory.create({
         data: {
           projectId: action.projectId,
@@ -1088,7 +1206,7 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
         },
       });
       return task;
-    });
+    }, { timeout: 30_000, maxWait: 10_000 });
     return prisma.assistantActionRun.update({
       where: { id: action.id },
       data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "甘特任务已更新", taskId: updated.id, navigateUrl: `/projects/${action.projectId}?nav=gantt`, navigateLabel: "查看项目进度" }) },
@@ -1183,8 +1301,9 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
           projectId: action.projectId,
           parentId: null,
           taskCode: "",
-          taskCategory: "",
+          taskCategory: taskName,
           taskName,
+          taskDescription: "无",
           startDate,
           finishDate,
           durationDays,
@@ -1202,6 +1321,19 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
         where: { id: task.id },
         data: { parentId: created.id, sortOrder: index + 1 },
       })));
+      const projectTasks = await tx.projectGanttTask.findMany({
+        where: { projectId: action.projectId },
+        orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+        select: { id: true, parentId: true, sortOrder: true, createdAt: true, taskCategory: true, taskName: true },
+      });
+      const synchronized = synchronizeGanttTaskCategories(projectTasks, childTasks.map((task) => task.id));
+      const previousCategoryById = new Map(projectTasks.map((item) => [item.id, item.taskCategory]));
+      await Promise.all(synchronized
+        .filter((item) => previousCategoryById.get(item.id) !== item.taskCategory)
+        .map((item) => tx.projectGanttTask.update({
+          where: { id: item.id },
+          data: { taskCategory: item.taskCategory },
+        })));
       await tx.operationHistory.create({
         data: {
           projectId: action.projectId,
@@ -1370,9 +1502,146 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
   }
 
   if (action.toolId === "project.export") {
+    const exportIntent = normalizeAssistantProjectExportIntent(args);
+    if (!exportIntent) throw new Error("导出条件不合法或与导出对象不匹配");
+    let matchedRowCount = await countAssistantProjectExportRows(action.projectId, exportIntent);
+    let progressReport;
+    if (exportIntent.exportType === "gantt" && exportIntent.includeProgressReport) {
+      const rows = await prisma.projectGanttTask.findMany({ where: { projectId: action.projectId } });
+      const matchedRows = selectGanttExportRows(rows, exportIntent);
+      matchedRowCount = matchedRows.length;
+      progressReport = buildGanttProgressReport(matchedRows);
+    }
+    const workbookSheets = exportIntent.exportType === "gantt"
+      ? ["项目进度", ...(exportIntent.includeProgressReport ? ["进度总结"] : [])]
+      : exportIntent.exportType === "budget"
+        ? getAssistantBudgetWorkbookSheetNames(await prisma.projectBudgetCategory.findMany({
+            where: { projectId: action.projectId },
+            select: { kind: true },
+          }))
+        : exportIntent.exportType === "weekly"
+          ? ["项目事项"]
+          : ["风险登记册"];
+    const fileName = exportIntent.exportType === "gantt"
+      ? "任务进度.xlsx"
+      : exportIntent.exportType === "weekly"
+        ? "项目事项.xlsx"
+        : exportIntent.exportType === "risk"
+          ? "风险登记册.xlsx"
+          : "项目预算分析.xlsx";
     return prisma.assistantActionRun.update({
       where: { id: action.id },
-      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "导出文件已生成", downloadUrl: `/api/assistant/exports/${action.id}` }) },
+      data: {
+        status: "SUCCEEDED",
+        confirmedAt: new Date(),
+        executedAt: new Date(),
+        resultJson: JSON.stringify({
+          message: progressReport
+            ? `任务进度 Excel 和进度总结工作表已生成，共 ${matchedRowCount} 条记录。${progressReport.summary}`
+            : exportIntent.exportType === "budget"
+              ? `项目预算 Excel 已生成，共 ${matchedRowCount} 条记录；不同预算维度已分别写入 ${workbookSheets.slice(0, -2).join("、") || "对应明细"} 工作表`
+              : `${fileName} 已生成，共 ${matchedRowCount} 条记录`,
+          matchedRowCount,
+          downloadUrl: `/api/assistant/exports/${action.id}`,
+          fileName,
+          workbookSheets,
+          includesProgressReport: Boolean(progressReport),
+          includesVisualization: exportIntent.exportType === "budget",
+          ...(progressReport ? { progressReport } : {}),
+        }),
+      },
+    });
+  }
+
+  if (action.toolId === "project.report.generate") {
+    const title = String(args.title || "").trim();
+    const instructions = String(args.instructions || "").trim();
+    const domains = Array.isArray(args.domains) ? args.domains.map(String) : [];
+    const intent = buildProjectAssistantQueryIntent(domains);
+    if (!title || !instructions || !intent) throw new Error("报告主题、要求或数据范围不完整");
+    const runtime = await loadAssistantRuntimeConfig();
+    if (!runtime.llmProvider) throw new Error("当前未配置可用的报告生成模型");
+    const context = await buildProjectAssistantContext({ user, projectId: action.projectId });
+    if (!context.project) throw new Error("当前项目不存在或无权访问");
+    const visibleContext = buildProjectAssistantVisibleContext(context, intent);
+    const report = await callAssistantProviderModel({
+      provider: runtime.llmProvider,
+      temperature: Math.min(runtime.temperature, 0.3),
+      maxTokens: Math.max(runtime.maxTokens, 2200),
+      timeoutMs: 90_000,
+      messages: [
+        {
+          role: "system",
+          content: [
+            "你是 Ceastar PMS 项目报告生成器。",
+            "只能使用服务端提供的已授权实时数据，不得编造任何项目事实、数字、日期、人员或结论。",
+            "严格覆盖用户要求的每一项分析目标。信息不足时明确写“数据不足”，不能猜测。",
+            "输出完整 Markdown 文档，包含标题、执行摘要、数据依据、分析正文、结论；只在数据支持时给出建议。",
+          ].join("\n"),
+        },
+        {
+          role: "user",
+          content: [
+            `报告标题：${title}`,
+            `用户要求：${instructions}`,
+            `授权数据域：${intent.domains.join("、")}`,
+            `实时项目数据：${JSON.stringify(visibleContext).slice(0, 120_000)}`,
+          ].join("\n\n"),
+        },
+      ],
+    });
+    if (!report.trim()) throw new Error("模型未生成有效报告内容");
+    const artifactId = randomUUID();
+    const safeTitle = title.replace(/[\\/:*?"<>|]/g, "-").slice(0, 80) || "项目分析报告";
+    const fileName = `${safeTitle}.md`;
+    const storedName = buildAssistantStoredName(artifactId, fileName);
+    const filePath = getAssistantArtifactPath(action.projectId, storedName);
+    const buffer = Buffer.from(report.trim(), "utf8");
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(filePath, buffer);
+    const artifact = await prisma.$transaction(async (tx) => {
+      const created = await tx.assistantArtifact.create({
+        data: {
+          id: artifactId,
+          projectId: action.projectId,
+          userId: user.userId,
+          type: "PROJECT_REPORT",
+          fileName,
+          storedName,
+          mimeType: "text/markdown; charset=utf-8",
+          sizeBytes: buffer.length,
+        },
+      });
+      await tx.operationHistory.create({
+        data: {
+          projectId: action.projectId,
+          entityType: "ASSISTANT_ARTIFACT",
+          entityId: artifactId,
+          actionType: "CREATE",
+          operator: user.displayName,
+          detail: `通过智能助手生成项目报告「${title}」，数据域：${intent.domains.join("、")}`,
+        },
+      });
+      return created;
+    }).catch(async (error) => {
+      await rm(filePath, { force: true }).catch(() => undefined);
+      throw error;
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: {
+        status: "SUCCEEDED",
+        confirmedAt: new Date(),
+        executedAt: new Date(),
+        resultJson: JSON.stringify({
+          message: `项目报告「${title}」已生成`,
+          artifactId: artifact.id,
+          fileName,
+          downloadUrl: `/api/assistant/artifacts/${artifact.id}/download`,
+          domains: intent.domains,
+          verification: { kind: "DOWNLOAD_AVAILABLE", passed: true, bytes: buffer.length },
+        }),
+      },
     });
   }
 
@@ -1382,7 +1651,17 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     if (!run) throw new Error("计划分析记录不存在");
     return prisma.assistantActionRun.update({
       where: { id: action.id },
-      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "分析报告已生成", downloadUrl: `/api/assistant/exports/${action.id}` }) },
+      data: {
+        status: "SUCCEEDED",
+        confirmedAt: new Date(),
+        executedAt: new Date(),
+        resultJson: JSON.stringify({
+          message: "计划差异与冲突分析 Excel 已生成",
+          fileName: "计划差异与冲突分析.xlsx",
+          workbookSheets: ["分析汇总", "冲突与风险", "字段变化"],
+          downloadUrl: `/api/assistant/exports/${action.id}`,
+        }),
+      },
     });
   }
 
@@ -1686,6 +1965,75 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
       return risk;
     });
     return prisma.assistantActionRun.update({ where: { id: action.id }, data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "风险已创建", riskId: created.id, riskCode: created.riskCode }) } });
+  }
+
+  if (action.toolId === "risk.create.batch") {
+    const drafts = normalizeAssistantRiskDrafts(args.risks);
+    if (drafts.length === 0) throw new Error("没有可登记的风险，请先提供风险清单或风险分析结果");
+    const existing = await prisma.riskRegisterItem.findMany({
+      where: { projectId: action.projectId },
+      select: { id: true, riskCode: true, riskName: true, sortOrder: true, createdAt: true },
+    });
+    const nameKey = (value: string) => value.replace(/\s+/g, "").toLocaleLowerCase("zh-CN");
+    const existingByName = new Map(existing.map((risk) => [nameKey(risk.riskName), risk]));
+    const codeSources = [...existing];
+    let nextSortOrder = existing.reduce((max, item) => Math.max(max, item.sortOrder), 0);
+    const createdRows = drafts.flatMap((draft) => {
+      if (existingByName.has(nameKey(draft.riskName))) return [];
+      nextSortOrder += 1;
+      const id = randomUUID();
+      const riskCode = nextRiskCode(codeSources);
+      const row = {
+        id,
+        projectId: action.projectId,
+        sortOrder: nextSortOrder,
+        riskCode,
+        riskName: draft.riskName,
+        category: draft.category,
+        trigger: draft.trigger,
+        probability: draft.probability,
+        impact: draft.impact,
+        level: draft.level,
+        response: draft.response,
+        owner: draft.owner || user.displayName,
+        status: draft.status,
+        targetDate: draft.targetDate,
+      };
+      codeSources.push({ id, riskCode, riskName: draft.riskName, sortOrder: nextSortOrder, createdAt: new Date() });
+      existingByName.set(nameKey(draft.riskName), { ...row, createdAt: new Date() });
+      return [row];
+    });
+    await prisma.$transaction(async (tx) => {
+      if (createdRows.length > 0) {
+        await tx.riskRegisterItem.createMany({ data: createdRows });
+        await tx.operationHistory.createMany({
+          data: createdRows.map((risk) => ({
+            projectId: action.projectId,
+            entityType: "RISK_REGISTER_ITEM",
+            entityId: risk.id,
+            actionType: "CREATE",
+            operator: user.displayName,
+            detail: `通过智能助手从分析结果登记风险「${risk.riskName}」`,
+          })),
+        });
+      }
+    });
+    const resolved = drafts.map((draft) => existingByName.get(nameKey(draft.riskName))!);
+    const result = {
+      message: `已处理 ${drafts.length} 条风险：新增 ${createdRows.length} 条，已存在 ${drafts.length - createdRows.length} 条`,
+      requestedCount: drafts.length,
+      processedCount: resolved.length,
+      createdCount: createdRows.length,
+      existingCount: drafts.length - createdRows.length,
+      riskIds: resolved.map((risk) => risk.id),
+      riskCodes: resolved.map((risk) => risk.riskCode),
+      navigateUrl: "/risk-register",
+      navigateLabel: "查看风险登记册",
+    };
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify(result) },
+    });
   }
 
   if (action.toolId === "risk.create") {

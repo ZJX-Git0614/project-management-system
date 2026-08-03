@@ -31,6 +31,14 @@ const task = (index: number, overrides: Partial<ProjectGanttTask> = {}): Project
 });
 
 describe("GanttTimeline performance", () => {
+  it("renders task categories as read-only values and defaults blank descriptions to 无", () => {
+    render(<GanttTimeline tasks={[task(1)]} canEdit />);
+
+    expect(screen.getByLabelText("任务类别：测试")).toHaveTextContent("测试");
+    expect(screen.queryByPlaceholderText("任务类别")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "任务描述" })).toHaveValue("无");
+  });
+
   it("renders only viewport rows and loads predecessor choices on demand", async () => {
     const tasks = Array.from({ length: 460 }, (_, index) => task(index + 1));
     render(<GanttTimeline tasks={tasks} canEdit />);
@@ -41,10 +49,11 @@ describe("GanttTimeline performance", () => {
     expect(screen.queryByText("Task460 · 性能任务 460")).not.toBeInTheDocument();
 
     await userEvent.click(screen.getAllByRole("button", { name: "紧前任务" })[0]);
-    expect(await screen.findByText("Task460 · 性能任务 460")).toBeInTheDocument();
+    await userEvent.type(screen.getByRole("textbox", { name: "紧前任务搜索" }), "性能任务 460");
+    expect(await screen.findByTitle("Task460 · 性能任务 460")).toBeInTheDocument();
   }, 15_000);
 
-  it("selects multiple predecessors from a searchable hierarchy and applies them together", async () => {
+  it("selects a task subtree from a searchable hierarchy and applies it together", async () => {
     const onUpdateTask = vi.fn();
     const tasks = [
       task(1),
@@ -55,9 +64,9 @@ describe("GanttTimeline performance", () => {
 
     await userEvent.click(screen.getAllByRole("button", { name: "紧前任务" })[0]);
     expect(screen.queryByText("Task003 · 子任务")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "展开 Task002 子任务" }));
+    await userEvent.click(screen.getByRole("button", { name: "展开 Task002" }));
     await userEvent.click(screen.getByRole("checkbox", { name: "选择 Task002" }));
-    await userEvent.click(screen.getByRole("checkbox", { name: "选择 Task003" }));
+    expect(screen.getByRole("checkbox", { name: "选择 Task003" })).toBeChecked();
     await userEvent.click(screen.getByRole("button", { name: "应用紧前任务" }));
 
     await waitFor(() => expect(onUpdateTask).toHaveBeenCalledWith(
@@ -337,5 +346,68 @@ describe("GanttTimeline performance", () => {
       expect.objectContaining({ durationDays: 0.5, estimatedWorkHours: 3.75 }),
       "durationDays",
     ));
+  });
+
+  it("ghosts the existing duration on focus and replaces it without manual deletion", async () => {
+    const onUpdateTask = vi.fn();
+    render(<GanttTimeline tasks={[task(1, { durationDays: 2.5 })]} canEdit onUpdateTask={onUpdateTask} />);
+
+    const durationInput = screen.getByLabelText("工期天数");
+    expect(durationInput).toHaveValue("2.5");
+
+    const user = userEvent.setup();
+    await user.click(durationInput);
+    expect(durationInput).toHaveValue("");
+    expect(durationInput).toHaveAttribute("placeholder", "2.5");
+    await user.type(durationInput, "3.5");
+    await user.tab();
+
+    await waitFor(() => expect(onUpdateTask).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "task-1" }),
+      expect.objectContaining({ durationDays: 3.5, estimatedWorkHours: 26.25 }),
+      "durationDays",
+    ));
+  });
+
+  it("keeps an existing duration when focus leaves without input and clears it after Delete", async () => {
+    const onUpdateTask = vi.fn();
+    render(<GanttTimeline tasks={[task(1, { durationDays: 2 })]} canEdit onUpdateTask={onUpdateTask} />);
+
+    const user = userEvent.setup();
+    const durationInput = screen.getByLabelText("工期天数");
+    await user.click(durationInput);
+    await user.tab();
+    expect(onUpdateTask).not.toHaveBeenCalled();
+    expect(durationInput).toHaveValue("2");
+
+    await user.click(durationInput);
+    await user.keyboard("{Delete}");
+    await user.tab();
+    await waitFor(() => expect(onUpdateTask).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "task-1" }),
+      expect.objectContaining({ durationDays: 0, estimatedWorkHours: 0 }),
+      "durationDays",
+    ));
+  });
+
+  it("shows all CPM columns by default", () => {
+    render(<GanttTimeline tasks={[task(1, {
+      totalFloatMinutes: 450,
+      freeFloatMinutes: 225,
+      earlyStartDate: "2026-07-01",
+      earlyFinishDate: "2026-07-02",
+      lateStartDate: "2026-07-02",
+      lateFinishDate: "2026-07-03",
+      scheduleStatus: "NEAR_CRITICAL",
+    })]} />);
+
+    expect(screen.getByText("总浮动")).toBeInTheDocument();
+    expect(screen.getByText("1 天")).toBeInTheDocument();
+    expect(screen.getByText("自由浮动")).toBeInTheDocument();
+    expect(screen.getByText("0.5 天")).toBeInTheDocument();
+    expect(screen.getByText("最早开始")).toBeInTheDocument();
+    expect(screen.getByText("最迟完成")).toBeInTheDocument();
+    expect(screen.getByText("排程状态")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "浮动" })).toHaveAttribute("aria-pressed", "true");
   });
 });

@@ -111,6 +111,11 @@ export const buildGanttDependencyLinks = (tasks: ProjectGanttTask[]): GanttDepen
 
 export const findGanttCriticalTaskIds = (tasks: ProjectGanttTask[]): Set<string> => {
   if (tasks.length === 0) return new Set();
+  if (tasks.some((task) => task.totalFloatMinutes != null)) {
+    return new Set(tasks
+      .filter((task) => task.totalFloatMinutes != null && task.totalFloatMinutes <= 0)
+      .map((task) => task.id));
+  }
 
   const links = buildGanttDependencyLinks(tasks);
   const durationById = new Map(tasks.map((task) => [task.id, Math.max(0, task.durationDays)]));
@@ -172,7 +177,10 @@ export const findGanttCriticalTaskIds = (tasks: ProjectGanttTask[]): Set<string>
 export const buildGanttRows = (tasks: ProjectGanttTask[]): GanttRow[] => {
   const range = getGanttDateRange(tasks);
   if (!range) return [];
-  const criticalIds = findGanttCriticalTaskIds(tasks);
+  const hasCalculatedFloat = tasks.some((task) => task.totalFloatMinutes != null);
+  const criticalIds = hasCalculatedFloat
+    ? new Set(tasks.filter((task) => (task.totalFloatMinutes ?? 1) <= 0).map((task) => task.id))
+    : findGanttCriticalTaskIds(tasks);
 
   return tasks.map((task) => {
     const endDate = task.finishDate || addDaysInclusive(task.startDate, task.durationDays) || task.startDate;

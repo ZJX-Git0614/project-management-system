@@ -282,7 +282,8 @@ export function SystemBackupPanel() {
       formData.append("confirmText", "恢复数据库");
       const result = await api.upload<{ message: string }>("/api/admin/system-data/backups/restore", formData);
       alert(result.message);
-      window.location.href = "/login";
+      api.clearAuth();
+      window.location.replace("/login?restored=1");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "数据库恢复失败");
     } finally {
@@ -327,7 +328,7 @@ export function SystemBackupPanel() {
 
             <Field label="服务器备份目录">
               <div className="flex gap-2">
-                <Input className="min-w-0 flex-1" value={draft.localDirectory} onChange={(event) => setDraft({ ...draft, localDirectory: event.target.value })} />
+                <Input name="systemBackupLocalDirectory" autoComplete="off" className="min-w-0 flex-1" value={draft.localDirectory} onChange={(event) => setDraft({ ...draft, localDirectory: event.target.value })} />
                 <Button type="button" variant="outline" size="sm" className="h-9 shrink-0 px-3 text-xs" onClick={() => void openDirectoryPicker()} title="浏览服务器或 Docker 已挂载的目录">
                   <FolderOpen className="size-3.5" /> 浏览目录
                 </Button>
@@ -344,10 +345,10 @@ export function SystemBackupPanel() {
               </div>
               {draft.cloudEnabled && (
                 <div className="grid gap-3 md:grid-cols-2">
-                  <Field label="备份 WebDAV 地址"><Input value={draft.cloudBaseUrl} onChange={(event) => setDraft({ ...draft, cloudBaseUrl: event.target.value })} placeholder="https://cloud.example.com/dav/" /></Field>
-                  <Field label="备份云盘目录"><Input value={draft.cloudDirectory} onChange={(event) => setDraft({ ...draft, cloudDirectory: event.target.value })} /></Field>
-                  <Field label="登录账号"><Input value={draft.cloudUsername} onChange={(event) => setDraft({ ...draft, cloudUsername: event.target.value })} /></Field>
-                  <Field label="密码或应用密码"><Input type="password" value={draft.cloudPassword} onChange={(event) => setDraft({ ...draft, cloudPassword: event.target.value })} placeholder={draft.cloudPasswordConfigured ? "已配置，留空保持不变" : "请输入密码或应用密码"} /></Field>
+                  <Field label="备份 WebDAV 地址"><Input name="systemBackupWebdavUrl" autoComplete="off" value={draft.cloudBaseUrl} onChange={(event) => setDraft({ ...draft, cloudBaseUrl: event.target.value })} placeholder="https://cloud.example.com/dav/" /></Field>
+                  <Field label="备份云盘目录"><Input name="systemBackupWebdavDirectory" autoComplete="off" value={draft.cloudDirectory} onChange={(event) => setDraft({ ...draft, cloudDirectory: event.target.value })} /></Field>
+                  <Field label="登录账号"><Input name="systemBackupWebdavUsername" autoComplete="off" value={draft.cloudUsername} onChange={(event) => setDraft({ ...draft, cloudUsername: event.target.value })} /></Field>
+                  <Field label="密码或应用密码"><Input name="systemBackupWebdavPassword" autoComplete="new-password" type="password" value={draft.cloudPassword} onChange={(event) => setDraft({ ...draft, cloudPassword: event.target.value })} placeholder={draft.cloudPasswordConfigured ? "已配置，留空保持不变" : "请输入密码或应用密码"} /></Field>
                 </div>
               )}
             </div>
@@ -362,10 +363,10 @@ export function SystemBackupPanel() {
               </div>
               {draft.documentCloudEnabled && (
                 <div className="grid gap-3 md:grid-cols-2">
-                  <Field label="文档 WebDAV 地址"><Input value={draft.documentCloudBaseUrl} onChange={(event) => setDraft({ ...draft, documentCloudBaseUrl: event.target.value })} placeholder="https://documents.example.com/dav/" /></Field>
-                  <Field label="文档云盘目录"><Input value={draft.documentCloudDirectory} onChange={(event) => setDraft({ ...draft, documentCloudDirectory: event.target.value })} /></Field>
-                  <Field label="文档云盘账号"><Input value={draft.documentCloudUsername} onChange={(event) => setDraft({ ...draft, documentCloudUsername: event.target.value })} /></Field>
-                  <Field label="文档云盘密码或应用密码"><Input type="password" value={draft.documentCloudPassword} onChange={(event) => setDraft({ ...draft, documentCloudPassword: event.target.value })} placeholder={draft.documentCloudPasswordConfigured ? "已配置，留空保持不变" : "请输入密码或应用密码"} /></Field>
+                  <Field label="文档 WebDAV 地址"><Input name="documentWebdavUrl" autoComplete="off" value={draft.documentCloudBaseUrl} onChange={(event) => setDraft({ ...draft, documentCloudBaseUrl: event.target.value })} placeholder="https://documents.example.com/dav/" /></Field>
+                  <Field label="文档云盘目录"><Input name="documentWebdavDirectory" autoComplete="off" value={draft.documentCloudDirectory} onChange={(event) => setDraft({ ...draft, documentCloudDirectory: event.target.value })} /></Field>
+                  <Field label="文档云盘账号"><Input name="documentWebdavUsername" autoComplete="off" value={draft.documentCloudUsername} onChange={(event) => setDraft({ ...draft, documentCloudUsername: event.target.value })} /></Field>
+                  <Field label="文档云盘密码或应用密码"><Input name="documentWebdavPassword" autoComplete="new-password" type="password" value={draft.documentCloudPassword} onChange={(event) => setDraft({ ...draft, documentCloudPassword: event.target.value })} placeholder={draft.documentCloudPasswordConfigured ? "已配置，留空保持不变" : "请输入密码或应用密码"} /></Field>
                 </div>
               )}
             </div>

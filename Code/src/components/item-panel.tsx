@@ -2,7 +2,7 @@
 
 import { KeyboardEvent, type DragEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
-import { Plus, Save, Search, Trash2, Upload } from "lucide-react";
+import { Pencil, Plus, Save, Search, Trash2, Upload } from "lucide-react";
 import { ItemHealth, ItemRiskStatus, ItemStatus, ItemPriority } from "@/domain/enums";
 import {
   ITEM_STATUS_LABEL,
@@ -31,6 +31,8 @@ import { api } from "@/lib/api-client";
 import { useAuth } from "@/contexts/auth-context";
 import { useCurrentProject } from "@/contexts/current-project-context";
 import { useDraftedState } from "@/lib/use-drafted-state";
+import { TableContextMenu, useTableContextMenu } from "@/components/table-context-menu";
+import { HierarchicalMultiSelect, type HierarchicalSelectOption } from "@/components/hierarchical-multi-select";
 import {
   ITEM_STATUS_VALUES,
   itemProgressFields,
@@ -162,6 +164,8 @@ interface ProjectGanttTaskOption {
   id: string;
   taskName: string;
   taskCode: string;
+  taskCategory?: string;
+  parentId?: string | null;
 }
 
 interface ItemPanelProps {
@@ -254,6 +258,7 @@ export const ItemPanel = ({
   const [itemDropTarget, setItemDropTarget] = useState<{ id: string; position: DropPosition } | null>(null);
   const [reordering, setReordering] = useState(false);
   const [selectedRisk, setSelectedRisk] = useState<LinkedRisk | null>(null);
+  const { menu, openContextMenu, closeContextMenu } = useTableContextMenu();
 
   const canView = can(`${kind}-items:view`);
   const canCreate = can(`${kind}-items:create`);
@@ -453,6 +458,16 @@ export const ItemPanel = ({
       return [...options, { personName: currentOwner, label: `${currentOwner}（当前值）` }];
     },
     [ownerOptionsByProjectId],
+  );
+
+  const taskSelectOptions = useMemo<HierarchicalSelectOption[]>(
+    () => taskOptions.map((task) => ({
+      id: task.id,
+      label: task.taskCode || "未编号",
+      secondaryLabel: [task.taskName, task.taskCategory].filter(Boolean).join(" · "),
+      parentId: task.parentId ?? null,
+    })),
+    [taskOptions],
   );
 
   const openCreate = () => {
@@ -760,6 +775,40 @@ export const ItemPanel = ({
     }
   };
 
+  const handleDeleteItem = async (item: ItemRecord) => {
+    if (!(await confirm(`确认删除「${item.title}」？`))) return;
+    try {
+      await api.delete(`${apiPath}/${item.id}`);
+      await fetchData({ showLoading: false });
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "删除失败");
+    }
+  };
+
+  const itemContextActions = (item?: ItemRecord) => [
+    ...(item && canEdit
+      ? [{ label: "编辑事项", icon: <Pencil className="size-3.5" />, onSelect: () => openEdit(item, "title") }]
+      : []),
+    ...(item && canDelete
+      ? [{
+          label: selectionMode && selectedIds.includes(item.id) ? "取消选择此事项" : "选择此事项",
+          onSelect: () => {
+            if (!selectionMode) setSelectionMode(true);
+            toggleSelected(item.id);
+          },
+        }]
+      : []),
+    ...(item && canDelete
+      ? [{ label: "删除此事项", icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: () => handleDeleteItem(item) }]
+      : []),
+    ...(!item && canCreate && currentProjectId
+      ? [{ label: "新增事项", icon: <Plus className="size-3.5" />, onSelect: openCreate }]
+      : []),
+    ...(!item && canDelete && selectedIds.length > 0
+      ? [{ label: `删除已选择 ${selectedIds.length} 个事项`, icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: handleDeleteSelected }]
+      : []),
+  ];
+
   const getDropPosition = (event: DragEvent<HTMLElement>): DropPosition => {
     const rect = event.currentTarget.getBoundingClientRect();
     return event.clientY < rect.top + rect.height / 2 ? "before" : "after";
@@ -944,17 +993,6 @@ export const ItemPanel = ({
               </Button>
             )}
             {reordering && <span className="self-center text-xs text-muted-foreground">排序保存中...</span>}
-            {canCreate && (
-              <Button
-                size="sm"
-                className="h-8 text-xs"
-                onClick={openCreate}
-                disabled={!currentProjectId}
-                title={!currentProjectId ? "请先到「项目列表」选择当前项目" : undefined}
-              >
-                <Plus className="size-3" /> 新增
-              </Button>
-            )}
             {canDelete && (
               <Button
                 variant="outline"
@@ -966,17 +1004,7 @@ export const ItemPanel = ({
                 {selectionMode ? "取消选择" : "选择"}
               </Button>
             )}
-            {canDelete && selectionMode && (
-              <Button
-                variant="destructive"
-                size="sm"
-                className="h-8 text-xs"
-                onClick={() => void handleDeleteSelected()}
-                disabled={selectedIds.length === 0 || deletingSelected}
-              >
-                {deletingSelected ? "删除中..." : `删除 ${selectedIds.length}`}
-              </Button>
-            )}
+            {deletingSelected && <span className="self-center text-xs text-muted-foreground">删除中...</span>}
           </div>
         </CardContent>
       </Card>
@@ -984,7 +1012,7 @@ export const ItemPanel = ({
       <Card>
         <CardContent className="p-0">
           <div className="overflow-x-auto">
-            <Table>
+            <Table onContextMenu={(event) => openContextMenu(event, itemContextActions())}>
               <TableHeader>
                 <TableRow>
                   {selectionMode && (
@@ -1073,19 +1101,17 @@ export const ItemPanel = ({
                     </TableCell>
                     {isWeekly && (
                       <TableCell className="text-xs">
-                        <Select
-                          value={draft.ganttTaskId ?? ""}
-                          onChange={(e) => updateDraft("ganttTaskId", e.target.value)}
-                          onKeyDown={handleCreateKeyDown}
+                        <HierarchicalMultiSelect
+                          options={taskSelectOptions}
+                          value={draft.ganttTaskId ? [draft.ganttTaskId] : []}
+                          onChange={(ids) => updateDraft("ganttTaskId", ids[0] ?? null)}
+                          multiple={false}
+                          placeholder="不关联"
+                          searchPlaceholder="搜索任务 ID、名称或类别"
+                          ariaLabel="关联任务"
                           className={INLINE_SELECT_CLASS}
-                        >
-                          <option value="">不关联</option>
-                          {taskOptions.map((task) => (
-                            <option key={task.id} value={task.id}>
-                              {task.taskCode ? `${task.taskCode} · ${task.taskName}` : task.taskName}
-                            </option>
-                          ))}
-                        </Select>
+                          portalContainer={typeof document === "undefined" ? null : document.body}
+                        />
                       </TableCell>
                     )}
                     <TableCell className="text-xs min-w-[150px]">
@@ -1265,6 +1291,7 @@ export const ItemPanel = ({
                         setDraggedItemId(null);
                         setItemDropTarget(null);
                       }}
+                      onContextMenu={(event) => openContextMenu(event, itemContextActions(item))}
                       className={
                         editing
                           ? "group h-8 align-top bg-primary/5"
@@ -1363,19 +1390,17 @@ export const ItemPanel = ({
                       </TableCell>
                       {isWeekly && (
                         <TableCell>
-                          <Select
-                            variant="ghost"
-                            value={item.ganttTaskId ?? ""}
-                            onChange={(e) => commitSelectChange("ganttTaskId", e.target.value, item)}
+                          <HierarchicalMultiSelect
+                            options={taskSelectOptions}
+                            value={item.ganttTaskId ? [item.ganttTaskId] : []}
+                            onChange={(ids) => void commitSelectChange("ganttTaskId", ids[0] ?? null, item)}
+                            multiple={false}
+                            placeholder="不关联"
+                            searchPlaceholder="搜索任务 ID、名称或类别"
+                            ariaLabel="关联任务"
                             className={`${GHOST_SELECT_CLASS} min-w-[180px]`}
-                          >
-                            <option value="">不关联</option>
-                            {taskOptions.map((task) => (
-                              <option key={task.id} value={task.id}>
-                                {task.taskCode ? `${task.taskCode} · ${task.taskName}` : task.taskName}
-                              </option>
-                            ))}
-                          </Select>
+                            portalContainer={typeof document === "undefined" ? null : document.body}
+                          />
                         </TableCell>
                       )}
                       <TableCell className="text-xs min-w-[150px]">
@@ -1602,10 +1627,10 @@ export const ItemPanel = ({
                   <TableRow>
                     <TableCell colSpan={tableColSpan} className="h-32 text-center text-sm text-muted-foreground">
                       {items.length === 0
-                        ? `暂无${title}数据。${
+                            ? `暂无${title}数据。${
                             canCreate
                               ? currentProjectId
-                                ? "点击右上角「新增」开始记录。"
+                                ? "在表格中右击即可新增。"
                                 : "请先到「项目列表」选择当前项目后再新增。"
                               : ""
                           }`
@@ -1622,6 +1647,7 @@ export const ItemPanel = ({
                 )}
               </TableBody>
             </Table>
+            <TableContextMenu menu={menu} onClose={closeContextMenu} />
           </div>
         </CardContent>
       </Card>

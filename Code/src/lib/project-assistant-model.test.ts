@@ -149,9 +149,115 @@ describe("project assistant model routing", () => {
     expect(shouldPlanProjectAssistantAction("更新 Matter007 的进度")).toBe(true)
     expect(shouldPlanProjectAssistantAction("把两个进度计划合并成可导入文件")).toBe(true)
     expect(shouldPlanProjectAssistantAction("把这个 MPP 按系统格式输出文件")).toBe(true)
+    expect(shouldPlanProjectAssistantWorkflow("处理这些内容", {
+      version: 1,
+      originalRequest: "处理这些内容",
+      projectId: "project-1",
+      objectives: [
+        { id: "O1", action: "UPDATE", domain: "GANTT", description: "更新任务", required: true, dependsOn: [] },
+        { id: "O2", action: "EXPORT", domain: "GANTT", description: "导出结果", required: true, dependsOn: ["O1"] },
+      ],
+      deliverables: [
+        { id: "D1", type: "DATABASE_CHANGE", label: "更新结果", required: true, objectiveIds: ["O1"] },
+        { id: "D2", type: "FILE", label: "导出文件", required: true, objectiveIds: ["O2"] },
+      ],
+      constraints: [],
+      confidence: 0.9,
+    })).toBe(true)
     const request = callAssistantProviderModel.mock.calls[0][0]
     expect(request.messages[0].content).toContain("白名单工具")
     expect(request.messages[0].content).toContain("不得生成数据库 ID")
+  })
+
+  it("plans referenced risk analysis as a complete batch action with full recent context", async () => {
+    callAssistantProviderModel.mockResolvedValue(JSON.stringify({
+      toolId: "risk.create.batch",
+      args: {
+        risks: [
+          { riskName: "项目延期风险", level: "高", status: "识别中" },
+          { riskName: "成本超支风险", level: "中", status: "识别中" },
+        ],
+      },
+      command: "将前文分析建议的两条风险写入风险登记册",
+      decisionSummary: "用户引用前文的复数风险，必须批量登记",
+    }))
+    const previousAnalysis = `${"分析依据".repeat(180)}\n建议风险：项目延期风险、成本超支风险`
+
+    const plan = await planProjectAssistantActionWithModel({
+      message: "帮我把以上风险写入风险登记册",
+      history: [{ role: "assistant", content: previousAnalysis }],
+      runtime: { ...runtime, agentEnabledToolIds: ["risk.create", "risk.create.batch"] },
+    })
+
+    expect(plan?.toolId).toBe("risk.create.batch")
+    expect(plan?.args).toMatchObject({ risks: expect.arrayContaining([expect.objectContaining({ riskName: "项目延期风险" })]) })
+    const request = callAssistantProviderModel.mock.calls[0][0]
+    expect(request.maxTokens).toBe(1600)
+    expect(request.messages[0].content).toContain("不得选择 risk.create")
+    expect(request.messages.at(-1).content).toContain("建议风险：项目延期风险、成本超支风险")
+  })
+
+  it("requires structured and schema-valid filters for project exports", async () => {
+    callAssistantProviderModel.mockResolvedValue(JSON.stringify({
+      toolId: "project.export",
+      args: { exportType: "gantt", taskDepths: [1, 2, 3] },
+      command: "只导出第 1、2、3 层甘特任务",
+      decisionSummary: "用户明确限定了三个任务层级",
+    }))
+
+    const plan = await planProjectAssistantActionWithModel({
+      message: "只导出1 2 3级任务",
+      history: [],
+      runtime: { ...runtime, agentEnabledToolIds: ["project.export"] },
+    })
+
+    expect(plan).toEqual({
+      toolId: "project.export",
+      args: { exportType: "gantt", taskDepths: [1, 2, 3] },
+      command: "只导出第 1、2、3 层甘特任务",
+      decisionSummary: "用户明确限定了三个任务层级",
+    })
+    const request = callAssistantProviderModel.mock.calls[0][0]
+    expect(request.messages[0].content).toContain("多个任务层级必须完整写入 taskDepths")
+    expect(request.messages[0].content).toContain("当前版本能力清单")
+
+    callAssistantProviderModel.mockResolvedValue(JSON.stringify({
+      toolId: "project.export",
+      args: { exportType: "gantt", taskDepths: [0] },
+      command: "导出任务",
+    }))
+    await expect(planProjectAssistantActionWithModel({
+      message: "导出零级任务",
+      history: [],
+      runtime: { ...runtime, agentEnabledToolIds: ["project.export"] },
+    })).resolves.toBeNull()
+  })
+
+  it("plans category-filtered exports with a progress report from observed project data", async () => {
+    callAssistantProviderModel.mockResolvedValue(JSON.stringify({
+      toolId: "project.export",
+      args: { exportType: "gantt", taskCategoryKeywords: ["前端"], includeProgressReport: true },
+      command: "导出前端任务并生成进度报告",
+      decisionSummary: "数据库观察显示存在前端类别，且用户要求进度报告",
+    }))
+
+    const plan = await planProjectAssistantActionWithModel({
+      message: "帮我导出所有的前端任务，并且对当前前端任务进度总结出一份报告",
+      history: [],
+      runtime: { ...runtime, agentEnabledToolIds: ["project.export"] },
+      dataObservation: JSON.stringify({ totalRows: 461, matchedRows: 120, taskCategories: [{ name: "前端开发", count: 120 }] }),
+    })
+
+    expect(plan?.args).toEqual({
+      exportType: "gantt",
+      taskCategoryKeywords: ["前端"],
+      includeProgressReport: true,
+    })
+    const request = callAssistantProviderModel.mock.calls[0][0]
+    expect(request.messages[0].content).toContain("taskCategoryKeywords")
+    expect(request.messages[0].content).toContain("includeProgressReport:true")
+    expect(request.messages[1].content).toContain("前端开发")
+    expect(request.messages[1].content).toContain("matchedRows")
   })
 
   it("accepts at most six acyclic white-listed workflow steps", async () => {
@@ -192,5 +298,34 @@ describe("project assistant model routing", () => {
       { id: "s1", toolId: "shell.exec", command: "执行命令", dependsOn: [] },
       { id: "s2", toolId: "schedule.analysis.export", command: "导出报告", dependsOn: ["s1"] },
     ] }), enabled)).toBeNull()
+  })
+
+  it("keeps validated structured arguments on every workflow step", () => {
+    const parsed = parseActionWorkflowPlannerResponse(JSON.stringify({
+      title: "生成项目交付物",
+      steps: [
+        {
+          id: "s1",
+          toolId: "project.export",
+          command: "导出一级和二级任务",
+          args: { exportType: "gantt", taskDepths: [1, 2] },
+          dependsOn: [],
+        },
+        {
+          id: "s2",
+          toolId: "project.report.generate",
+          command: "基于任务数据生成进度报告",
+          args: {
+            title: "项目进度报告",
+            instructions: "总结一级和二级任务的计划与实际完成情况",
+            domains: ["TASK"],
+          },
+          dependsOn: ["s1"],
+        },
+      ],
+    }), new Set(["project.export", "project.report.generate"]));
+
+    expect(parsed?.steps[0].args).toEqual({ exportType: "gantt", taskDepths: [1, 2] });
+    expect(parsed?.steps[1].args).toEqual(expect.objectContaining({ domains: ["TASK"] }));
   })
 })

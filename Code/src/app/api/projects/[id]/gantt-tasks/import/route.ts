@@ -1,8 +1,8 @@
 import { NextRequest } from "next/server";
 import type { Prisma } from "@prisma/client";
 
-import { getUserFromRequest } from "@/lib/auth";
-import { ensureMutableProject, err, notFound, ok, unauthorized } from "@/lib/api-utils";
+import { ensureMutableProject, err, notFound, ok } from "@/lib/api-utils";
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import { parseGanttImportFile } from "@/lib/gantt-file-transfer";
 import { estimatedHoursForDuration, roundGanttHours } from "@/lib/gantt-calendar";
 import { recalculateProjectGanttSchedule, renumberProjectGanttTaskCodes, replaceGanttTaskDependencies } from "@/lib/gantt-task-service";
@@ -19,8 +19,8 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const user = getUserFromRequest(req);
-  if (!user) return unauthorized();
+  const user = await getAuthenticatedUser(req);
+  if (!user) return err("未登录", 401);
 
   const project = await prisma.project.findUnique({ where: { id }, select: { id: true, name: true, startDate: true } });
   if (!project) return notFound("项目");
@@ -31,6 +31,11 @@ export async function POST(
   const mode = ["PREVIEW", "ANALYZE", "SNAPSHOT", "APPEND", "MERGE"].includes(requestedMode)
     ? requestedMode
     : "APPEND";
+  const requiredPermissions = ["PREVIEW", "ANALYZE", "SNAPSHOT"].includes(mode)
+    ? ["project-gantt:view"]
+    : ["project-gantt:create", "project-gantt:edit"];
+  const permitted = await Promise.all(requiredPermissions.map((permission) => userHasPermission(user, permission)));
+  if (permitted.some((allowed) => !allowed)) return err("权限不足", 403);
   const requestedStatusDate = String(formData.get("statusDate") || "").trim();
   const statusDate = /^\d{4}-\d{2}-\d{2}$/.test(requestedStatusDate)
     ? requestedStatusDate
@@ -147,7 +152,7 @@ export async function POST(
             taskCode: mode === "MERGE" ? (task.wbsCode || task.outlineNumber || "") : "",
             taskCategory: task.taskCategory,
             taskName: task.taskName,
-            taskDescription: task.taskDescription,
+            taskDescription: task.taskDescription.trim() || "无",
             startDate: task.startDate,
             finishDate: task.finishDate,
             durationDays: task.durationDays,

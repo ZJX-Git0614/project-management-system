@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronRight as MenuChevronRight, ClipboardPaste, Columns3, Copy, GripVertical, IndentDecrease, IndentIncrease, ListTree, Plus, Scissors, Search, Trash2, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronRight as MenuChevronRight, ClipboardPaste, Columns3, Copy, GripVertical, IndentDecrease, IndentIncrease, ListTree, Plus, Scissors, Trash2, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { GanttDateField } from "@/components/gantt-date-field";
+import { HierarchicalMultiSelect, type HierarchicalSelectOption } from "@/components/hierarchical-multi-select";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -22,6 +23,7 @@ import type { GanttHierarchyDirection } from "@/lib/gantt-hierarchy";
 import {
   GANTT_COLUMN_LABELS,
   GANTT_COLUMN_MIN_WIDTHS,
+  GANTT_DEFAULT_HIDDEN_COLUMN_KEYS,
   GANTT_EXPANDED_COLUMN_KEYS,
   GANTT_HIDEABLE_COLUMN_KEYS,
   fitGanttColumnWidth,
@@ -40,12 +42,14 @@ import {
   getGanttDateRange,
   parseGanttDate,
 } from "@/lib/gantt";
+import { ganttFloatDays, GANTT_MINUTES_PER_DAY, type GanttScheduleStatus } from "@/lib/gantt-cpm";
 import {
   calculateTaskDurationDays,
   calculateTaskFinishDate,
   estimatedHoursForDuration,
   normalizeGanttDurationDays,
   roundGanttHours,
+  shiftTaskDate,
   type GanttCalendarMode,
 } from "@/lib/gantt-calendar";
 import { cn } from "@/lib/utils";
@@ -129,6 +133,14 @@ const MIN_TIMELINE_WIDTH = 860;
 const ZOOM_LEVELS = [1, 3, 8, 20, 60];
 const ZOOM_LABELS = ["60天", "30天", "15天", "5天", "1天"];
 const DEFAULT_ZOOM_INDEX = 2;
+const SCHEDULE_STATUS_LABELS: Record<GanttScheduleStatus, string> = {
+  UNSCHEDULED: "未排程",
+  INVALID_DEPENDENCY: "依赖异常",
+  NEGATIVE_FLOAT: "负浮动",
+  CRITICAL: "关键",
+  NEAR_CRITICAL: "近关键",
+  NORMAL: "正常",
+};
 const GANTT_DEPTH_COLORS = [
   { hue: 214, saturation: 66, lightness: 58 },
   { hue: 192, saturation: 58, lightness: 52 },
@@ -225,6 +237,24 @@ const getTickEvery = (dayWidth: number) => {
   return 30;
 };
 
+const floatCalendarSpanDays = (
+  endDate: string,
+  floatMinutes: number | null | undefined,
+  mode: GanttCalendarMode,
+) => {
+  if (!endDate || !floatMinutes || floatMinutes <= 0) return 0;
+  const floatDays = floatMinutes / GANTT_MINUTES_PER_DAY;
+  const wholeDays = Math.floor(floatDays);
+  const remainder = floatDays - wholeDays;
+  const shifted = wholeDays > 0 ? shiftTaskDate(endDate, wholeDays, mode) : endDate;
+  return Math.max(0, diffDays(endDate, shifted) + remainder);
+};
+
+const formatFloat = (minutes: number | null | undefined) => {
+  const days = ganttFloatDays(minutes);
+  return days == null ? "--" : `${days} 天`;
+};
+
 const inlineFieldClass = cn(
   "h-6 w-full min-w-0 rounded px-1.5 text-xs shadow-none transition-colors",
   "!border-transparent !bg-transparent !ring-0 !ring-offset-0",
@@ -251,7 +281,7 @@ const toTaskDraft = (task: ProjectGanttTask, calendarMode: GanttCalendarMode): G
   ownerMemberId: task.ownerMemberId ?? null,
   taskCategory: task.taskCategory,
   taskName: task.taskName,
-  taskDescription: task.taskDescription ?? "",
+  taskDescription: task.taskDescription?.trim() || "无",
   startDate: task.startDate,
   endDate: task.finishDate || calculateTaskFinishDate(task.startDate, task.durationDays, calendarMode),
   durationDays: task.durationDays,
@@ -267,7 +297,7 @@ const toTaskDraft = (task: ProjectGanttTask, calendarMode: GanttCalendarMode): G
 const taskDraftEquals = (task: ProjectGanttTask, draft: GanttTaskDraft, calendarMode: GanttCalendarMode) => (
   task.taskCategory === draft.taskCategory
     && task.taskName === draft.taskName
-    && (task.taskDescription ?? "") === draft.taskDescription
+    && (task.taskDescription?.trim() || "无") === draft.taskDescription
     && task.startDate === draft.startDate
     && (task.finishDate || calculateTaskFinishDate(task.startDate, task.durationDays, calendarMode)) === draft.endDate
     && task.durationDays === draft.durationDays
@@ -309,6 +339,7 @@ const GanttTimelineContent = ({
   onReorderTasks,
 }: GanttTimelineProps) => {
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
+  const [showFloat, setShowFloat] = useState(true);
   const dayWidth = ZOOM_LEVELS[zoomIndex];
   const [detailsCollapsed, setDetailsCollapsed] = useState(false);
   const [explicitSelectedTaskIds, setExplicitSelectedTaskIds] = useState<string[]>([]);
@@ -320,7 +351,9 @@ const GanttTimelineContent = ({
   const [taskDropTarget, setTaskDropTarget] = useState<{ id: string; position: DropPosition } | null>(null);
   const [flashingTaskId, setFlashingTaskId] = useState<string | null>(null);
   const [columnWidths, setColumnWidths] = useState<GanttColumnWidths>({ ...GANTT_COLUMN_MIN_WIDTHS });
-  const [hiddenColumnKeys, setHiddenColumnKeys] = useState<Set<GanttColumnKey>>(() => new Set());
+  const [hiddenColumnKeys, setHiddenColumnKeys] = useState<Set<GanttColumnKey>>(
+    () => new Set(GANTT_DEFAULT_HIDDEN_COLUMN_KEYS),
+  );
   const [contextMenu, setContextMenu] = useState<{ taskId: string; x: number; y: number } | null>(null);
   const [contextSubmenu, setContextSubmenu] = useState<"paste" | "insert" | null>(null);
   const [insertCount, setInsertCount] = useState(1);
@@ -906,7 +939,11 @@ const GanttTimelineContent = ({
 
   const config = { dayWidth, tickEvery: getTickEvery(dayWidth) };
   const visibleStartDate = addCalendarDays(range.startDate, -1);
-  const visibleEndDate = addCalendarDays(range.endDate, 7);
+  const maxFloatCalendarSpan = rows.reduce((maximum, row) => Math.max(
+    maximum,
+    floatCalendarSpanDays(row.endDate, row.freeFloatMinutes, calendarMode),
+  ), 0);
+  const visibleEndDate = addCalendarDays(range.endDate, Math.max(7, Math.ceil(maxFloatCalendarSpan) + 2));
   const visibleDays = diffDays(visibleStartDate, visibleEndDate) + 1;
   const timelineWidth = Math.max(MIN_TIMELINE_WIDTH, visibleDays * config.dayWidth);
   const bodyHeight = visibleRows.length * ROW_HEIGHT;
@@ -928,8 +965,8 @@ const GanttTimelineContent = ({
           <span>{rows.length} 个任务</span>
           <span>{categoryCount} 个类别</span>
         </div>
-        <div className="flex flex-wrap items-center gap-3 text-xs">
-          <div className="flex items-center gap-1 text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-3 text-xs">
+            <div className="flex items-center gap-1 text-muted-foreground">
             <span className="inline-block h-2.5 w-5 rounded-full bg-primary" />
             任务
           </div>
@@ -941,8 +978,21 @@ const GanttTimelineContent = ({
           </div>
           <div className="flex items-center gap-1 text-muted-foreground">
             <span className="inline-block h-2.5 w-5 rounded-full bg-destructive" />
-            关键路径 {criticalCount}
-          </div>
+              关键路径 {criticalCount}
+            </div>
+            <button
+              type="button"
+              className={cn(
+                "flex h-6 items-center gap-1 rounded border border-border bg-transparent px-2 text-xs text-muted-foreground transition-colors hover:text-foreground",
+                showFloat && "border-primary/40 bg-primary/8 text-primary",
+              )}
+              onClick={() => setShowFloat((current) => !current)}
+              aria-pressed={showFloat}
+              title={showFloat ? "隐藏浮动时间" : "显示浮动时间"}
+            >
+              <span className="inline-block w-4 border-t border-dashed border-current" />
+              浮动
+            </button>
           {reordering && <span className="text-muted-foreground">排序保存中...</span>}
 
           <div className="flex items-center gap-1 rounded-md border border-border bg-card">
@@ -1177,6 +1227,11 @@ const GanttTimelineContent = ({
               const showBarLabel = width >= 72;
               const barLabel = row.taskName || row.taskCode;
               const progress = Math.min(100, Math.max(0, row.progress ?? 0));
+              const floatSpanDays = showFloat
+                ? floatCalendarSpanDays(row.endDate, row.freeFloatMinutes, calendarMode)
+                : 0;
+              const floatWidth = config.dayWidth * floatSpanDays;
+              const scheduleStatus = row.scheduleStatus as GanttScheduleStatus | undefined;
               return (
                 <div
                   key={row.id}
@@ -1195,7 +1250,7 @@ const GanttTimelineContent = ({
                         ? "border-destructive/60 bg-destructive/25"
                         : "border-primary/60 bg-primary/25"
                     )}
-                    title={`${barLabel}: ${row.startDate} ~ ${row.endDate}，当前进度 ${progress}%`}
+                    title={`${barLabel}: ${row.startDate} ~ ${row.endDate}，当前进度 ${progress}%\n最早 ${row.earlyStartDate || "--"} ~ ${row.earlyFinishDate || "--"}\n最迟 ${row.lateStartDate || "--"} ~ ${row.lateFinishDate || "--"}\n总浮动 ${formatFloat(row.totalFloatMinutes)}，自由浮动 ${formatFloat(row.freeFloatMinutes)}`}
                   >
                     <div
                       className={cn(
@@ -1205,6 +1260,18 @@ const GanttTimelineContent = ({
                       style={{ width: `${progress}%` }}
                     />
                   </div>
+                  {floatWidth > 0 && (
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute left-full top-1/2 h-0 border-t border-dashed border-sky-400/70"
+                      style={{ width: floatWidth }}
+                    >
+                      <span className="absolute -right-0.5 -top-1 size-1.5 rounded-full bg-sky-400/75" />
+                    </span>
+                  )}
+                  {scheduleStatus === "NEGATIVE_FLOAT" && (
+                    <span className="pointer-events-none absolute -right-1 top-0 size-2 rounded-full bg-destructive shadow-[0_0_0_2px_hsl(var(--background))]" />
+                  )}
                   {showBarLabel && (
                     <span className="pointer-events-none ml-2 max-w-[180px] truncate text-[11px] text-muted-foreground">
                       {barLabel}
@@ -1676,13 +1743,28 @@ const DurationDaysInput = ({
 }) => {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(() => value > 0 ? String(value) : "");
+  const editedRef = useRef(false);
+  const cancelledRef = useRef(false);
 
   useEffect(() => {
     if (!editing) setText(value > 0 ? String(value) : "");
   }, [editing, value]);
 
   const commit = () => {
+    if (cancelledRef.current) {
+      cancelledRef.current = false;
+      editedRef.current = false;
+      setEditing(false);
+      setText(value > 0 ? String(value) : "");
+      return;
+    }
+    if (!editedRef.current && !text.trim()) {
+      setEditing(false);
+      setText(value > 0 ? String(value) : "");
+      return;
+    }
     const next = text.trim() ? normalizeGanttDurationDays(Number(text)) : 0;
+    editedRef.current = false;
     setEditing(false);
     setText(next > 0 ? String(next) : "");
     onCommit(next);
@@ -1693,24 +1775,32 @@ const DurationDaysInput = ({
       type="text"
       inputMode="decimal"
       value={editing ? text : value > 0 ? String(value) : "--"}
+      placeholder={editing && value > 0 ? String(value) : undefined}
       onFocus={() => {
+        editedRef.current = false;
+        cancelledRef.current = false;
         setEditing(true);
-        setText(value > 0 ? String(value) : "");
+        setText("");
       }}
       onChange={(event) => {
         const next = event.target.value.replace(/[^\d.]/g, "");
-        if (/^\d*(?:\.\d*)?$/.test(next)) setText(next);
+        if (/^\d*(?:\.\d*)?$/.test(next)) {
+          editedRef.current = true;
+          setText(next);
+        }
       }}
       onBlur={commit}
       onKeyDown={(event) => {
         if (event.key === "Enter") event.currentTarget.blur();
+        if ((event.key === "Backspace" || event.key === "Delete") && !text) {
+          editedRef.current = true;
+        }
         if (event.key === "Escape") {
-          setEditing(false);
-          setText(value > 0 ? String(value) : "");
+          cancelledRef.current = true;
           event.currentTarget.blur();
         }
       }}
-      className={durationFieldClass}
+      className={cn(durationFieldClass, "placeholder:text-muted-foreground/45")}
       disabled={disabled}
       aria-label="工期天数"
       title="单位：天；支持 0.5 天步进，留空表示未排期"
@@ -2047,16 +2137,14 @@ const EditableTaskRow = ({
         </span>
       </div>
       {isColumnVisible("taskCategory") && (
-        <Input
+        <div
           data-gantt-column-key="taskCategory"
-          value={draft.taskCategory}
-          onBlur={() => commitDraft("taskCategory")}
-          onChange={(event) => updateDraft("taskCategory", event.target.value)}
-          onKeyDown={handleKeyDown}
-          className={inlineFieldClass}
-          disabled={!canEdit || isSaving}
-          placeholder="任务类别"
-        />
+          className="flex min-w-0 items-center truncate px-2 text-xs text-foreground"
+          title={draft.taskCategory || "无"}
+          aria-label={`任务类别：${draft.taskCategory || "无"}`}
+        >
+          {draft.taskCategory || "无"}
+        </div>
       )}
       <div data-gantt-column-key="taskName" className="relative min-w-0">
         <Input
@@ -2068,11 +2156,11 @@ const EditableTaskRow = ({
           disabled={!canEdit || isSaving}
           style={{ paddingLeft: `${8 + taskDepth * 18}px` }}
           placeholder="任务名称"
-          title={row.isCritical ? `${draft.taskName}【关键路径】` : draft.taskName}
+          title={row.scheduleStatus === "NEGATIVE_FLOAT" ? `${draft.taskName}【负浮动】` : row.isCritical ? `${draft.taskName}【关键路径】` : draft.taskName}
         />
         {row.isCritical && (
           <span className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-[10px] font-medium text-destructive">
-            【关键路径】
+            {row.scheduleStatus === "NEGATIVE_FLOAT" ? "【负浮动】" : "【关键路径】"}
           </span>
         )}
       </div>
@@ -2248,6 +2336,51 @@ const EditableTaskRow = ({
             <span className="text-[10px] text-muted-foreground">%</span>
           </div>
       )}
+      {isColumnVisible("totalFloat") && (
+        <div
+          data-gantt-column-key="totalFloat"
+          className={cn(
+            "flex min-w-0 items-center justify-end px-2 font-mono text-[11px] tabular-nums",
+            row.totalFloatMinutes != null && row.totalFloatMinutes < 0 && "font-semibold text-destructive",
+            row.totalFloatMinutes === 0 && "font-semibold text-destructive",
+            row.scheduleStatus === "NEAR_CRITICAL" && "text-amber-500",
+          )}
+          title={`总浮动：${formatFloat(row.totalFloatMinutes)}`}
+        >
+          {formatFloat(row.totalFloatMinutes)}
+        </div>
+      )}
+      {isColumnVisible("freeFloat") && (
+        <div data-gantt-column-key="freeFloat" className="flex min-w-0 items-center justify-end px-2 font-mono text-[11px] tabular-nums" title={`自由浮动：${formatFloat(row.freeFloatMinutes)}`}>
+          {formatFloat(row.freeFloatMinutes)}
+        </div>
+      )}
+      {isColumnVisible("earlyStart") && (
+        <div data-gantt-column-key="earlyStart" className="truncate px-2 font-mono text-[11px]" title={row.earlyStartDate || "--"}>{row.earlyStartDate || "--"}</div>
+      )}
+      {isColumnVisible("earlyFinish") && (
+        <div data-gantt-column-key="earlyFinish" className="truncate px-2 font-mono text-[11px]" title={row.earlyFinishDate || "--"}>{row.earlyFinishDate || "--"}</div>
+      )}
+      {isColumnVisible("lateStart") && (
+        <div data-gantt-column-key="lateStart" className="truncate px-2 font-mono text-[11px]" title={row.lateStartDate || "--"}>{row.lateStartDate || "--"}</div>
+      )}
+      {isColumnVisible("lateFinish") && (
+        <div data-gantt-column-key="lateFinish" className="truncate px-2 font-mono text-[11px]" title={row.lateFinishDate || "--"}>{row.lateFinishDate || "--"}</div>
+      )}
+      {isColumnVisible("scheduleStatus") && (
+        <div
+          data-gantt-column-key="scheduleStatus"
+          className={cn(
+            "truncate px-2 text-[11px]",
+            row.scheduleStatus === "NEGATIVE_FLOAT" && "font-semibold text-destructive",
+            row.scheduleStatus === "CRITICAL" && "text-destructive",
+            row.scheduleStatus === "NEAR_CRITICAL" && "text-amber-500",
+          )}
+          title={SCHEDULE_STATUS_LABELS[(row.scheduleStatus as GanttScheduleStatus) || "UNSCHEDULED"]}
+        >
+          {SCHEDULE_STATUS_LABELS[(row.scheduleStatus as GanttScheduleStatus) || "UNSCHEDULED"]}
+        </div>
+      )}
       {isColumnVisible("predecessor") && (
         <div data-gantt-column-key="predecessor">
           <PredecessorSelect
@@ -2298,215 +2431,45 @@ const PredecessorSelect = ({
   portalContainer?: HTMLElement | null;
   value: string[];
 }) => {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const [pendingValue, setPendingValue] = useState<string[]>(value);
-  const [expandedTaskIds, setExpandedTaskIds] = useState<Set<string>>(() => new Set());
-  const taskById = useMemo(() => new Map(options.map((task) => [task.id, task])), [options]);
-  const childIdsByParentId = useMemo(() => {
-    const result = new Map<string, string[]>();
-    options.forEach((task) => {
-      if (!task.parentId) return;
-      const childIds = result.get(task.parentId) ?? [];
-      childIds.push(task.id);
-      result.set(task.parentId, childIds);
-    });
-    return result;
-  }, [options]);
-  const unavailableTaskIds = useMemo(() => {
-    const result = new Set([currentTaskId]);
-    const queue = [...(childIdsByParentId.get(currentTaskId) ?? [])];
-    while (queue.length > 0) {
-      const taskId = queue.shift();
-      if (!taskId || result.has(taskId)) continue;
-      result.add(taskId);
-      queue.push(...(childIdsByParentId.get(taskId) ?? []));
-    }
-    return result;
-  }, [childIdsByParentId, currentTaskId]);
-  const availableOptions = useMemo(
-    () => options.filter((task) => task.taskName.trim() && !unavailableTaskIds.has(task.id)),
-    [options, unavailableTaskIds],
+  const selectOptions = useMemo<HierarchicalSelectOption[]>(
+    () => options
+      .filter((task) => task.taskName.trim())
+      .filter((task) => {
+        if (task.id === currentTaskId) return false;
+        let parentId = task.parentId ?? null;
+        const descendants = new Set<string>();
+        while (parentId) {
+          if (parentId === currentTaskId) return false;
+          if (descendants.has(parentId)) break;
+          descendants.add(parentId);
+          parentId = options.find((candidate) => candidate.id === parentId)?.parentId ?? null;
+        }
+        return true;
+      })
+      .map((task) => ({
+        id: task.id,
+        label: task.taskCode || "未编号",
+        secondaryLabel: task.taskName,
+        searchText: task.taskCategory,
+        parentId: task.parentId ?? null,
+      })),
+    [currentTaskId, options],
   );
-  const availableTaskIds = useMemo(() => new Set(availableOptions.map((task) => task.id)), [availableOptions]);
-  const matchingOptions = useMemo(() => {
-    const normalizedQuery = query.trim().toLocaleLowerCase();
-    if (!normalizedQuery) return availableOptions;
-    return availableOptions.filter((task) => [task.taskCode, task.taskName, task.taskCategory]
-      .join(" ")
-      .toLocaleLowerCase()
-      .includes(normalizedQuery));
-  }, [availableOptions, query]);
-  const visibleOptions = useMemo(() => {
-    if (query.trim()) return matchingOptions;
-    return matchingOptions.filter((task) => {
-      let parentId = task.parentId ?? null;
-      while (parentId) {
-        if (availableTaskIds.has(parentId) && !expandedTaskIds.has(parentId)) return false;
-        parentId = taskById.get(parentId)?.parentId ?? null;
-      }
-      return true;
-    });
-  }, [availableTaskIds, expandedTaskIds, matchingOptions, query, taskById]);
-
-  useEffect(() => {
-    if (!open) setPendingValue(value);
-  }, [open, value]);
-
-  const getTaskDepth = (task: ProjectGanttTask) => {
-    let depth = 0;
-    let parentId = task.parentId ?? null;
-    while (parentId) {
-      if (availableTaskIds.has(parentId)) depth += 1;
-      parentId = taskById.get(parentId)?.parentId ?? null;
-    }
-    return depth;
-  };
-
-  const expandSelectedAncestors = (selectedTaskIds: string[]) => {
-    const next = new Set<string>();
-    selectedTaskIds.forEach((taskId) => {
-      let parentId = taskById.get(taskId)?.parentId ?? null;
-      while (parentId) {
-        if (availableTaskIds.has(parentId)) next.add(parentId);
-        parentId = taskById.get(parentId)?.parentId ?? null;
-      }
-    });
-    setExpandedTaskIds(next);
-  };
-
-  const changeOpen = (nextOpen: boolean) => {
-    if (nextOpen) {
-      const nextValue = value.filter((taskId) => availableTaskIds.has(taskId));
-      setPendingValue(nextValue);
-      setQuery("");
-      expandSelectedAncestors(nextValue);
-    } else {
-      setQuery("");
-      setPendingValue(value);
-    }
-    setOpen(nextOpen);
-  };
-
-  const togglePendingValue = (taskId: string) => {
-    setPendingValue((current) => {
-      const next = new Set(current);
-      if (next.has(taskId)) next.delete(taskId);
-      else next.add(taskId);
-      return availableOptions.map((task) => task.id).filter((id) => next.has(id));
-    });
-  };
-
-  const selectedTasks = value
-    .map((taskId) => taskById.get(taskId))
-    .filter((task): task is ProjectGanttTask => Boolean(task));
-  const triggerText = selectedTasks.length === 0
-    ? "无"
-    : selectedTasks.length === 1
-      ? `${selectedTasks[0].taskCode || selectedTasks[0].taskName}`
-      : `已选 ${selectedTasks.length} 项`;
-  const valuesChanged = pendingValue.length !== value.length
-    || pendingValue.some((taskId, index) => taskId !== value[index]);
 
   return (
-    <DropdownMenu open={open} onOpenChange={changeOpen}>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          aria-label="紧前任务"
-          className={cn(inlineSelectClass, "flex items-center gap-1 text-left disabled:pointer-events-none")}
-          disabled={disabled}
-          title={selectedTasks.map((task) => `${task.taskCode} · ${task.taskName}`).join("\n") || "无"}
-        >
-          <span className="min-w-0 flex-1 truncate">{triggerText}</span>
-          <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent container={portalContainer} align="end" className="w-[360px] max-w-[calc(100vw-24px)] p-0" onCloseAutoFocus={(event) => event.preventDefault()}>
-        <div className="border-b border-border p-2" onKeyDown={(event) => event.stopPropagation()}>
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              aria-label="搜索紧前任务"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              className="h-7 pl-7 text-xs"
-              placeholder="搜索任务 ID、名称或类别"
-            />
-          </div>
-        </div>
-        <div className="max-h-72 overflow-y-auto p-1">
-          {visibleOptions.length === 0 ? (
-            <p className="px-2 py-5 text-center text-xs text-muted-foreground">没有可选择的紧前任务</p>
-          ) : visibleOptions.map((task) => {
-            const childIds = (childIdsByParentId.get(task.id) ?? []).filter((id) => availableTaskIds.has(id));
-            const hasChildren = childIds.length > 0;
-            const isExpanded = expandedTaskIds.has(task.id);
-            const selected = pendingValue.includes(task.id);
-            const depth = getTaskDepth(task);
-            return (
-              <div
-                key={task.id}
-                className="flex min-h-8 items-center gap-1 rounded-sm pr-2 text-xs hover:bg-accent"
-                style={{ paddingLeft: `${6 + depth * 16}px` }}
-              >
-                {hasChildren ? (
-                  <button
-                    type="button"
-                    aria-label={`${isExpanded ? "折叠" : "展开"} ${task.taskCode || task.taskName} 子任务`}
-                    className="flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground"
-                    onClick={() => setExpandedTaskIds((current) => {
-                      const next = new Set(current);
-                      if (next.has(task.id)) next.delete(task.id);
-                      else next.add(task.id);
-                      return next;
-                    })}
-                  >
-                    {isExpanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
-                  </button>
-                ) : <span className="size-5 shrink-0" aria-hidden="true" />}
-                <input
-                  type="checkbox"
-                  aria-label={`选择 ${task.taskCode || task.taskName}`}
-                  checked={selected}
-                  onChange={() => togglePendingValue(task.id)}
-                  className="size-3.5 shrink-0 rounded border-border bg-background"
-                />
-                <button
-                  type="button"
-                  className="min-w-0 flex-1 truncate py-1 text-left text-foreground"
-                  onClick={() => togglePendingValue(task.id)}
-                  title={`${task.taskCode} · ${task.taskName}`}
-                >
-                  <span className="font-mono text-[11px]">{task.taskCode || "未编号"} · {task.taskName}</span>
-                </button>
-              </div>
-            );
-          })}
-        </div>
-        <div className="flex items-center justify-between gap-2 border-t border-border px-2 py-2">
-          <span className="text-xs text-muted-foreground">已选择 {pendingValue.length} 项</span>
-          <div className="flex items-center gap-1.5">
-            <Button type="button" size="sm" variant="ghost" className="h-7 text-xs" onClick={() => changeOpen(false)}>
-              取消
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              className="h-7 text-xs"
-              aria-label="应用紧前任务"
-              disabled={!valuesChanged}
-              onClick={() => {
-                onChange(pendingValue);
-                changeOpen(false);
-              }}
-            >
-              应用
-            </Button>
-          </div>
-        </div>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <HierarchicalMultiSelect
+      ariaLabel="紧前任务"
+      searchPlaceholder="搜索任务 ID、名称或类别"
+      emptyText="没有可选择的紧前任务"
+      options={selectOptions}
+      value={value}
+      onChange={onChange}
+      applyOnClose
+      disabled={disabled}
+      className={cn(inlineSelectClass, "text-left")}
+      contentClassName="w-[400px]"
+      portalContainer={portalContainer}
+    />
   );
 };
 

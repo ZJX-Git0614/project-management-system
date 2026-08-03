@@ -9,6 +9,8 @@ services:
       POSTGRES_USER: pms
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pms-local-db-2026}
       POSTGRES_DB: pms
+      # Applies to new deployments only. Existing databases remain compatible.
+      POSTGRES_INITDB_ARGS: "--data-checksums --auth-host=scram-sha-256"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -27,7 +29,7 @@ services:
     environment:
       DATABASE_URL: postgresql://pms:${POSTGRES_PASSWORD:-pms-local-db-2026}@postgres:5432/pms?schema=public
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be configured in .env}
-      ASSISTANT_CONFIG_ENCRYPTION_KEY: ${JWT_SECRET:?JWT_SECRET must be configured in .env}
+      ASSISTANT_CONFIG_ENCRYPTION_KEY: ${ASSISTANT_CONFIG_ENCRYPTION_KEY:?ASSISTANT_CONFIG_ENCRYPTION_KEY must be configured in .env}
       PROJECT_DOCUMENT_STORAGE_DIR: /app/.local-runtime/project-documents
       SYSTEM_BACKUP_DIR: /app/.local-runtime/system-backups
       SYSTEM_BACKUP_ALLOWED_ROOTS: /app/.local-runtime/system-backups,/data/system-backups

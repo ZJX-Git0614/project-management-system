@@ -10,6 +10,7 @@ import {
   ClipboardList,
   DatabaseBackup,
   FileText,
+  KeyRound,
   LayoutDashboard,
   ListTodo,
   LogOut,
@@ -52,6 +53,7 @@ import { ProjectAssistant } from "@/components/project-assistant";
 import { useSystemFeedback } from "@/components/system-feedback-provider";
 import { api } from "@/lib/api-client";
 import { TODO_CHANGED_EVENT } from "@/lib/todo-events";
+import { ChangePasswordDialog } from "@/components/change-password-dialog";
 
 const AUTH_FREE_PATHS = ["/login", "/force-change-password"];
 const SIDEBAR_VISIBILITY_STORAGE_KEY = "pms.desktopSidebarVisible";
@@ -77,6 +79,7 @@ const SidebarContent = ({
   currentUser,
   onMobileClose,
   onLogout,
+  onChangePassword,
 }: {
   searchTerm: string;
   onSearchChange: (val: string) => void;
@@ -84,6 +87,7 @@ const SidebarContent = ({
   currentUser?: { id: string; username: string; assignedRoleNames: string[] };
   onMobileClose?: () => void;
   onLogout: () => void;
+  onChangePassword: () => void;
 }) => (
   <div className="flex h-full flex-col gap-3">
     {/* Search */}
@@ -177,6 +181,10 @@ const SidebarContent = ({
             {currentUser?.username} · {currentUser ? currentUser.assignedRoleNames.join("、") || "未分配角色" : "—"}
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
+          <DropdownMenuItem className="cursor-pointer" onClick={onChangePassword}>
+            <KeyRound className="size-3.5" />
+            修改密码
+          </DropdownMenuItem>
           <DropdownMenuItem className="cursor-pointer text-destructive" onClick={onLogout}>
             <LogOut className="size-3.5" />
             退出登录
@@ -201,6 +209,7 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
   const [desktopSidebarVisible, setDesktopSidebarVisible] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [todoCounts, setTodoCounts] = useState({ count: 0, notificationCount: 0 });
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
   const lastNotificationCountRef = useRef(0);
 
   const isAuthFree = AUTH_FREE_PATHS.includes(pathname);
@@ -331,7 +340,7 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
         ? [
             {
               href: currentProjectId ? `/projects/${currentProjectId}?nav=gantt` : "/projects",
-              label: "项目进度管理",
+              label: "项目WBS管理",
               active: isDetailGroupActive(fullPath, "gantt"),
               permissionKey: getDetailGroupPermissionKey("gantt"),
               icon: <TrendingUp className="size-4" />,
@@ -457,6 +466,7 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
     currentUser,
     onMobileClose: () => setMobileOpen(false),
     onLogout: handleLogout,
+    onChangePassword: () => setChangePasswordOpen(true),
   };
 
   return (
@@ -557,6 +567,7 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
           currentProjectId={currentProjectId}
           currentProjectName={currentProject?.name}
         />
+        <ChangePasswordDialog open={changePasswordOpen} onOpenChange={setChangePasswordOpen} />
       </div>
     </TooltipProvider>
   );

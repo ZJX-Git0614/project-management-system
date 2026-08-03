@@ -6,7 +6,6 @@ import {
   useCallback,
   useContext,
   useEffect,
-  useRef,
   useState,
   useMemo,
 } from "react"
@@ -40,8 +39,6 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
   const [rawTree, setRawTree] = useState<PermissionTreeState>(() =>
     JSON.parse(JSON.stringify(DEFAULT_PERMISSION_TREE)),
   )
-  const fetchedRef = useRef(false)
-
   const refreshPermissionTree = useCallback(async () => {
     try {
       const result = await api.get<{ data: PermissionTreeState }>("/api/permission-tree")
@@ -53,12 +50,14 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  // 首次加载时从 API 获取权限树
+  // 登录页首次挂载时尚无令牌，必须在用户登录后重新加载权限树。
   useEffect(() => {
-    if (fetchedRef.current) return
-    fetchedRef.current = true
-    refreshPermissionTree()
-  }, [refreshPermissionTree])
+    if (!user) {
+      setRawTree(JSON.parse(JSON.stringify(DEFAULT_PERMISSION_TREE)))
+      return
+    }
+    void refreshPermissionTree()
+  }, [refreshPermissionTree, user])
 
   const can = useCallback(
     (...nodeKeys: string[]) => {

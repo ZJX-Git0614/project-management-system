@@ -47,4 +47,29 @@ if (-not $documentBackupCreated) {
   }
 }
 
+$backupFiles = @(
+  Get-Item -LiteralPath (Join-Path $backupDirectory "database.dump"),
+  Get-Item -LiteralPath (Join-Path $backupDirectory "project-documents.tar.gz")
+)
+$manifest = [ordered]@{
+  schemaVersion = 1
+  createdAt = (Get-Date).ToString("o")
+  database = "database.dump"
+  documents = "project-documents.tar.gz"
+  files = @(
+    $backupFiles | ForEach-Object {
+      [ordered]@{
+        name = $_.Name
+        bytes = $_.Length
+        sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+      }
+    }
+  )
+}
+$manifestPath = Join-Path $backupDirectory "backup-manifest.json"
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+
 Write-Host "Backup completed: $backupDirectory" -ForegroundColor Green
+Write-Host "Backup manifest: $manifestPath" -ForegroundColor DarkGray
+# update.ps1 parses this stable marker and verifies the hashes before it replaces the application image.
+Write-Output "CEASTAR_PMS_BACKUP_DIRECTORY=$backupDirectory"

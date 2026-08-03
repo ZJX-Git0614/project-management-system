@@ -35,6 +35,13 @@ export interface AssistantScheduleTaskSource {
   taskName: string;
   startDate: string;
   finishDate: string;
+  earlyStartDate?: string;
+  earlyFinishDate?: string;
+  lateStartDate?: string;
+  lateFinishDate?: string;
+  totalFloatMinutes?: number | null;
+  freeFloatMinutes?: number | null;
+  scheduleStatus?: string;
   durationDays: number;
   durationMinutes: number;
   durationFormat: number;
@@ -258,6 +265,13 @@ export const buildAssistantScheduleContextV1 = (params: {
       taskName: task.taskName,
       startDate: task.startDate,
       finishDate: task.finishDate,
+      earlyStartDate: task.earlyStartDate,
+      earlyFinishDate: task.earlyFinishDate,
+      lateStartDate: task.lateStartDate,
+      lateFinishDate: task.lateFinishDate,
+      totalFloatMinutes: task.totalFloatMinutes,
+      freeFloatMinutes: task.freeFloatMinutes,
+      scheduleStatus: task.scheduleStatus,
       durationDays: task.durationDays,
       durationMinutes: task.durationMinutes,
       durationFormat: task.durationFormat,
@@ -311,6 +325,13 @@ export const buildAssistantScheduleContextV1 = (params: {
     startDate: task.startDate,
     finishDate: task.finishDate,
     durationDays: task.durationDays,
+    totalFloatMinutes: task.totalFloatMinutes,
+    freeFloatMinutes: task.freeFloatMinutes,
+    earlyStartDate: task.earlyStartDate,
+    earlyFinishDate: task.earlyFinishDate,
+    lateStartDate: task.lateStartDate,
+    lateFinishDate: task.lateFinishDate,
+    scheduleStatus: task.scheduleStatus,
     actualStartDate: task.actualStartDate,
     actualEndDate: task.actualEndDate,
     progress: task.progress,

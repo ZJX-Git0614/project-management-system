@@ -31,6 +31,14 @@ export interface ProjectGanttTask extends BaseEntity {
   taskDescription: string;
   startDate: string;
   finishDate?: string;
+  earlyStartDate?: string;
+  earlyFinishDate?: string;
+  lateStartDate?: string;
+  lateFinishDate?: string;
+  totalFloatMinutes?: number | null;
+  freeFloatMinutes?: number | null;
+  scheduleStatus?: string;
+  scheduleCalculatedAt?: string | null;
   durationDays: number;
   durationMinutes?: number;
   durationFormat?: number;
@@ -168,6 +176,7 @@ export interface SystemPerson extends BaseEntity {
 
 export interface ProjectMember extends BaseEntity {
   projectId: string;
+  accountId?: string | null;
   roleName: string;
   personName: string;
 }

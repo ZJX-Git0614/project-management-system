@@ -41,6 +41,59 @@ function Wait-ForApplication {
   throw "Ceastar PMS did not become ready within 180 seconds."
 }
 
+function Assert-VerifiedBackup([string]$BackupDirectory) {
+  $manifestPath = Join-Path $BackupDirectory "backup-manifest.json"
+  if (-not (Test-Path -LiteralPath $manifestPath)) {
+    throw "The pre-update backup manifest is missing: $manifestPath"
+  }
+
+  try {
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+  } catch {
+    throw "The pre-update backup manifest cannot be read: $manifestPath"
+  }
+
+  if (-not $manifest.files -or $manifest.files.Count -lt 2) {
+    throw "The pre-update backup manifest is incomplete: $manifestPath"
+  }
+
+  foreach ($file in $manifest.files) {
+    $filePath = Join-Path $BackupDirectory ([string]$file.name)
+    if (-not (Test-Path -LiteralPath $filePath)) {
+      throw "The pre-update backup file is missing: $filePath"
+    }
+    $actualHash = (Get-FileHash -LiteralPath $filePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne ([string]$file.sha256).ToLowerInvariant()) {
+      throw "The pre-update backup checksum does not match: $filePath"
+    }
+  }
+}
+
+function Show-StorageProtectionStatus([string]$Directory) {
+  $drive = [System.IO.Path]::GetPathRoot((Resolve-Path -LiteralPath $Directory).Path)
+  if (-not $drive) {
+    Write-Host "Storage encryption status could not be determined." -ForegroundColor Yellow
+    return
+  }
+
+  $bitLockerCommand = Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue
+  if (-not $bitLockerCommand) {
+    Write-Host "Storage encryption was not checked automatically. Protect the drive containing $Directory with BitLocker or device encryption." -ForegroundColor Yellow
+    return
+  }
+
+  try {
+    $volume = Get-BitLockerVolume -MountPoint $drive -ErrorAction Stop
+    if ($volume.ProtectionStatus -eq "On") {
+      Write-Host "Database storage protection: BitLocker is enabled on $drive" -ForegroundColor Green
+    } else {
+      Write-Host "Database storage protection warning: BitLocker is not enabled on $drive. Enable BitLocker or move the deployment to an encrypted drive." -ForegroundColor Yellow
+    }
+  } catch {
+    Write-Host "Storage encryption was not checked automatically. Protect the drive containing $Directory with BitLocker or device encryption." -ForegroundColor Yellow
+  }
+}
+
 function Ensure-CompatibleSystemBackupConfiguration([string]$Directory) {
   $composePath = Join-Path $Directory "docker-compose.yml"
   $content = [System.IO.File]::ReadAllText($composePath)
@@ -101,7 +154,7 @@ function Ensure-CompatibleSystemBackupConfiguration([string]$Directory) {
     return
   }
 
-  $backupPath = "$composePath.before-update-20260730-3"
+  $backupPath = "$composePath.before-update-20260803-3"
   if (-not (Test-Path $backupPath)) {
     [System.IO.File]::Copy($composePath, $backupPath, $false)
   }
@@ -118,6 +171,7 @@ if ($ComposeCompatibilityTestDirectory) {
 }
 
 $deploymentDirectory = Find-DeploymentDirectory
+Show-StorageProtectionStatus $deploymentDirectory
 $imageNameFile = Join-Path $PSScriptRoot "image-name.txt"
 $imageHashFile = Join-Path $PSScriptRoot "image.sha256"
 $imageDirectory = Join-Path $PSScriptRoot "images"
@@ -171,7 +225,7 @@ if (-not $composeImage) {
   throw "The current Ceastar PMS image name could not be determined."
 }
 
-$rollbackImage = "ceastar-project-management:rollback-20260730-3-amd64"
+$rollbackImage = "ceastar-project-management:rollback-20260803-3-amd64"
 docker image inspect $composeImage *> $null
 Assert-LastExitCode "The current Ceastar PMS image is missing."
 docker tag $composeImage $rollbackImage
@@ -182,7 +236,17 @@ if (Test-Path $packagedBackupScript) {
 }
 
 Write-Host "Creating a database and document backup..." -ForegroundColor Cyan
-& (Join-Path $deploymentDirectory "backup.ps1")
+$backupOutput = @(& (Join-Path $deploymentDirectory "backup.ps1") 2>&1 | ForEach-Object { $_.ToString() })
+$backupOutput | ForEach-Object { Write-Host $_ }
+$backupDirectoryLine = $backupOutput |
+  Where-Object { $_ -like "CEASTAR_PMS_BACKUP_DIRECTORY=*" } |
+  Select-Object -Last 1
+if (-not $backupDirectoryLine) {
+  throw "The pre-update backup did not report its directory. The update was stopped before changing the application."
+}
+$preUpdateBackupDirectory = $backupDirectoryLine.Substring("CEASTAR_PMS_BACKUP_DIRECTORY=".Length)
+Assert-VerifiedBackup $preUpdateBackupDirectory
+Write-Host "Pre-update backup verified: $preUpdateBackupDirectory" -ForegroundColor Green
 Ensure-CompatibleSystemBackupConfiguration $deploymentDirectory
 
 Write-Host "MPP export service setup was skipped during update." -ForegroundColor DarkYellow
@@ -210,7 +274,7 @@ $state = @(
   "rollbackImage=$rollbackImage",
   "updatedAt=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 )
-Set-Content -Path (Join-Path $deploymentDirectory ".ceastar-update-20260730-3.state") -Value $state -Encoding ASCII
+Set-Content -Path (Join-Path $deploymentDirectory ".ceastar-update-20260803-3.state") -Value $state -Encoding ASCII
 
 Write-Host ""
 Write-Host "Ceastar PMS update completed successfully." -ForegroundColor Green

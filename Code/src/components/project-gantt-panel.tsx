@@ -147,6 +147,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const { can } = usePermission();
 
   const readOnly = projectStatus === ProjectStatus.COMPLETED || projectStatus === ProjectStatus.VOIDED;
+  const canView = can("project-gantt:view");
   const canCreate = can("project-gantt:create") && !readOnly;
   const canEdit = can("project-gantt:edit") && !readOnly;
   const canDelete = can("project-gantt:delete") && !readOnly;
@@ -355,9 +356,8 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       await runWithSnapshotHistory("新增任务", { taskIds: [], anchorTaskId: parentTask?.id }, async () => {
         const created = await api.post<ProjectGanttTask>(`/api/projects/${projectId}/gantt-tasks`, {
           parentId,
-          taskCategory: parentTask?.taskCategory ?? "",
           taskName: "",
-          taskDescription: "",
+          taskDescription: "无",
           startDate,
           durationDays: 0,
           ownerMemberId: null,
@@ -644,6 +644,16 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
 
   if (loading) {
     return <div className="text-sm text-muted-foreground">加载中...</div>;
+  }
+
+  if (!canView) {
+    return (
+      <Card>
+        <CardContent className="py-8 text-center text-sm text-muted-foreground">
+          当前账号未获得“项目 WBS 管理”查看权限。
+        </CardContent>
+      </Card>
+    );
   }
 
   const range = getGanttDateRange(tasks);

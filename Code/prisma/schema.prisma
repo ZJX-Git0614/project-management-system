@@ -19,6 +19,8 @@ model UserAccount {
   passwordResetRequired Boolean   @default(true)
   passwordUpdatedAt     DateTime?
   assistantAccessMode   String    @default("REQUEST_APPROVAL")
+
+  projectMemberships ProjectMember[]
 }
 
 model Project {
@@ -59,44 +61,52 @@ model Project {
 }
 
 model ProjectGanttTask {
-  id                 String   @id @default(cuid())
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
-  projectId          String
-  parentId           String?
-  ownerMemberId      String?
-  taskCode           String   @default("")
-  taskCategory       String
-  taskName           String
-  taskDescription    String   @default("")
-  startDate          String
-  finishDate         String   @default("")
-  durationDays       Float
-  durationMinutes    Int      @default(0)
-  durationFormat     Int      @default(7)
-  actualStartDate    String   @default("")
-  actualEndDate      String   @default("")
-  estimatedWorkHours Float    @default(0)
-  actualWorkHours    Float    @default(0)
-  progress           Int      @default(0)
-  predecessorTask    String   @default("")
-  taskMode           String   @default("AUTO")
-  isMilestone        Boolean  @default(false)
-  externalUid        String   @default("")
-  wbsCode            String   @default("")
-  outlineNumber      String   @default("")
-  calendarUid        String   @default("")
-  constraintType     Int?
-  constraintDate     String   @default("")
-  baselineStartDate  String   @default("")
-  baselineFinishDate String   @default("")
-  baselineCost       Float    @default(0)
-  budgetAtCompletion Float    @default(0)
-  actualCost         Float    @default(0)
-  budgetItemId       String?
-  baselines          Json     @default("[]")
-  remark             String   @default("")
-  sortOrder          Int      @default(0)
+  id                   String    @id @default(cuid())
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  projectId            String
+  parentId             String?
+  ownerMemberId        String?
+  taskCode             String    @default("")
+  taskCategory         String
+  taskName             String
+  taskDescription      String    @default("无")
+  startDate            String
+  finishDate           String    @default("")
+  earlyStartDate       String    @default("")
+  earlyFinishDate      String    @default("")
+  lateStartDate        String    @default("")
+  lateFinishDate       String    @default("")
+  totalFloatMinutes    Int?
+  freeFloatMinutes     Int?
+  scheduleStatus       String    @default("UNSCHEDULED")
+  scheduleCalculatedAt DateTime?
+  durationDays         Float
+  durationMinutes      Int       @default(0)
+  durationFormat       Int       @default(7)
+  actualStartDate      String    @default("")
+  actualEndDate        String    @default("")
+  estimatedWorkHours   Float     @default(0)
+  actualWorkHours      Float     @default(0)
+  progress             Int       @default(0)
+  predecessorTask      String    @default("")
+  taskMode             String    @default("AUTO")
+  isMilestone          Boolean   @default(false)
+  externalUid          String    @default("")
+  wbsCode              String    @default("")
+  outlineNumber        String    @default("")
+  calendarUid          String    @default("")
+  constraintType       Int?
+  constraintDate       String    @default("")
+  baselineStartDate    String    @default("")
+  baselineFinishDate   String    @default("")
+  baselineCost         Float     @default(0)
+  budgetAtCompletion   Float     @default(0)
+  actualCost           Float     @default(0)
+  budgetItemId         String?
+  baselines            Json      @default("[]")
+  remark               String    @default("")
+  sortOrder            Int       @default(0)
 
   project                 Project                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   ownerMember             ProjectMember?           @relation(fields: [ownerMemberId], references: [id], onDelete: SetNull)
@@ -289,11 +299,15 @@ model ProjectMember {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
   projectId  String
+  accountId  String?
   roleName   String
   personName String
 
   project    Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  account    UserAccount?       @relation(fields: [accountId], references: [id], onDelete: SetNull)
   ganttTasks ProjectGanttTask[]
+
+  @@index([projectId, accountId])
 }
 
 model WeeklyItem {

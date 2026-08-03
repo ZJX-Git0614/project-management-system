@@ -20,6 +20,7 @@ export type AssistantWorkflowStepSeed = {
   toolId: string;
   title: string;
   command: string;
+  args?: Record<string, unknown>;
   dependsOn: number[];
 };
 
@@ -144,6 +145,7 @@ const materializePlanStep = async (params: {
     prisma.assistantPlanStep.findUniqueOrThrow({ where: { planId_stepIndex: { planId: params.planId, stepIndex: params.stepIndex } } }),
   ]);
   const input = parseObject(plan.inputJson);
+  const stepInput = parseObject(step.inputJson);
   const attachmentIds = Array.isArray(input.attachmentIds) ? input.attachmentIds.map(String) : [];
   const action = await proposeAssistantAction({
     message: step.command,
@@ -152,6 +154,9 @@ const materializePlanStep = async (params: {
     runtime: params.runtime,
     attachmentIds: step.stepIndex === 0 ? attachmentIds : [],
     expectedToolId: step.toolId,
+    plannedArgs: stepInput.args && typeof stepInput.args === "object" && !Array.isArray(stepInput.args)
+      ? stepInput.args as Record<string, unknown>
+      : undefined,
   });
   if (!action) {
     await prisma.$transaction([
@@ -173,7 +178,7 @@ const materializePlanStep = async (params: {
     }),
     prisma.assistantPlanStep.update({
       where: { id: step.id },
-      data: { status: "PROPOSED", inputJson: JSON.stringify({ command: step.command }), errorCode: "", errorMessage: "" },
+      data: { status: "PROPOSED", inputJson: JSON.stringify({ command: step.command, args: stepInput.args }), errorCode: "", errorMessage: "" },
     }),
     prisma.assistantPlanRun.update({
       where: { id: plan.id },
@@ -219,6 +224,7 @@ export const createAssistantWorkflowPlanFromSteps = async (params: {
             toolId: step.toolId,
             title: step.title,
             command: step.command,
+            inputJson: JSON.stringify({ command: step.command, args: step.args }),
             riskLevel: tool.riskLevel,
             dependsOnJson: JSON.stringify(step.dependsOn),
             maxAttempts: tool.retryPolicy.maxAttempts,

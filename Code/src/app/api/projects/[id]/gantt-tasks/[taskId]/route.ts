@@ -1,8 +1,8 @@
 import { NextRequest } from "next/server";
 
 import { prisma } from "@/lib/prisma";
-import { getUserFromRequest } from "@/lib/auth";
-import { ensureMutableProject, err, notFound, ok, unauthorized } from "@/lib/api-utils";
+import { ensureMutableProject, err, notFound, ok } from "@/lib/api-utils";
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import {
   calculateTaskFinishDate,
   estimatedHoursForDuration,
@@ -17,18 +17,19 @@ import {
   getOrderedGanttTasks,
   parseGanttDependencyInput,
   recalculateProjectGanttSchedule,
-  renumberProjectGanttTaskCodes,
   replaceGanttTaskDependencies,
   serializeGanttTask,
 } from "@/lib/gantt-task-service";
+import { synchronizeGanttTaskCategoriesAfterNameChange } from "@/lib/gantt-hierarchy";
 
 export async function PUT(
   req: NextRequest,
   { params }: { params: Promise<{ id: string; taskId: string }> },
 ) {
   const { id, taskId } = await params;
-  const user = getUserFromRequest(req);
-  if (!user) return unauthorized();
+  const user = await getAuthenticatedUser(req);
+  if (!user) return err("未登录", 401);
+  if (!(await userHasPermission(user, "project-gantt:edit"))) return err("权限不足", 403);
 
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
@@ -37,9 +38,14 @@ export async function PUT(
   if (!existing) return notFound("甘特任务");
 
   const body = await req.json() as Record<string, unknown>;
-  const taskCategory = String(body.taskCategory ?? "").trim();
+  const requestedTaskCategory = "taskCategory" in body
+    ? String(body.taskCategory ?? "").trim()
+    : existing.taskCategory;
+  if (requestedTaskCategory !== existing.taskCategory) {
+    return err("任务类别由任务层级自动生成，不允许直接修改");
+  }
   const taskName = String(body.taskName ?? "").trim();
-  const taskDescription = String(body.taskDescription ?? existing.taskDescription ?? "").trim();
+  const taskDescription = String(body.taskDescription ?? existing.taskDescription ?? "").trim() || "无";
   const requestedStartDate = String(body.startDate ?? "").trim();
   const durationDays = Number(body.durationDays ?? 0);
   if (requestedStartDate && !/^\d{4}-\d{2}-\d{2}$/.test(requestedStartDate)) return err("计划开始时间格式应为 YYYY-MM-DD");
@@ -80,11 +86,8 @@ export async function PUT(
     if (!owner) return err("负责人必须来自当前项目组成员");
   }
 
-  const shouldRegroupByCategory = Boolean(taskCategory && taskCategory !== existing.taskCategory);
-
   const task = await prisma.$transaction(async (tx) => {
     const baseData = {
-      taskCategory,
       taskName,
       taskDescription,
       ownerMemberId,
@@ -102,56 +105,34 @@ export async function PUT(
       remark,
     };
 
-    if (!shouldRegroupByCategory) {
-      const updated = await tx.projectGanttTask.update({
-        where: { id: taskId },
-        data: baseData,
-      });
-      if (hasDependencyInput) await replaceGanttTaskDependencies(tx, id, taskId, dependencies);
-      return updated;
-    }
-
-    const siblings = await tx.projectGanttTask.findMany({
-      where: { projectId: id, parentId: existing.parentId },
-      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
-      select: { id: true, taskCategory: true },
-    });
-    const remainingSiblings = siblings.filter((item) => item.id !== taskId);
-    let insertAfterIndex = -1;
-    remainingSiblings.forEach((item, index) => {
-      if (item.taskCategory === taskCategory) insertAfterIndex = index;
-    });
-
-    if (insertAfterIndex < 0) {
-      const updated = await tx.projectGanttTask.update({
-        where: { id: taskId },
-        data: baseData,
-      });
-      if (hasDependencyInput) await replaceGanttTaskDependencies(tx, id, taskId, dependencies);
-      return updated;
-    }
-
-    const orderedIds = remainingSiblings.map((item) => item.id);
-    orderedIds.splice(insertAfterIndex + 1, 0, taskId);
-
     const updated = await tx.projectGanttTask.update({
       where: { id: taskId },
       data: baseData,
     });
-    await Promise.all(
-      orderedIds.map((orderedId, index) => (
-        tx.projectGanttTask.update({
-          where: { id: orderedId },
-          data: { sortOrder: index + 1 },
-        })
-      ))
-    );
+
+    if (taskName !== existing.taskName) {
+      const projectTasks = await tx.projectGanttTask.findMany({
+        where: { projectId: id },
+        orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+        select: { id: true, parentId: true, sortOrder: true, createdAt: true, taskCategory: true, taskName: true },
+      });
+      const synchronized = synchronizeGanttTaskCategoriesAfterNameChange(
+        projectTasks,
+        taskId,
+        existing.taskName,
+        taskName,
+      );
+      const previousCategoryById = new Map(projectTasks.map((item) => [item.id, item.taskCategory]));
+      const categoryUpdates = synchronized.filter((item) => previousCategoryById.get(item.id) !== item.taskCategory);
+      await Promise.all(categoryUpdates.map((item) => tx.projectGanttTask.update({
+        where: { id: item.id },
+        data: { taskCategory: item.taskCategory },
+      })));
+    }
+
     if (hasDependencyInput) await replaceGanttTaskDependencies(tx, id, taskId, dependencies);
     return updated;
-  });
-  if (shouldRegroupByCategory) {
-    await renumberProjectGanttTaskCodes(id);
-  }
+  }, { timeout: 30_000, maxWait: 10_000 });
   await recalculateProjectGanttSchedule(id, calendarMode);
   const normalizedTask = (await getOrderedGanttTasks(id)).find((item) => item.id === taskId);
 
@@ -163,8 +144,9 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string; taskId: string }> },
 ) {
   const { id, taskId } = await params;
-  const user = getUserFromRequest(req);
-  if (!user) return unauthorized();
+  const user = await getAuthenticatedUser(req);
+  if (!user) return err("未登录", 401);
+  if (!(await userHasPermission(user, "project-gantt:delete"))) return err("权限不足", 403);
 
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;

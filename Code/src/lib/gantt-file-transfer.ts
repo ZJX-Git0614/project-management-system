@@ -610,7 +610,26 @@ const styleGanttWorksheetXml = (xml: string, headers: readonly string[], depths:
   return styled.replace(/(<pageMargins\b)/, `${validationXml}$1`);
 };
 
-const applyGanttWorkbookStyle = (buffer: Buffer, headers: readonly string[], depths: number[]) => {
+const styleGanttReportWorksheetXml = (xml: string) => {
+  let styled = xml.replace(/<c r="([A-Z]+)(\d+)"([^>]*)>/g, (match, column: string, rowText: string, attributes: string) => {
+    const row = Number(rowText);
+    const styleId = row === 1 || row === 6 || row === 16 ? 1 : row % 2 === 0 ? 10 : 18;
+    const cleanAttributes = attributes.replace(/\s+s="[^"]*"/g, "");
+    return `<c r="${column}${row}"${cleanAttributes} s="${styleId}">`;
+  });
+  styled = styled.replace(
+    /<sheetViews><sheetView workbookViewId="0"\/><\/sheetViews>/,
+    '<sheetViews><sheetView showGridLines="0" workbookViewId="0"><pane ySplit="6" topLeftCell="A7" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A7" sqref="A7"/></sheetView></sheetViews>',
+  );
+  return styled;
+};
+
+const applyGanttWorkbookStyle = (
+  buffer: Buffer,
+  headers: readonly string[],
+  depths: number[],
+  hasProgressReport = false,
+) => {
   const archive = XLSX.CFB.read(buffer, { type: "buffer" });
   const stylesFile = XLSX.CFB.find(archive, "Root Entry/xl/styles.xml");
   const worksheetFile = XLSX.CFB.find(archive, "Root Entry/xl/worksheets/sheet1.xml");
@@ -620,6 +639,14 @@ const applyGanttWorkbookStyle = (buffer: Buffer, headers: readonly string[], dep
     styleGanttWorksheetXml(Buffer.from(worksheetFile.content).toString("utf8"), headers, depths),
     "utf8",
   );
+  if (hasProgressReport) {
+    const reportFile = XLSX.CFB.find(archive, "Root Entry/xl/worksheets/sheet2.xml");
+    if (!reportFile?.content) throw new Error("无法写入进度总结 Excel 样式");
+    reportFile.content = Buffer.from(
+      styleGanttReportWorksheetXml(Buffer.from(reportFile.content).toString("utf8")),
+      "utf8",
+    );
+  }
   return Buffer.from(XLSX.CFB.write(archive, { type: "buffer", fileType: "zip", compression: true }));
 };
 
@@ -648,14 +675,73 @@ const applyGanttWorksheetStyle = (
   worksheet["!margins"] = { left: 0.3, right: 0.3, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 };
 };
 
-export const buildGanttExcel = (tasks: ProjectGanttTask[]) => {
+export type GanttExcelProgressReport = {
+  total: number;
+  completed: number;
+  inProgress: number;
+  notStarted: number;
+  overdue: number;
+  averageProgress: number;
+  categoryBreakdown: Array<{ category: string; total: number; averageProgress: number }>;
+  summary: string;
+};
+
+export type GanttExcelOptions = {
+  report?: GanttExcelProgressReport;
+  reportFilters?: string[];
+  generatedAt?: Date;
+};
+
+const progressBar = (ratio: number, width = 32) => {
+  const normalized = Math.max(0, Math.min(1, ratio));
+  return "█".repeat(Math.round(normalized * width));
+};
+
+const buildGanttProgressReportWorksheet = (options: Required<Pick<GanttExcelOptions, "report">> & GanttExcelOptions) => {
+  const { report } = options;
+  const total = Math.max(1, report.total);
+  const rows: unknown[][] = [
+    ["任务进度总结报告", "", "", "", "", ""],
+    ["生成时间", (options.generatedAt ?? new Date()).toISOString().replace("T", " ").slice(0, 19)],
+    ["筛选条件", options.reportFilters?.join("；") || "无额外筛选"],
+    ["报告摘要", report.summary],
+    [],
+    ["进度指标", "数值", "占比", "可视化"],
+    ["任务总数", report.total, 1, progressBar(1)],
+    ["已完成", report.completed, report.completed / total, progressBar(report.completed / total)],
+    ["进行中", report.inProgress, report.inProgress / total, progressBar(report.inProgress / total)],
+    ["未开始", report.notStarted, report.notStarted / total, progressBar(report.notStarted / total)],
+    ["逾期未完成", report.overdue, report.overdue / total, progressBar(report.overdue / total)],
+    ["平均进度", report.averageProgress, report.averageProgress / 100, progressBar(report.averageProgress / 100)],
+    [],
+    [],
+    [],
+    ["任务类别", "任务数", "占比", "平均进度(%)", "任务量", "进度"],
+    ...report.categoryBreakdown.map((item) => [
+      item.category,
+      item.total,
+      item.total / total,
+      item.averageProgress,
+      progressBar(item.total / total, 24),
+      progressBar(item.averageProgress / 100, 24),
+    ]),
+  ];
+  const worksheet = XLSX.utils.aoa_to_sheet(rows);
+  worksheet["!cols"] = [{ wch: 32 }, { wch: 18 }, { wch: 14 }, { wch: 38 }, { wch: 28 }, { wch: 28 }];
+  worksheet["!rows"] = rows.map((_row, index) => ({ hpt: index === 0 ? 32 : index === 3 ? 36 : 23 }));
+  worksheet["!merges"] = [XLSX.utils.decode_range("A1:F1"), XLSX.utils.decode_range("B3:F3"), XLSX.utils.decode_range("B4:F4")];
+  worksheet["!autofilter"] = { ref: `A16:F${Math.max(16, rows.length)}` };
+  return worksheet;
+};
+
+export const buildGanttExcel = (tasks: ProjectGanttTask[], options: GanttExcelOptions = {}) => {
   const taskById = new Map(tasks.map((task) => [task.id, task]));
   const rows = tasks.map((task) => ({
     任务ID: task.taskCode,
     父任务ID: task.parentId ? taskById.get(task.parentId)?.taskCode ?? "" : "",
     任务类别: task.taskCategory,
     任务名称: task.taskName,
-    任务描述: task.taskDescription ?? "",
+    任务描述: task.taskDescription?.trim() || "无",
     负责人: task.ownerMember?.personName ?? "",
     计划开始: task.startDate,
     计划完成: task.finishDate || (task.durationDays > 0 ? addDaysInclusive(task.startDate, task.durationDays) : ""),
@@ -686,8 +772,11 @@ export const buildGanttExcel = (tasks: ProjectGanttTask[]) => {
   applyGanttWorksheetStyle(worksheet, GANTT_EXPORT_HEADERS, depths);
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "项目进度");
+  if (options.report) {
+    XLSX.utils.book_append_sheet(workbook, buildGanttProgressReportWorksheet({ ...options, report: options.report }), "进度总结");
+  }
   const buffer = Buffer.from(XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }));
-  return applyGanttWorkbookStyle(buffer, GANTT_EXPORT_HEADERS, depths);
+  return applyGanttWorkbookStyle(buffer, GANTT_EXPORT_HEADERS, depths, Boolean(options.report));
 };
 
 export const buildGanttExcelTemplate = () => {
@@ -786,7 +875,7 @@ export const buildProjectXml = (
       Manual: task.taskMode === "MANUAL" ? 1 : 0,
       Text1: task.taskCategory,
       Text2: task.ownerMember?.personName ?? "",
-      Notes: task.taskDescription ?? "",
+      Notes: task.taskDescription?.trim() || "无",
       Text3: task.remark ?? "",
       Priority: 500,
       Start: isoDateTime(task.startDate),

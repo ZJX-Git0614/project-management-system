@@ -185,6 +185,13 @@ export const buildProjectAssistantContext = async (params: {
     name: task.taskName,
     plannedStart: task.startDate,
     plannedEnd: task.finishDate || addDays(task.startDate, task.durationDays),
+    earlyStart: task.earlyStartDate,
+    earlyFinish: task.earlyFinishDate,
+    lateStart: task.lateStartDate,
+    lateFinish: task.lateFinishDate,
+    totalFloatMinutes: task.totalFloatMinutes,
+    freeFloatMinutes: task.freeFloatMinutes,
+    scheduleStatus: task.scheduleStatus,
     actualStart: task.actualStartDate,
     actualEnd: task.actualEndDate,
     progress: task.progress,
@@ -358,7 +365,8 @@ const searchContext = (query: string, context: ProjectAssistantContext) => {
   context.progress.tasks.forEach((task) => {
     if (includes(task.code, task.name, task.category, task.wbsCode, task.outlineNumber, task.externalUid)
       || (task.isMilestone && includes("里程碑"))) {
-      results.push({ type: "任务", title: `${task.code} ${task.name}`, detail: `进度 ${task.progress}% · ${task.plannedStart || "未定"} 至 ${task.plannedEnd || "未定"}` })
+      const floatDetail = task.totalFloatMinutes == null ? "" : ` · 总浮动 ${Math.round(task.totalFloatMinutes / 450 * 100) / 100} 天`
+      results.push({ type: "任务", title: `${task.code} ${task.name}`, detail: `进度 ${task.progress}% · ${task.plannedStart || "未定"} 至 ${task.plannedEnd || "未定"}${floatDetail}` })
     }
   })
   context.weeklyItems.forEach((item) => {

@@ -1,5 +1,4 @@
 import {
-  GANTT_HOURS_PER_DAY,
   calculateTaskFinishDate,
   calculateTaskStartDate,
   estimatedHoursForDuration,
@@ -9,11 +8,13 @@ import {
   shiftTaskDate,
   type GanttCalendarMode,
 } from "@/lib/gantt-calendar";
+import { GANTT_MINUTES_PER_DAY, ganttDependencyLagMinutes } from "@/lib/gantt-cpm";
 
 export interface SchedulableGanttDependency {
   predecessorTaskId: string;
   type?: number;
   lag?: number;
+  lagFormat?: number;
 }
 
 export interface SchedulableGanttTask {
@@ -40,10 +41,10 @@ const dependencyDate = (
   mode: GanttCalendarMode,
 ) => {
   const type = Number.isInteger(dependency.type) ? dependency.type! : 1;
-  // Microsoft Project stores LinkLag in tenths of a minute.
-  const lag = Number.isInteger(dependency.lag)
-    ? Math.round(dependency.lag! / (GANTT_HOURS_PER_DAY * 60 * 10))
-    : 0;
+  const lagMinutes = ganttDependencyLagMinutes(dependency);
+  const lag = lagMinutes === 0
+    ? 0
+    : Math.sign(lagMinutes) * Math.ceil(Math.abs(lagMinutes) / GANTT_MINUTES_PER_DAY);
   if (type === 3) return shiftTaskDate(predecessor.startDate, lag, mode); // SS
   if (type === 0) {
     const requiredFinish = shiftTaskDate(predecessor.finishDate, lag, mode); // FF

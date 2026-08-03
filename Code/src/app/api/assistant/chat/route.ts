@@ -24,6 +24,7 @@ import { resolveProjectAssistantAction } from "@/lib/project-assistant-agent";
 import {
   buildProjectAssistantAnswerTrace,
   buildProjectAssistantFallbackAnswer,
+  buildProjectAssistantQueryIntent,
   detectProjectAssistantQueryIntent,
   mergeProjectAssistantQueryIntents,
   projectAssistantRagCategories,
@@ -34,6 +35,18 @@ import { requireUser } from "@/lib/server-auth";
 import { buildDocumentAssistantContext, type DocumentExtractionResult } from "@/lib/assistant-document-processing";
 import { isDocumentRevisionRequest, reviseDocumentsWithSmallModel } from "@/lib/assistant-document-revision";
 import { buildAssistantSuggestions } from "@/lib/assistant-suggestions";
+import {
+  buildAssistantCompletedTraceEvents,
+  buildAssistantIntentContract,
+  composeVerifiedAssistantActionAnswer,
+  verifyAssistantIntentCompletion,
+  type AssistantGoalVerification,
+} from "@/lib/assistant-intent-contract";
+import { analyzeAssistantRequestWithModel } from "@/lib/assistant-request-planner";
+import {
+  encodeAssistantChatStreamEvent,
+  type AssistantChatStreamEvent,
+} from "@/lib/assistant-chat-stream";
 
 type StoredMessage = {
   id: string;
@@ -43,7 +56,7 @@ type StoredMessage = {
   trace: string;
   blocks: string;
   createdAt: Date;
-};
+}
 
 const parseJsonArray = (value: string) => {
   try {
@@ -148,6 +161,64 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  if (!req.headers.get("accept")?.includes("application/x-ndjson")) {
+    return handleAssistantChat(req);
+  }
+
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      let closed = false;
+      const emit: AssistantChatEmitter = (event) => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(encodeAssistantChatStreamEvent(event)));
+        } catch {
+          closed = true;
+        }
+      };
+      void (async () => {
+        try {
+          const response = await handleAssistantChat(req, emit);
+          const payload = await response.json().catch(() => ({})) as {
+            data?: Record<string, unknown>;
+            error?: string;
+          };
+          if (!response.ok || !payload.data) {
+            emit({ type: "error", error: payload.error || "助手暂时无法响应" });
+          } else {
+            emit({ type: "result", data: payload.data });
+          }
+        } catch (error) {
+          if (!req.signal.aborted) {
+            emit({
+              type: "error",
+              error: error instanceof Error ? error.message : "助手暂时无法响应",
+            });
+          }
+        } finally {
+          if (!closed) {
+            closed = true;
+            controller.close();
+          }
+        }
+      })();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "Content-Encoding": "identity",
+      "X-Accel-Buffering": "no",
+    },
+  });
+}
+
+type AssistantChatEmitter = (event: AssistantChatStreamEvent) => void;
+
+const handleAssistantChat = async (req: NextRequest, emit?: AssistantChatEmitter) => {
   const requestStartedAt = Date.now();
   const user = await requireUser(req);
   if ("status" in user) return user;
@@ -172,6 +243,40 @@ export async function POST(req: NextRequest) {
   const attachmentIds = Array.isArray(body.attachmentIds)
     ? Array.from(new Set(body.attachmentIds.map((value) => String(value || "").trim()).filter(Boolean))).slice(0, 5)
     : [];
+  emit?.({
+    type: "trace",
+    event: {
+      id: "understand",
+      phase: "UNDERSTAND",
+      title: "理解用户要求",
+      summary: "正在识别完整目标、交付物、限制条件和所需业务数据",
+      status: "RUNNING",
+    },
+  });
+  const baseIntentContract = buildAssistantIntentContract({ message, projectId });
+  const intentContract = await analyzeAssistantRequestWithModel({
+    message,
+    projectId,
+    history,
+    runtime,
+    baseContract: baseIntentContract,
+    signal: req.signal,
+  });
+  emit?.({
+    type: "trace",
+    event: {
+      id: "understand",
+      phase: "UNDERSTAND",
+      title: "理解用户要求",
+      summary: intentContract.understanding || `识别到 ${intentContract.objectives.length} 个目标`,
+      status: "SUCCEEDED",
+      details: [
+        ...intentContract.objectives.map((objective) => ({ label: "目标", value: objective.description })),
+        ...intentContract.deliverables.map((deliverable) => ({ label: "交付物", value: deliverable.label })),
+        ...intentContract.constraints.map((constraint) => ({ label: "约束", value: constraint })),
+      ],
+    },
+  });
   const attachments = attachmentIds.length > 0
     ? await prisma.assistantAttachment.findMany({
         where: { id: { in: attachmentIds }, userId: user.userId, projectId, status: "READY" },
@@ -195,18 +300,30 @@ export async function POST(req: NextRequest) {
   });
 
   let answer = "";
+  let streamedAnswer = "";
   let source: "DATABASE" | "MODEL" | "RAG" | "MODEL_RAG" | "AGENT" | "SYSTEM" = "DATABASE";
   let blocks: unknown[] = [];
   let ragResult: Awaited<ReturnType<typeof queryRagLite>> = null;
   let retrievedChunks: Array<{ content: string; metadata?: Record<string, unknown> }> = [];
   const assistantAccessMode = normalizeAssistantAccessMode(user.assistantAccessMode);
   const manualContext = searchAssistantManual(message);
+  let goalVerification: AssistantGoalVerification | undefined;
   const capabilityAnswer = buildAssistantCapabilityAnswer({
     message,
     runtime,
     attachments: attachments.map((attachment) => ({ fileName: attachment.originalName })),
   });
 
+  emit?.({
+    type: "trace",
+    event: {
+      id: "plan",
+      phase: "PLAN",
+      title: "制定执行计划",
+      summary: "正在根据目标契约选择查询范围、工具和执行顺序",
+      status: "RUNNING",
+    },
+  });
   const agentResolution = await resolveProjectAssistantAction({
     message,
     projectId,
@@ -214,6 +331,7 @@ export async function POST(req: NextRequest) {
     runtime,
     history,
     attachmentIds,
+    intentContract,
     allowModelPlanning: !capabilityAnswer,
     signal: req.signal,
   });
@@ -224,13 +342,102 @@ export async function POST(req: NextRequest) {
     ? await planProjectAssistantQueryWithModel({ message, history, runtime, signal: req.signal })
     : null;
   if (req.signal.aborted) return err("本次回答已终止", 499);
-  const intent = mergeProjectAssistantQueryIntents(ruleIntent, modelIntent);
+  const semanticIntent = buildProjectAssistantQueryIntent(intentContract.queryDomains ?? []);
+  const intent = mergeProjectAssistantQueryIntents(
+    mergeProjectAssistantQueryIntents(ruleIntent, semanticIntent),
+    modelIntent,
+  );
+  emit?.({
+    type: "trace",
+    event: {
+      id: "plan",
+      phase: "PLAN",
+      title: "制定执行计划",
+      summary: action
+        ? `已选择白名单工具 ${action.toolId}${agentResolution.plan ? `，共 ${agentResolution.plan.steps.length} 个步骤` : ""}`
+        : `将读取“${intent.label}”数据并生成完整回答`,
+      status: "SUCCEEDED",
+      toolId: action?.toolId,
+      details: [
+        { label: "查询范围", value: intent.domains.join("、") },
+        ...(agentResolution.trace.decisionSummary
+          ? [{ label: "工具决策", value: agentResolution.trace.decisionSummary }]
+          : []),
+      ],
+    },
+  });
+  emit?.({
+    type: "trace",
+    event: {
+      id: "observe",
+      phase: "OBSERVE",
+      title: "读取授权数据",
+      summary: "正在按当前用户权限读取目标项目和相关业务模块",
+      status: "RUNNING",
+    },
+  });
   const context = await buildProjectAssistantContext({ user, projectId });
   if (projectId && !context.project && !intent.identityOnly && !intent.domains.includes("GENERAL")) {
     return err("当前项目不存在", 404);
   }
+  emit?.({
+    type: "trace",
+    event: {
+      id: "observe",
+      phase: "OBSERVE",
+      title: "读取授权数据",
+      summary: context.project
+        ? `已读取项目“${context.project.name}”的授权数据`
+        : `已读取当前账号可访问的项目组合数据`,
+      status: "SUCCEEDED",
+      details: [
+        { label: "甘特任务", value: String(context.progress.total) },
+        { label: "项目事项", value: String(context.weeklyItems.length) },
+        { label: "风险", value: String(context.risks.length) },
+        { label: "文档", value: String(context.documents.length) },
+      ],
+    },
+  });
 
   if (action) {
+    emit?.({
+      type: "trace",
+      event: {
+        id: "validate",
+        phase: "VALIDATE",
+        title: "校验权限与工具参数",
+        summary: "正在校验当前账号权限、Agent 授权模式和结构化参数",
+        status: "RUNNING",
+        toolId: action.toolId,
+      },
+    });
+    emit?.({
+      type: "trace",
+      event: {
+        id: "validate",
+        phase: "VALIDATE",
+        title: "校验权限与工具参数",
+        summary: "当前账号权限、工具白名单和参数 Schema 校验通过",
+        status: "SUCCEEDED",
+        toolId: action.toolId,
+        details: agentResolution.trace.toolArgs
+          ? [{ label: "结构化参数", value: JSON.stringify(agentResolution.trace.toolArgs) }]
+          : undefined,
+      },
+    });
+    emit?.({
+      type: "trace",
+      event: {
+        id: "execute",
+        phase: "EXECUTE",
+        title: `调用 ${action.toolId}`,
+        summary: shouldAutoExecuteAssistantAction(assistantAccessMode, action.riskLevel)
+          ? "正在执行已授权操作"
+          : "正在生成操作预览，等待用户确认后执行",
+        status: "RUNNING",
+        toolId: action.toolId,
+      },
+    });
     if (shouldAutoExecuteAssistantAction(assistantAccessMode, action.riskLevel)) {
       const pendingAction = await prisma.assistantActionRun.findFirst({
         where: { id: action.id, userId: user.userId },
@@ -247,12 +454,36 @@ export async function POST(req: NextRequest) {
         }
       }
     }
+    emit?.({
+      type: "trace",
+      event: {
+        id: "execute",
+        phase: "EXECUTE",
+        title: `调用 ${action.toolId}`,
+        summary: action.status === "PROPOSED"
+          ? "操作预览已生成，等待用户确认"
+          : typeof action.result?.message === "string"
+            ? action.result.message
+            : `工具状态：${action.status}`,
+        status: action.status === "FAILED" ? "FAILED" : action.status === "PROPOSED" ? "RUNNING" : "SUCCEEDED",
+        toolId: action.toolId,
+      },
+    });
     const actionResultMessage = typeof action.result?.message === "string" ? action.result.message : "";
-    answer = action.status === "PROPOSED"
-      ? `已生成操作建议：**${action.title}**。请核对操作内容后确认执行。`
-      : action.status === "SUCCEEDED"
-        ? `已执行：**${action.title}**。${actionResultMessage}`
-        : `操作未完成：**${action.title}**。${actionResultMessage || "请查看操作结果。"}`;
+    if (intentContract.exportIntent) {
+      goalVerification = verifyAssistantIntentCompletion(intentContract, action);
+      answer = composeVerifiedAssistantActionAnswer({
+        contract: intentContract,
+        action,
+        verification: goalVerification,
+      });
+    } else {
+      answer = action.status === "PROPOSED"
+        ? `已生成操作建议：**${action.title}**。请核对操作内容后确认执行。`
+        : action.status === "SUCCEEDED"
+          ? `已执行：**${action.title}**。${actionResultMessage}`
+          : `操作未完成：**${action.title}**。${actionResultMessage || "请查看操作结果。"}`;
+    }
     source = "AGENT";
     blocks = [{ type: action.status === "PROPOSED" ? "action-proposal" : "action-result", action }];
   } else {
@@ -265,8 +496,34 @@ export async function POST(req: NextRequest) {
         }, runtime, req.signal)
       : null;
     retrievedChunks = ragResult?.chunks ?? [];
+    if (retrievedChunks.length > 0) {
+      emit?.({
+        type: "trace",
+        event: {
+          id: "observe",
+          phase: "OBSERVE",
+          title: "读取授权数据",
+          summary: `已读取实时业务数据，并检索到 ${retrievedChunks.length} 条相关知识片段`,
+          status: "SUCCEEDED",
+          details: [
+            { label: "业务范围", value: intent.label },
+            { label: "知识片段", value: String(retrievedChunks.length) },
+          ],
+        },
+      });
+    }
     if (req.signal.aborted) return err("本次回答已终止", 499);
 
+    emit?.({
+      type: "trace",
+      event: {
+        id: "synthesize",
+        phase: "SYNTHESIZE",
+        title: "整合结果",
+        summary: "正在依据目标契约整合实时数据、知识片段和附件内容",
+        status: "RUNNING",
+      },
+    });
     answer = capabilityAnswer || (attachmentContexts.length > 0 && isDocumentRevisionRequest(message)
       ? await reviseDocumentsWithSmallModel({
           message,
@@ -289,6 +546,13 @@ export async function POST(req: NextRequest) {
           intent,
           attachments: attachmentContexts,
           manualContext,
+          intentContract,
+          onDelta: emit && !intent.identityOnly
+            ? (delta) => {
+                streamedAnswer += delta;
+                emit({ type: "answer_delta", delta });
+              }
+            : undefined,
           signal: req.signal,
         }) || "");
     if (req.signal.aborted) return err("本次回答已终止", 499);
@@ -313,6 +577,43 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  if (emit && answer) {
+    if (!streamedAnswer) {
+      emit({ type: "answer_delta", delta: answer });
+    } else if (streamedAnswer.trim() !== answer.trim()) {
+      emit({ type: "answer_reset" });
+      emit({ type: "answer_delta", delta: answer });
+    }
+  }
+  goalVerification = verifyAssistantIntentCompletion(intentContract, action, { answer });
+  emit?.({
+    type: "trace",
+    event: {
+      id: "verify",
+      phase: "VERIFY",
+      title: "验收目标与交付物",
+      summary: goalVerification.allRequiredPassed
+        ? `已完成并验收 ${goalVerification.completedObjectives}/${goalVerification.requiredObjectives} 个必要目标`
+        : `已完成 ${goalVerification.completedObjectives}/${goalVerification.requiredObjectives} 个必要目标${goalVerification.missingDeliverables.length ? `，待补充：${goalVerification.missingDeliverables.join("、")}` : ""}`,
+      status: goalVerification.allRequiredPassed ? "SUCCEEDED" : action?.status === "PROPOSED" ? "RUNNING" : "FAILED",
+      toolId: action?.toolId,
+      details: goalVerification.objectives.map((objective) => ({
+        label: objective.objectiveId,
+        value: `${objective.status}：${objective.explanation}`,
+      })),
+    },
+  });
+  emit?.({
+    type: "trace",
+    event: {
+      id: "synthesize",
+      phase: "SYNTHESIZE",
+      title: "整合结果",
+      summary: "已将处理结果组织为最终回答和可交付内容",
+      status: "SUCCEEDED",
+    },
+  });
+
   const baseTrace = buildProjectAssistantAnswerTrace({
     intent,
     context,
@@ -333,6 +634,15 @@ export async function POST(req: NextRequest) {
     source,
     agent: {
       ...agentResolution.trace,
+      intentContract,
+      goalVerification,
+      events: buildAssistantCompletedTraceEvents({
+        contract: intentContract,
+        observation: agentResolution.trace.observation,
+        action,
+        verification: goalVerification,
+        toolArgs: agentResolution.trace.toolArgs,
+      }),
       plan: agentResolution.plan ? {
         id: agentResolution.plan.id,
         title: agentResolution.plan.title,
@@ -399,4 +709,4 @@ export async function POST(req: NextRequest) {
       history: [...history, { role: "user", content: message }, { role: "assistant", content: answer }],
     }),
   });
-}
+};

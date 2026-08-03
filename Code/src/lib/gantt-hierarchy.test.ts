@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   changeGanttTaskHierarchy,
   synchronizeGanttTaskCategories,
+  synchronizeGanttTaskCategoriesAfterNameChange,
   type GanttHierarchyTask,
 } from "@/lib/gantt-hierarchy";
 import { orderGanttTasksByHierarchy, renumberGanttTaskCodes } from "@/lib/gantt-task-codes";
@@ -133,5 +134,26 @@ describe("changeGanttTaskHierarchy", () => {
     expect(categorized.find((item) => item.id === "feature")).toMatchObject({ taskCategory: "设计 / 开发" });
     expect(categorized.find((item) => item.id === "child")).toMatchObject({ taskCategory: "设计 / 开发 / 接口" });
     expect(categorized.find((item) => item.id === "root")).toMatchObject({ taskCategory: "设计" });
+  });
+
+  it("updates the renamed task category segment throughout its subtree", () => {
+    const source = [
+      { ...task("root", null, 1), taskCategory: "研发", taskName: "研发" },
+      { ...task("feature", "root", 1), taskCategory: "研发 / 前端", taskName: "前端" },
+      { ...task("child", "feature", 1), taskCategory: "研发 / 前端 / 接口", taskName: "登录接口" },
+      { ...task("other", null, 2), taskCategory: "采购", taskName: "采购" },
+    ];
+
+    const categorized = synchronizeGanttTaskCategoriesAfterNameChange(source, "feature", "前端", "客户端");
+
+    expect(categorized.find((item) => item.id === "feature")).toMatchObject({ taskCategory: "研发 / 客户端" });
+    expect(categorized.find((item) => item.id === "child")).toMatchObject({ taskCategory: "研发 / 客户端 / 接口" });
+    expect(categorized.find((item) => item.id === "other")).toMatchObject({ taskCategory: "采购" });
+  });
+
+  it("initializes a blank root category from its first task name", () => {
+    const source = [{ ...task("root", null, 1), taskCategory: "", taskName: "新任务" }];
+    const categorized = synchronizeGanttTaskCategoriesAfterNameChange(source, "root", "", "新任务");
+    expect(categorized[0]).toMatchObject({ taskCategory: "新任务" });
   });
 });

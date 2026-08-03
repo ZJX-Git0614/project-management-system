@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma"
 import { getUserFromRequest } from "@/lib/auth"
 import { ok, err, unauthorized, notFound } from "@/lib/api-utils"
 import { syncRoleConfigPersonsFromAccounts } from "@/lib/role-persons"
+import { projectMemberAccountWhere } from "@/lib/project-member-accounts"
 
 export async function PUT(
   req: NextRequest,
@@ -29,33 +30,20 @@ export async function PUT(
   if (body.enabled !== undefined) updateData.enabled = body.enabled
   if (body.assignedRoleNames !== undefined) updateData.assignedRoleNames = JSON.stringify(body.assignedRoleNames)
 
-  // 如果修改了 displayName 或 assignedRoleNames，检查该人员是否在项目成员中
+  // 项目成员通过 accountId 关联账号；personName 仅作为展示快照保留。
   const oldDisplayName = existing.displayName
   const newDisplayName = body.displayName ?? oldDisplayName
   const oldRoleNames = JSON.parse(existing.assignedRoleNames || "[]") as string[]
   const newRoleNames = body.assignedRoleNames ?? oldRoleNames
   const removedRoles = oldRoleNames.filter((r: string) => !newRoleNames.includes(r))
 
-  // 如果显示名称变更，检查旧名称是否在项目成员中
-  if (newDisplayName !== oldDisplayName) {
-    const memberProjects = await prisma.projectMember.findMany({
-      where: { personName: oldDisplayName },
-      select: { projectId: true, roleName: true, project: { select: { name: true } } },
-    })
-    if (memberProjects.length > 0) {
-      const projectList = memberProjects
-        .map((m) => `「${m.project?.name ?? m.projectId}」（角色：${m.roleName}）`)
-        .join("、")
-      return err(
-        `「${oldDisplayName}」正在以下项目中担任成员：${projectList}。如需修改名称，请先在对应的项目详情中移除该成员。`,
-      )
-    }
-  }
-
   // 如果移除了某个角色，检查该人员在该角色下是否在项目成员中
   if (removedRoles.length > 0) {
     const memberInRemovedRoles = await prisma.projectMember.findMany({
-      where: { personName: oldDisplayName, roleName: { in: removedRoles } },
+      where: {
+        ...projectMemberAccountWhere(id, oldDisplayName),
+        roleName: { in: removedRoles },
+      },
       select: { projectId: true, roleName: true, project: { select: { name: true } } },
     })
     if (memberInRemovedRoles.length > 0) {
@@ -68,18 +56,27 @@ export async function PUT(
     }
   }
 
-  const updated = await prisma.userAccount.update({
-    where: { id },
-    data: updateData,
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      enabled: true,
-      assignedRoleNames: true,
-      passwordResetRequired: true,
-      createdAt: true,
-    },
+  const updated = await prisma.$transaction(async (tx) => {
+    const account = await tx.userAccount.update({
+      where: { id },
+      data: updateData,
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+        enabled: true,
+        assignedRoleNames: true,
+        passwordResetRequired: true,
+        createdAt: true,
+      },
+    })
+    if (newDisplayName !== oldDisplayName) {
+      await tx.projectMember.updateMany({
+        where: projectMemberAccountWhere(id, oldDisplayName),
+        data: { accountId: id, personName: newDisplayName },
+      })
+    }
+    return account
   })
 
   await syncRoleConfigPersonsFromAccounts()
@@ -102,9 +99,9 @@ export async function DELETE(
   const existing = await prisma.userAccount.findUnique({ where: { id } })
   if (!existing) return notFound("账号")
 
-  // 检查该人员的 displayName 是否在项目成员中
+  // 检查该账号是否仍关联项目成员；兼容尚未回填 accountId 的旧备份数据。
   const memberProjects = await prisma.projectMember.findMany({
-    where: { personName: existing.displayName },
+    where: projectMemberAccountWhere(id, existing.displayName),
     select: {
       projectId: true,
       roleName: true,

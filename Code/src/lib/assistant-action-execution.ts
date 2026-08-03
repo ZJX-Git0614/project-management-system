@@ -2,6 +2,7 @@ import type { AssistantActionRun } from "@prisma/client";
 
 import { executeAssistantAction } from "@/lib/assistant-actions";
 import { getAssistantToolDefinition } from "@/lib/assistant-settings";
+import { normalizeAssistantRiskDrafts } from "@/lib/assistant-risk-drafts";
 import { prisma } from "@/lib/prisma";
 import type { AuthenticatedUser } from "@/lib/server-auth";
 
@@ -68,6 +69,21 @@ export const verifyAssistantActionResult = (action: AssistantActionRun) => {
     const evidence = result.verification;
     if (!evidence || typeof evidence !== "object" || (evidence as { passed?: unknown }).passed !== true) {
       throw new Error("动作结果校验失败，生成文件未通过重新导入验证");
+    }
+  }
+  if (action.toolId === "risk.create.batch") {
+    const args = parseResult(action.argsJson);
+    const requestedRisks = normalizeAssistantRiskDrafts(args.risks);
+    const riskIds = Array.isArray(result.riskIds) ? result.riskIds.filter((value) => typeof value === "string" && value) : [];
+    const riskCodes = Array.isArray(result.riskCodes) ? result.riskCodes.filter((value) => typeof value === "string" && value) : [];
+    if (
+      requestedRisks.length === 0
+      || result.requestedCount !== requestedRisks.length
+      || result.processedCount !== requestedRisks.length
+      || riskIds.length !== requestedRisks.length
+      || riskCodes.length !== requestedRisks.length
+    ) {
+      throw new Error(`动作结果校验失败，要求登记 ${requestedRisks.length} 条风险，但批量登记结果不完整`);
     }
   }
   return { kind: tool.verifier, passed: true, checkedFields: tool.outputSchema.required };

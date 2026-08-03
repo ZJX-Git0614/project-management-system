@@ -1,4 +1,5 @@
 import { addCalendarDays, addDaysInclusive, diffDays, findGanttCriticalTaskIds } from "@/lib/gantt";
+import { GANTT_MINUTES_PER_DAY, ganttDependencyLagMinutes } from "@/lib/gantt-cpm";
 
 export const SCHEDULE_SNAPSHOT_SCHEMA_VERSION = "1.0" as const;
 
@@ -194,13 +195,9 @@ export const diffScheduleTasks = (
 
 const dependencyTypeLabel = (type: number) => ({ 0: "FF", 1: "FS", 2: "SF", 3: "SS" })[type] ?? `TYPE_${type}`;
 
-export const lagToDays = (lag: number, lagFormat: number) => {
-  if (!Number.isFinite(lag) || lag === 0) return 0;
-  if (lagFormat === 3) return lag / (8 * 60);
-  if (lagFormat === 5) return lag / 8;
-  if (lagFormat === 7) return lag;
-  return lag / (8 * 60);
-};
+export const lagToDays = (lag: number, lagFormat: number) => (
+  ganttDependencyLagMinutes({ lag, lagFormat }) / GANTT_MINUTES_PER_DAY
+);
 
 const addLag = (date: string, lag: number, lagFormat: number) => (
   addCalendarDays(date, Math.ceil(lagToDays(lag, lagFormat)))

@@ -10,12 +10,15 @@ import {
 } from "react"
 import {
   Bot,
+  BrainCircuit,
   Check,
+  CircleCheckBig,
   ChevronDown,
   Database,
   Download,
   FileSearch,
   Hand,
+  ListChecks,
   Maximize2,
   Minimize2,
   Paperclip,
@@ -24,6 +27,7 @@ import {
   ShieldAlert,
   Sparkles,
   Square,
+  Wrench,
   Timer,
   UserRound,
   X,
@@ -48,6 +52,10 @@ import {
   type AssistantAccessMode,
 } from "@/lib/assistant-access"
 import { ASSISTANT_SETTINGS_CHANGED_EVENT } from "@/lib/assistant-events"
+import {
+  upsertAssistantTraceEvent,
+  type AssistantChatStreamEvent,
+} from "@/lib/assistant-chat-stream"
 import { TODO_CHANGED_EVENT } from "@/lib/todo-events"
 import { cn } from "@/lib/utils"
 import { useSystemFeedback } from "@/components/system-feedback-provider"
@@ -62,7 +70,23 @@ type AssistantAction = {
   riskLevel: string
   status: string
   expiresAt: string
-  result?: { message?: string; downloadUrl?: string; navigateUrl?: string; navigateLabel?: string }
+  result?: {
+    message?: string
+    downloadUrl?: string
+    fileName?: string
+    navigateUrl?: string
+    navigateLabel?: string
+    progressReport?: {
+      total: number
+      completed: number
+      inProgress: number
+      notStarted: number
+      overdue: number
+      averageProgress: number
+      categoryBreakdown?: Array<{ category: string; total: number; averageProgress: number }>
+      summary: string
+    }
+  }
   plan?: {
     id: string
     title: string
@@ -107,6 +131,16 @@ type AssistantRuntime = {
   assistantAccessMode: AssistantAccessMode
 }
 
+type AssistantTraceEvent = {
+  id: string
+  phase: "UNDERSTAND" | "OBSERVE" | "PLAN" | "VALIDATE" | "EXECUTE" | "VERIFY" | "SYNTHESIZE"
+  title: string
+  summary: string
+  status: "RUNNING" | "SUCCEEDED" | "FAILED"
+  toolId?: string
+  details?: Array<{ label: string; value: string }>
+}
+
 type AssistantTrace = {
   intent?: string
   steps?: string[]
@@ -121,6 +155,26 @@ type AssistantTrace = {
     documents?: number
   }
   durationMs?: number
+  agent?: {
+    requested?: boolean
+    outcome?: string
+    toolId?: string
+    objective?: string
+    constraints?: string[]
+    decisionSummary?: string
+    toolArgs?: Record<string, unknown>
+    observation?: {
+      exportType?: string
+      totalRows?: number
+      matchedRows?: number
+      appliedFilters?: string[]
+      taskCategories?: Array<{ name: string; count: number }>
+      taskDepths?: Array<{ depth: number; count: number }>
+      taskProgress?: { notStarted: number; inProgress: number; completed: number }
+    }
+    steps?: Array<{ stage: string; outcome: string; toolId?: string; detail?: string }>
+    events?: AssistantTraceEvent[]
+  }
 }
 
 type ChatMessage = {
@@ -131,6 +185,15 @@ type ChatMessage = {
   createdAt?: string
   trace?: AssistantTrace
   blocks?: AssistantBlock[]
+}
+
+type AssistantChatResult = {
+  userMessage?: ChatMessage
+  assistantMessage?: ChatMessage
+  answer?: string
+  source?: AssistantSource
+  runtime?: AssistantRuntime
+  suggestions?: string[]
 }
 
 type Point = { x: number; y: number }
@@ -192,24 +255,123 @@ const formatDuration = (value?: number) => {
   return `${(value / 1000).toFixed(1)} 秒`
 }
 
+const traceEventIcon = (phase: AssistantTraceEvent["phase"], className?: string) => {
+  if (phase === "UNDERSTAND") return <BrainCircuit className={className} />
+  if (phase === "OBSERVE") return <Database className={className} />
+  if (phase === "PLAN") return <ListChecks className={className} />
+  if (phase === "VALIDATE" || phase === "VERIFY") return <ShieldCheck className={className} />
+  if (phase === "EXECUTE") return <Wrench className={className} />
+  return <CircleCheckBig className={className} />
+}
+
+const AssistantTraceEventList = ({
+  events,
+  live = false,
+}: {
+  events: AssistantTraceEvent[]
+  live?: boolean
+}) => (
+  <div className="space-y-0.5">
+    {events.map((event, index) => (
+      <div key={event.id} className="relative flex gap-2 py-1.5">
+        {index < events.length - 1 && <span className="absolute top-6 bottom-[-6px] left-[7px] w-px bg-border/70" />}
+        <span className={cn(
+          "relative z-[1] mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full bg-background",
+          event.status === "FAILED" ? "text-destructive" : event.status === "RUNNING" ? "text-primary" : "text-emerald-400",
+        )}>
+          {traceEventIcon(event.phase, cn("size-3.5", event.status === "RUNNING" && live && "animate-pulse"))}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate font-medium text-foreground">{event.title}</span>
+            {event.toolId && <code className="shrink-0 rounded bg-muted/65 px-1 py-0.5 font-mono text-[9px] text-muted-foreground">{event.toolId}</code>}
+          </div>
+          <div className="mt-0.5 break-words text-muted-foreground">{event.summary}</div>
+          {event.details?.length ? (
+            <div className="mt-1 space-y-0.5 border-l border-border/70 pl-2 text-[9px] text-muted-foreground/90">
+              {event.details.map((detail, detailIndex) => (
+                <div key={`${event.id}-${detail.label}-${detailIndex}`} className="break-all">
+                  {detail.label}：{detail.value}
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    ))}
+  </div>
+)
+
 const AssistantTraceDetails = ({ trace }: { trace?: AssistantTrace }) => {
   if (!trace) return null
   const counts = trace.dataCounts
   const retrieved = Array.isArray(trace.retrieved) ? trace.retrieved : []
   const steps = Array.isArray(trace.steps) ? trace.steps : []
   const evidence = Array.isArray(trace.evidence) ? trace.evidence : []
-  const hasDetails = Boolean(trace.intent || trace.provider || trace.model || counts || retrieved.length || steps.length || evidence.length || trace.durationMs)
+  const agent = trace.agent
+  const agentSteps = Array.isArray(agent?.steps) ? agent.steps : []
+  const agentEvents = Array.isArray(agent?.events) ? agent.events : []
+  const hasDetails = Boolean(trace.intent || trace.provider || trace.model || counts || retrieved.length || steps.length || evidence.length || trace.durationMs || agent)
   if (!hasDetails) return null
+
+  const agentStageLabel: Record<string, string> = {
+    WORKFLOW_PLAN: "检查是否需要多步骤工作流",
+    MODEL_WORKFLOW_PLAN: "规划多步骤工具调用",
+    DATA_OBSERVATION: "读取授权数据并计算命中范围",
+    DETERMINISTIC_MATCH: "按确定性规则匹配工具",
+    MODEL_PLAN: "模型选择工具并生成结构化参数",
+    MODEL_REPLAN: "根据校验反馈修正工具参数",
+    PLAN_VALIDATION: "校验筛选条件、权限与工具 Schema",
+  }
+  const agentOutcomeLabel: Record<string, string> = {
+    MATCHED: "通过",
+    NO_MATCH: "无匹配",
+    SKIPPED: "跳过",
+    REJECTED: "已拒绝",
+  }
 
   return (
     <details className="group mt-1.5 rounded-md border border-border/70 bg-background/30 text-[10px] text-muted-foreground">
       <summary className="flex cursor-pointer list-none items-center gap-1.5 px-2 py-1.5 transition-colors hover:bg-primary/[0.06] hover:text-foreground active:bg-primary/10">
         <FileSearch className="size-3" />
-        <span>思考与数据依据{trace.durationMs ? ` · ${formatDuration(trace.durationMs)}` : ""}</span>
+        <span>处理过程与工具调用{trace.durationMs ? ` · ${formatDuration(trace.durationMs)}` : ""}</span>
         <ChevronDown className="ml-auto size-3 transition-transform duration-150 group-open:rotate-180" />
       </summary>
       <div className="space-y-1.5 border-t border-border/60 px-2 py-2 leading-4">
+        {agentEvents.length > 0 && <AssistantTraceEventList events={agentEvents} />}
+        {agentEvents.length > 0 && (trace.intent || agent?.objective || agentSteps.length > 0) && <div className="border-t border-border/60 pt-1.5" />}
         {trace.intent && <div>问题范围：{trace.intent}</div>}
+        {agent?.objective && <div>需求理解：{agent.objective}</div>}
+        {agent?.constraints?.length ? <div>识别约束：{agent.constraints.join("；")}</div> : null}
+        {agent?.observation && (
+          <div className="rounded border border-border/60 bg-background/45 px-2 py-1.5">
+            <div>数据预检：共 {agent.observation.totalRows ?? 0} 条，当前条件命中 {agent.observation.matchedRows ?? 0} 条</div>
+            {agent.observation.taskProgress && (
+              <div>进度分布：未开始 {agent.observation.taskProgress.notStarted} · 进行中 {agent.observation.taskProgress.inProgress} · 已完成 {agent.observation.taskProgress.completed}</div>
+            )}
+            {agent.observation.taskCategories?.length ? (
+              <div className="line-clamp-3">可用任务类别：{agent.observation.taskCategories.slice(0, 12).map((item) => `${item.name}(${item.count})`).join("；")}</div>
+            ) : null}
+          </div>
+        )}
+        {agent?.decisionSummary && <div>工具决策：{agent.decisionSummary}</div>}
+        {agent?.toolId && <div>执行工具：{agent.toolId}</div>}
+        {agent?.toolArgs && (
+          <div className="rounded border border-border/60 bg-background/45 px-2 py-1.5">
+            <div className="mb-0.5">结构化参数：</div>
+            <pre className="whitespace-pre-wrap break-all font-mono text-[9px] leading-4 text-foreground/80">{JSON.stringify(agent.toolArgs, null, 2)}</pre>
+          </div>
+        )}
+        {agentSteps.length > 0 && (
+          <div className="space-y-0.5">
+            {agentSteps.map((step, index) => (
+              <div key={`${step.stage}-${index}`}>
+                {index + 1}. {agentStageLabel[step.stage] || step.stage}：{agentOutcomeLabel[step.outcome] || step.outcome}
+                {step.detail ? `；${step.detail}` : ""}
+              </div>
+            ))}
+          </div>
+        )}
         {(trace.provider || trace.model) && (
           <div>模型：{[trace.provider, trace.model].filter(Boolean).join(" / ")}</div>
         )}
@@ -306,6 +468,8 @@ export function ProjectAssistant({
   const [suggestions, setSuggestions] = useState<string[]>([])
   const [thinkingStartedAt, setThinkingStartedAt] = useState<number | null>(null)
   const [thinkingElapsedMs, setThinkingElapsedMs] = useState(0)
+  const [liveTraceEvents, setLiveTraceEvents] = useState<AssistantTraceEvent[]>([])
+  const [liveAnswer, setLiveAnswer] = useState("")
   const [operationError, setOperationError] = useState<{ title: string; message: string } | null>(null)
   const [runtime, setRuntime] = useState<AssistantRuntime>(DEFAULT_RUNTIME)
   const [messages, setMessages] = useState<ChatMessage[]>([welcomeMessage(DEFAULT_RUNTIME)])
@@ -387,6 +551,16 @@ export function ProjectAssistant({
     })
     return () => window.cancelAnimationFrame(frame)
   }, [messages, open, sending, loadingHistory])
+
+  useEffect(() => {
+    if (!open || !sending) return
+    const frame = window.requestAnimationFrame(() => {
+      const container = messagesRef.current
+      if (!container) return
+      container.scrollTop = container.scrollHeight
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [liveAnswer, liveTraceEvents, open, sending])
 
   useEffect(() => {
     if (!open) return
@@ -502,6 +676,14 @@ export function ProjectAssistant({
     setSuggestions([])
     setThinkingStartedAt(Date.now())
     setThinkingElapsedMs(0)
+    setLiveAnswer("")
+    setLiveTraceEvents([{
+      id: "understand",
+      phase: "UNDERSTAND",
+      title: "理解用户要求",
+      summary: "正在拆解目标、交付物和限制条件",
+      status: "RUNNING",
+    }])
     const controller = new AbortController()
     abortRef.current = controller
 
@@ -511,6 +693,7 @@ export function ProjectAssistant({
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Accept: "application/x-ndjson",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         signal: controller.signal,
@@ -524,19 +707,49 @@ export function ProjectAssistant({
           attachmentIds: attachments.map((attachment) => attachment.id),
         }),
       })
-      const payload = await response.json().catch(() => ({})) as {
-        error?: string
-        data?: {
-          userMessage?: ChatMessage
-          assistantMessage?: ChatMessage
-          answer?: string
-          source?: AssistantSource
-          runtime?: AssistantRuntime
-          suggestions?: string[]
+      if (!response.ok || !response.body) throw new Error("助手暂时无法响应")
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ""
+      const streamState: { result: AssistantChatResult | null; error: string } = {
+        result: null,
+        error: "",
+      }
+      const consumeEvent = (line: string) => {
+        if (!line.trim()) return
+        const event = JSON.parse(line) as AssistantChatStreamEvent
+        if (event.type === "trace") {
+          setLiveTraceEvents((current) => upsertAssistantTraceEvent(current, event.event))
+          return
+        }
+        if (event.type === "answer_reset") {
+          setLiveAnswer("")
+          return
+        }
+        if (event.type === "answer_delta") {
+          setLiveAnswer((current) => current + event.delta)
+          return
+        }
+        if (event.type === "result") {
+          streamState.result = event.data as AssistantChatResult
+          return
+        }
+        streamState.error = event.error
+      }
+      while (true) {
+        const chunk = await reader.read()
+        buffer += decoder.decode(chunk.value, { stream: !chunk.done })
+        const lines = buffer.split(/\r?\n/)
+        buffer = lines.pop() || ""
+        lines.forEach(consumeEvent)
+        if (chunk.done) {
+          if (buffer.trim()) consumeEvent(buffer)
+          break
         }
       }
-      if (!response.ok || !payload.data) throw new Error(payload.error || "助手暂时无法响应")
-      const result = payload.data
+      if (streamState.error) throw new Error(streamState.error)
+      const result = streamState.result
+      if (!result) throw new Error("助手未返回完整结果")
       if (result.runtime) {
         setRuntime(result.runtime)
         setModelConfigured(result.runtime.modelConfigured)
@@ -565,6 +778,8 @@ export function ProjectAssistant({
         abortRef.current = null
         setSending(false)
         setThinkingStartedAt(null)
+        setLiveTraceEvents([])
+        setLiveAnswer("")
       }
     }
   }
@@ -614,6 +829,7 @@ export function ProjectAssistant({
     setSending(false)
     setThinkingStartedAt(null)
     setThinkingElapsedMs(0)
+    setLiveTraceEvents([])
     notify("已停止本次处理", "info")
   }
 
@@ -633,12 +849,12 @@ export function ProjectAssistant({
     })))
   }
 
-  const downloadActionResult = async (downloadUrl: string) => {
-    const blob = await api.download(downloadUrl)
+  const downloadActionResult = async (downloadUrl: string, fallbackFileName?: string) => {
+    const { blob, fileName } = await api.downloadFile(downloadUrl)
     const url = URL.createObjectURL(blob)
     const link = document.createElement("a")
     link.href = url
-    link.download = ""
+    link.download = fileName || fallbackFileName || "Ceastar-PMS-导出文件"
     link.click()
     URL.revokeObjectURL(url)
   }
@@ -655,7 +871,7 @@ export function ProjectAssistant({
         window.dispatchEvent(new Event(TODO_CHANGED_EVENT))
       }
       if (result.action.result?.downloadUrl) {
-        await downloadActionResult(result.action.result.downloadUrl)
+        await downloadActionResult(result.action.result.downloadUrl, result.action.result.fileName)
       }
     } catch (error) {
       notify(error instanceof Error ? error.message : "Agent 操作失败", "error")
@@ -851,6 +1067,28 @@ export function ProjectAssistant({
                               <Button size="sm" onClick={() => void handleAction(block.action, "confirm")}><Check className="size-3.5" />确认执行</Button>
                             </div>
                           ) : (
+                            <>
+                            {block.action.result?.progressReport && (
+                              <div className="mt-3 rounded-md border border-border/70 bg-background/45 p-2.5 text-[11px]">
+                                <div className="font-medium text-foreground">任务进度总结</div>
+                                <div className="mt-1 leading-5 text-muted-foreground">{block.action.result.progressReport.summary}</div>
+                                <div className="mt-2 grid grid-cols-3 gap-1.5 sm:grid-cols-6">
+                                  {[
+                                    ["总数", block.action.result.progressReport.total],
+                                    ["平均进度", `${block.action.result.progressReport.averageProgress}%`],
+                                    ["已完成", block.action.result.progressReport.completed],
+                                    ["进行中", block.action.result.progressReport.inProgress],
+                                    ["未开始", block.action.result.progressReport.notStarted],
+                                    ["逾期", block.action.result.progressReport.overdue],
+                                  ].map(([label, value]) => (
+                                    <div key={String(label)} className="rounded border border-border/60 px-1.5 py-1 text-center">
+                                      <div className="text-[9px] text-muted-foreground">{label}</div>
+                                      <div className="mt-0.5 font-medium text-foreground">{value}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
                             <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                               <span className={cn("text-[11px] font-medium", block.action.status === "SUCCEEDED" ? "text-emerald-400" : "text-muted-foreground")}>
                                 {block.action.result?.message || ({ CANCELLED: "已取消", EXPIRED: "已过期", FAILED: "执行失败" }[block.action.status] || block.action.status)}
@@ -861,7 +1099,7 @@ export function ProjectAssistant({
                                     <button
                                       type="button"
                                       className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:border-primary/35 hover:bg-primary/[0.08] hover:text-foreground"
-                                      onClick={() => void downloadActionResult(block.action.result!.downloadUrl!)}
+                                      onClick={() => void downloadActionResult(block.action.result!.downloadUrl!, block.action.result?.fileName)}
                                     >
                                       <Download className="size-3" />下载文件
                                     </button>
@@ -878,6 +1116,7 @@ export function ProjectAssistant({
                                 </span>
                               )}
                             </div>
+                            </>
                           )}
                         </div>
                       ))}
@@ -900,23 +1139,20 @@ export function ProjectAssistant({
                     </div>
                     <div className="min-w-0 flex-1 rounded-md border border-primary/25 bg-primary/[0.05] px-3 py-2.5 text-xs">
                       <div className="flex items-center gap-2 font-medium text-foreground">
-                        <Sparkles className="size-3.5 animate-pulse text-primary" />
+                        <BrainCircuit className="size-3.5 animate-pulse text-primary" />
                         正在处理
                         <span className="ml-auto inline-flex items-center gap-1 tabular-nums text-muted-foreground">
                           <Timer className="size-3" />{formatDuration(thinkingElapsedMs)}
                         </span>
                       </div>
-                      <div className="mt-2 grid gap-1 text-[11px] text-muted-foreground sm:grid-cols-2">
-                        {["分析问题与会话上下文", "读取授权的项目数据", "检索附件与项目知识库", "组织可核验的回答"].map((step, index) => {
-                          const reached = thinkingElapsedMs >= index * 650
-                          return (
-                            <div key={step} className={cn("flex items-center gap-1.5", reached && "text-foreground")}>
-                              <span className={cn("size-1.5 rounded-full bg-muted-foreground/35", reached && "bg-primary shadow-[0_0_6px_hsl(var(--primary))]")} />
-                              {step}
-                            </div>
-                          )
-                        })}
+                      <div className="mt-2 border-t border-border/60 pt-1.5 text-[11px]">
+                        <AssistantTraceEventList events={liveTraceEvents} live />
                       </div>
+                      {liveAnswer && (
+                        <div className="mt-2 border-t border-border/60 pt-2 text-xs leading-5 text-foreground">
+                          <AssistantMessageContent content={liveAnswer} />
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}

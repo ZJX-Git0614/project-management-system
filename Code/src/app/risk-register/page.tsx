@@ -1,6 +1,7 @@
 "use client";
 
-import { KeyboardEvent, type DragEvent, useCallback, useEffect, useRef, useState } from "react";
+import { KeyboardEvent, type DragEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Pencil, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -18,6 +19,8 @@ import { useConfirm } from "@/components/confirm-provider";
 import { usePermission } from "@/lib/use-permission";
 import { useCurrentProject } from "@/contexts/current-project-context";
 import { api } from "@/lib/api-client";
+import { TableContextMenu, useTableContextMenu } from "@/components/table-context-menu";
+import { HierarchicalMultiSelect, type HierarchicalSelectOption } from "@/components/hierarchical-multi-select";
 
 type RiskLevel = "高" | "中" | "低";
 type RiskStatus = "识别中" | "跟踪中" | "处理中" | "已关闭";
@@ -63,9 +66,6 @@ interface ProjectItemOption {
 const riskLevelOptions: RiskLevel[] = ["高", "中", "低"];
 const riskStatusOptions: RiskStatus[] = ["识别中", "跟踪中", "处理中", "已关闭"];
 
-const itemOptionLabel = (item: ProjectItemOption) =>
-  item.matterCode ? `${item.matterCode} · ${item.title}` : item.title;
-
 const inlineInputClass = "h-7 min-w-0 rounded border-border bg-background px-2 text-xs";
 const inlineSelectClass = "h-7 min-w-[96px] px-2 text-xs";
 const inlineTextareaClass = "min-h-14 min-w-[180px] resize-y rounded border-border bg-background px-2 py-1 text-xs";
@@ -86,6 +86,7 @@ export default function RiskRegisterPage() {
   const [draggedRiskId, setDraggedRiskId] = useState<string | null>(null);
   const [riskDropTarget, setRiskDropTarget] = useState<{ id: string; position: DropPosition } | null>(null);
   const [reordering, setReordering] = useState(false);
+  const { menu, openContextMenu, closeContextMenu } = useTableContextMenu();
 
   const canCreate = can("risk-register:create");
   const canEdit = can("risk-register:edit");
@@ -115,6 +116,15 @@ export default function RiskRegisterPage() {
       .then((items) => setItemOptions(items.filter((item) => item.title.trim())))
       .catch(() => setItemOptions([]));
   }, [currentProjectId]);
+
+  const itemSelectOptions = useMemo<HierarchicalSelectOption[]>(
+    () => itemOptions.map((item) => ({
+      id: item.id,
+      label: item.matterCode || "未编号事项",
+      secondaryLabel: item.title,
+    })),
+    [itemOptions],
+  );
 
   // ---- 编辑态管理 ----
   const closeEdit = () => { setEditingCell(null); setEditValue(""); editValueRef.current = ""; };
@@ -205,6 +215,41 @@ export default function RiskRegisterPage() {
       alert(error instanceof Error ? error.message : "删除失败");
     }
   };
+
+  const deleteRisk = async (item: RiskRegisterItem) => {
+    if (!currentProjectId || !(await confirm(`确认删除「${item.riskName}」？`))) return;
+    try {
+      await api.delete(`/api/projects/${currentProjectId}/risk-register/${item.id}`);
+      setRiskItems((prev) => prev.filter((risk) => risk.id !== item.id));
+      setSelectedIds((prev) => prev.filter((id) => id !== item.id));
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "删除失败");
+    }
+  };
+
+  const riskContextActions = (item?: RiskRegisterItem) => [
+    ...(item && canEdit
+      ? [{ label: "编辑风险", icon: <Pencil className="size-3.5" />, onSelect: () => openTextEdit(item, "riskName") }]
+      : []),
+    ...(item && canDelete
+      ? [{
+          label: selectionMode && selectedIds.includes(item.id) ? "取消选择此风险" : "选择此风险",
+          onSelect: () => {
+            if (!selectionMode) setSelectionMode(true);
+            toggleSelected(item.id);
+          },
+        }]
+      : []),
+    ...(item && canDelete
+      ? [{ label: "删除此风险", icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: () => deleteRisk(item) }]
+      : []),
+    ...(!item && canCreate && currentProjectId
+      ? [{ label: "新增风险", icon: <Plus className="size-3.5" />, onSelect: openCreate }]
+      : []),
+    ...(!item && canDelete && selectedIds.length > 0
+      ? [{ label: `删除已选择 ${selectedIds.length} 条风险`, icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: deleteSelected }]
+      : []),
+  ];
 
   const getDropPosition = (event: DragEvent<HTMLElement>): DropPosition => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -308,17 +353,9 @@ export default function RiskRegisterPage() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <CardTitle className="text-sm">风险登记册</CardTitle>
           <div className="flex items-center gap-2">
-            {canCreate && currentProjectId && (
-              <Button size="sm" className="h-8 text-xs" onClick={openCreate} disabled={draft !== null}>新增风险</Button>
-            )}
             {canDelete && (
               <Button variant="outline" size="sm" className="h-8 text-xs" onClick={toggleSelectionMode}>
                 {selectionMode ? "取消选择" : "选择"}
-              </Button>
-            )}
-            {canDelete && selectionMode && (
-              <Button variant="destructive" size="sm" className="h-8 text-xs" onClick={() => void deleteSelected()} disabled={selectedIds.length === 0}>
-                删除 {selectedIds.length}
               </Button>
             )}
             {reordering && <span className="text-xs text-muted-foreground">排序保存中...</span>}
@@ -326,7 +363,7 @@ export default function RiskRegisterPage() {
         </div>
       </CardHeader>
       <CardContent className="p-0">
-        <Table>
+        <Table onContextMenu={(event) => openContextMenu(event, riskContextActions())}>
           <TableHeader>
             <TableRow>
               {selectionMode && <TableHead className="w-[48px] whitespace-nowrap">选择</TableHead>}
@@ -354,10 +391,16 @@ export default function RiskRegisterPage() {
                 <TableCell className="whitespace-nowrap font-mono text-[11px] font-semibold text-muted-foreground">保存后生成</TableCell>
                 <TableCell><Input value={draft.riskName} onChange={(e) => updateDraft("riskName", e.target.value)} className={`${inlineInputClass} min-w-[160px]`} placeholder="风险名称" autoFocus /></TableCell>
                 <TableCell>
-                  <Select value={draft.weeklyItemId ?? ""} onChange={(e) => updateDraft("weeklyItemId", e.target.value)} className={`${inlineSelectClass} min-w-[220px]`}>
-                    <option value="">不关联</option>
-                    {itemOptions.map((item) => (<option key={item.id} value={item.id}>{itemOptionLabel(item)}</option>))}
-                  </Select>
+                  <HierarchicalMultiSelect
+                    options={itemSelectOptions}
+                    value={draft.weeklyItemId ? [draft.weeklyItemId] : []}
+                    onChange={(ids) => updateDraft("weeklyItemId", ids[0] ?? "")}
+                    multiple={false}
+                    placeholder="不关联"
+                    searchPlaceholder="搜索事项 ID 或名称"
+                    ariaLabel="关联项目事项"
+                    className={`${inlineSelectClass} min-w-[220px]`}
+                  />
                 </TableCell>
                 <TableCell><Input value={draft.category} onChange={(e) => updateDraft("category", e.target.value)} className={`${inlineInputClass} w-[96px]`} placeholder="类别" /></TableCell>
                 <TableCell><Textarea value={draft.trigger} onChange={(e) => updateDraft("trigger", e.target.value)} className={inlineTextareaClass} placeholder="触发条件" /></TableCell>
@@ -400,6 +443,7 @@ export default function RiskRegisterPage() {
                   setDraggedRiskId(null);
                   setRiskDropTarget(null);
                 }}
+                onContextMenu={(event) => openContextMenu(event, riskContextActions(item))}
                 className={
                   editingCell?.id === item.id
                     ? "align-top bg-primary/5"
@@ -426,10 +470,17 @@ export default function RiskRegisterPage() {
                 <TableCell className="whitespace-nowrap font-mono text-[11px] font-semibold text-muted-foreground">{item.riskCode || `Risk${String(index + 1).padStart(3, "0")}`}</TableCell>
                 <TableCell>{renderTextCell(item, "riskName", item.riskName, `${inlineInputClass} min-w-[160px]`, "风险名称")}</TableCell>
                 <TableCell>
-                  <Select variant="ghost" value={item.weeklyItemId ?? ""} onChange={(e) => commitSelectChange(item.id, "weeklyItemId", e.target.value)} className={`${inlineSelectClass} min-w-[220px]`} disabled={!canEdit}>
-                    <option value="">不关联</option>
-                    {itemOptions.map((option) => (<option key={option.id} value={option.id}>{itemOptionLabel(option)}</option>))}
-                  </Select>
+                  <HierarchicalMultiSelect
+                    options={itemSelectOptions}
+                    value={item.weeklyItemId ? [item.weeklyItemId] : []}
+                    onChange={(ids) => void commitSelectChange(item.id, "weeklyItemId", ids[0] ?? "")}
+                    multiple={false}
+                    placeholder="不关联"
+                    searchPlaceholder="搜索事项 ID 或名称"
+                    ariaLabel="关联项目事项"
+                    className={`${inlineSelectClass} min-w-[220px]`}
+                    disabled={!canEdit}
+                  />
                 </TableCell>
                 <TableCell>{renderTextCell(item, "category", item.category, `${inlineInputClass} w-[96px]`, "类别")}</TableCell>
                 <TableCell>{renderTextareaCell(item, "trigger", item.trigger, "触发条件")}</TableCell>
@@ -445,12 +496,13 @@ export default function RiskRegisterPage() {
             {!loading && riskItems.length === 0 && (
               <TableRow>
                 <TableCell colSpan={selectionMode ? 14 : 13} className="text-center text-muted-foreground text-xs py-8">
-                  暂无风险条目{currentProjectId ? "" : "，请先在项目列表中选择一个项目"}
+                  暂无风险条目{currentProjectId ? "，在表格中右击即可新增" : "，请先在项目列表中选择一个项目"}
                 </TableCell>
               </TableRow>
             )}
           </TableBody>
         </Table>
+        <TableContextMenu menu={menu} onClose={closeContextMenu} />
       </CardContent>
     </Card>
   );

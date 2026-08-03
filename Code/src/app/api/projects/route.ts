@@ -1,11 +1,13 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getUserFromRequest } from "@/lib/auth"
-import { ok, err, unauthorized } from "@/lib/api-utils"
+import { ok, err, forbidden, unauthorizedFromRequest } from "@/lib/api-utils"
+import { resolveProjectMemberAccount } from "@/lib/project-member-accounts"
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth"
 
 export async function GET(req: NextRequest) {
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req)
+  if (!user) return unauthorizedFromRequest(req)
+  if (!await userHasPermission(user, "project-list:view")) return forbidden()
 
   const { searchParams } = new URL(req.url)
   const status = searchParams.get("status")
@@ -46,8 +48,9 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req)
+  if (!user) return unauthorizedFromRequest(req)
+  if (!await userHasPermission(user, "project-list:create")) return forbidden()
 
   const body = await req.json()
   if (!body.name) return err("项目名称不能为空")
@@ -64,6 +67,20 @@ export async function POST(req: NextRequest) {
     if (!initialMember.roleName || !initialMember.personName) return err("项目组成员角色和人员不能为空")
   }
 
+  const initialAccount = initialMember
+    ? await resolveProjectMemberAccount({
+        accountId: typeof initialMember.accountId === "string" ? initialMember.accountId : undefined,
+        personName: initialMember.personName,
+      })
+    : null
+  if (initialMember && !initialAccount) return err("请选择后台账号管理中的唯一启用账号")
+  if (initialMember && initialAccount) {
+    const assignedRoleNames = JSON.parse(initialAccount.assignedRoleNames || "[]") as string[]
+    if (!assignedRoleNames.includes(initialMember.roleName)) {
+      return err("所选人员未分配该项目角色，请先在后台账号管理中调整角色")
+    }
+  }
+
   const project = await prisma.project.create({
     data: {
       name: body.name,
@@ -78,8 +95,9 @@ export async function POST(req: NextRequest) {
       projectMembers: initialMember
         ? {
             create: {
+              accountId: initialAccount?.id,
               roleName: initialMember.roleName,
-              personName: initialMember.personName,
+              personName: initialAccount?.displayName ?? initialMember.personName,
             },
           }
         : undefined,

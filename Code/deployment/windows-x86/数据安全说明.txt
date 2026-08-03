@@ -1,0 +1,27 @@
+Ceastar PMS 数据安全基线
+
+一、当前数据库是否加密
+PostgreSQL 16 不提供可直接在本系统容器中启用的透明数据加密（TDE）。因此，数据库文件不能仅依靠应用配置实现可靠的“数据库加密”。本部署采用分层保护：
+
+1. 静态数据加密：必须对保存部署目录和 Docker Desktop 数据目录的 Windows 磁盘启用 BitLocker 或 Windows 设备加密。PostgreSQL 数据卷、文档卷和备份目录均受宿主机加密保护。
+2. 应用密钥加密：ASSISTANT_CONFIG_ENCRYPTION_KEY 使用 AES-256-GCM 加密保存模型供应商 API Key。安装脚本会生成独立随机密钥，不能与 JWT_SECRET 共用。
+3. 数据库完整性：新部署的 PostgreSQL 初始化时启用 data checksums，可检测磁盘页损坏；它不是加密功能。
+4. 网络隔离：PostgreSQL 未映射到宿主机端口，只允许 PMS 应用容器访问。不要自行增加 5432 端口映射。
+
+二、更新前保护
+每次运行 update.bat/update.ps1 都会先完成以下操作，失败即停止更新：
+
+1. 导出 PostgreSQL 自定义格式备份和项目文档压缩包。
+2. 生成 backup-manifest.json，记录两个文件的 SHA-256 校验值。
+3. 重新校验备份文件；校验通过后才加载新镜像、重建应用容器。
+4. 在终端明确输出“Pre-update backup verified:”及备份目录。
+
+默认目录为部署根目录的 backups\时间戳。若需要存到其他已启用 BitLocker 的磁盘，在部署根目录 .env 中设置：
+PMS_BACKUP_HOST_DIR=D:/Ceastar-PMS-Backups
+然后执行 docker compose up -d --no-deps --force-recreate pms，使目录挂载生效。
+
+三、恢复与密钥
+1. 不要丢失 .env 中的 POSTGRES_PASSWORD、JWT_SECRET、ASSISTANT_CONFIG_ENCRYPTION_KEY。特别是最后一项丢失后，历史模型 API Key 无法解密。
+2. 备份应同时保留 database.dump、project-documents.tar.gz 和 backup-manifest.json；恢复前先验证 SHA-256。
+3. 建议把至少一份经过校验的备份复制到另一块加密磁盘或受控云盘，并定期做恢复演练。
+4. 设置 Windows/Docker 自动启动及容器 restart: unless-stopped；这可恢复进程故障，但不能替代备份。

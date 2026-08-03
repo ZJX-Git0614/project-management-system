@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Pencil, Plus, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -27,6 +28,7 @@ import type {
   ProjectBudgetCategory,
   ProjectBudgetItem,
 } from "@/domain/models";
+import { TableContextMenu, useTableContextMenu } from "@/components/table-context-menu";
 
 interface ProjectBudgetPanelProps {
   projectId: string;
@@ -728,6 +730,7 @@ const ManpowerTable = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editRow, setEditRow] = useState<ManpowerDraft | null>(null);
   const [busy, setBusy] = useState(false);
+  const { menu, openContextMenu, closeContextMenu } = useTableContextMenu();
 
   const startCreate = () => {
     setNewRow({ ...EMPTY_MP });
@@ -804,8 +807,21 @@ const ManpowerTable = ({
     }
   };
 
+  const contextActions = (it?: ProjectBudgetItem) => [
+    ...(it && canEdit
+      ? [{ label: "编辑预算条目", icon: <Pencil className="size-3.5" />, onSelect: () => startEdit(it) }]
+      : []),
+    ...(it && canDelete
+      ? [{ label: "删除预算条目", icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: () => handleDelete(it) }]
+      : []),
+    ...(!it && canCreate
+      ? [{ label: "新增预算条目", icon: <Plus className="size-3.5" />, onSelect: startCreate }]
+      : []),
+  ];
+
   return (
-    <Table>
+    <>
+    <Table onContextMenu={(event) => openContextMenu(event, contextActions())}>
       <TableHeader>
         <TableRow>
           <TableHead className="w-[60px]">序号</TableHead>
@@ -888,9 +904,9 @@ const ManpowerTable = ({
           const isEditing = editingId === it.id && editRow;
           const subtotal = it.personMonths * it.monthlyCostPerPerson;
           return (
-            <TableRow key={it.id} className={isEditing ? "bg-muted/30" : undefined}>
+            <TableRow key={it.id} className={isEditing ? "bg-muted/30" : undefined} onContextMenu={(event) => openContextMenu(event, contextActions(it))}>
               <TableCell className="p-2 text-xs text-muted-foreground">{idx + 1}</TableCell>
-              <TableCell className={isEditing ? "p-2" : undefined}>
+              <TableCell className={isEditing ? "p-2" : "cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     value={editRow!.groupName}
@@ -901,7 +917,7 @@ const ManpowerTable = ({
                   it.groupName
                 )}
               </TableCell>
-              <TableCell className={isEditing ? "p-2 font-medium" : "font-medium"}>
+              <TableCell className={isEditing ? "p-2 font-medium" : "font-medium cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     value={editRow!.person}
@@ -912,7 +928,7 @@ const ManpowerTable = ({
                   it.person
                 )}
               </TableCell>
-              <TableCell className={isEditing ? "p-2" : "tabular-nums"}>
+              <TableCell className={isEditing ? "p-2" : "tabular-nums cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     type="number"
@@ -928,7 +944,7 @@ const ManpowerTable = ({
                   it.personMonths
                 )}
               </TableCell>
-              <TableCell className={isEditing ? "p-2" : "tabular-nums"}>
+              <TableCell className={isEditing ? "p-2" : "tabular-nums cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     type="number"
@@ -950,7 +966,7 @@ const ManpowerTable = ({
               <TableCell className="p-2 text-right text-xs font-semibold tabular-nums">
                 {formatAmount(isEditing ? editRow!.personMonths * editRow!.monthlyCostPerPerson : subtotal)}
               </TableCell>
-              <TableCell className={isEditing ? "p-2" : undefined}>
+              <TableCell className={isEditing ? "p-2" : "cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     value={editRow!.remark}
@@ -978,26 +994,7 @@ const ManpowerTable = ({
                     </Button>
                   </div>
                 ) : (
-                  <div className="flex items-center gap-1.5">
-                    {canEdit && (
-                      <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => startEdit(it)}>
-                        编辑
-                      </Button>
-                    )}
-                    {canDelete && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 text-xs text-destructive"
-                        onClick={() => handleDelete(it)}
-                      >
-                        删除
-                      </Button>
-                    )}
-                    {!canEdit && !canDelete && (
-                      <span className="text-xs text-muted-foreground">只读</span>
-                    )}
-                  </div>
+                  <span className="text-xs text-muted-foreground">右击操作</span>
                 )}
               </TableCell>
             </TableRow>
@@ -1006,7 +1003,7 @@ const ManpowerTable = ({
         {category.items.length === 0 && !newRow && (
           <TableRow>
             <TableCell colSpan={8} className="h-24 text-center text-xs text-muted-foreground">
-              暂无条目
+              暂无条目，在表格中右击即可新增
             </TableCell>
           </TableRow>
         )}
@@ -1019,11 +1016,6 @@ const ManpowerTable = ({
               {formatAmount(category.items.reduce((a, it) => a + it.personMonths * it.monthlyCostPerPerson, 0))}
             </TableCell>
             <TableCell colSpan={2} className="p-2 text-right">
-              {canCreate && !newRow && (
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={startCreate}>
-                  新增条目
-                </Button>
-              )}
               {newRow && (
                 <Button size="sm" variant="outline" className="h-7 text-xs" onClick={cancelCreate}>
                   取消新增
@@ -1032,17 +1024,10 @@ const ManpowerTable = ({
             </TableCell>
           </TableRow>
         )}
-        {category.items.length === 0 && !newRow && canCreate && (
-          <TableRow>
-            <TableCell colSpan={8} className="p-2 text-center">
-              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={startCreate}>
-                新增条目
-              </Button>
-            </TableCell>
-          </TableRow>
-        )}
       </TableBody>
     </Table>
+    <TableContextMenu menu={menu} onClose={closeContextMenu} />
+    </>
   );
 };
 
@@ -1083,6 +1068,7 @@ const PurchaseTable = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editRow, setEditRow] = useState<PurchaseDraft | null>(null);
   const [busy, setBusy] = useState(false);
+  const { menu, openContextMenu, closeContextMenu } = useTableContextMenu();
 
   const startCreate = () => {
     setNewRow({ ...EMPTY_PR });
@@ -1159,8 +1145,21 @@ const PurchaseTable = ({
     }
   };
 
+  const contextActions = (it?: ProjectBudgetItem) => [
+    ...(it && canEdit
+      ? [{ label: "编辑预算条目", icon: <Pencil className="size-3.5" />, onSelect: () => startEdit(it) }]
+      : []),
+    ...(it && canDelete
+      ? [{ label: "删除预算条目", icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: () => handleDelete(it) }]
+      : []),
+    ...(!it && canCreate
+      ? [{ label: "新增预算条目", icon: <Plus className="size-3.5" />, onSelect: startCreate }]
+      : []),
+  ];
+
   return (
-    <Table>
+    <>
+    <Table onContextMenu={(event) => openContextMenu(event, contextActions())}>
       <TableHeader>
         <TableRow>
           <TableHead className="w-[60px]">序号</TableHead>
@@ -1252,9 +1251,9 @@ const PurchaseTable = ({
           const production = it.unitPrice * it.productionQuantity;
           const total = sample + production;
           return (
-            <TableRow key={it.id} className={isEditing ? "bg-muted/30" : undefined}>
+            <TableRow key={it.id} className={isEditing ? "bg-muted/30" : undefined} onContextMenu={(event) => openContextMenu(event, contextActions(it))}>
               <TableCell className="p-2 text-xs text-muted-foreground">{idx + 1}</TableCell>
-              <TableCell className={isEditing ? "p-2" : "font-medium"}>
+              <TableCell className={isEditing ? "p-2" : "font-medium cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     value={editRow!.title}
@@ -1265,7 +1264,7 @@ const PurchaseTable = ({
                   it.title
                 )}
               </TableCell>
-              <TableCell className={isEditing ? "p-2" : "tabular-nums"}>
+              <TableCell className={isEditing ? "p-2" : "tabular-nums cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     type="number"
@@ -1279,7 +1278,7 @@ const PurchaseTable = ({
                   formatAmount(it.unitPrice)
                 )}
               </TableCell>
-              <TableCell className={isEditing ? "p-2" : "tabular-nums"}>
+              <TableCell className={isEditing ? "p-2" : "tabular-nums cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     type="number"
@@ -1298,7 +1297,7 @@ const PurchaseTable = ({
               <TableCell className="p-2 text-right text-xs tabular-nums">
                 {formatAmount(isEditing ? editRow!.unitPrice * editRow!.sampleQuantity : sample)}
               </TableCell>
-              <TableCell className={isEditing ? "p-2" : "tabular-nums"}>
+              <TableCell className={isEditing ? "p-2" : "tabular-nums cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     type="number"
@@ -1329,7 +1328,7 @@ const PurchaseTable = ({
                     : total,
                 )}
               </TableCell>
-              <TableCell className={isEditing ? "p-2" : undefined}>
+              <TableCell className={isEditing ? "p-2" : "cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     value={editRow!.remark}
@@ -1357,26 +1356,7 @@ const PurchaseTable = ({
                     </Button>
                   </div>
                 ) : (
-                  <div className="flex items-center gap-1.5">
-                    {canEdit && (
-                      <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => startEdit(it)}>
-                        编辑
-                      </Button>
-                    )}
-                    {canDelete && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 text-xs text-destructive"
-                        onClick={() => handleDelete(it)}
-                      >
-                        删除
-                      </Button>
-                    )}
-                    {!canEdit && !canDelete && (
-                      <span className="text-xs text-muted-foreground">只读</span>
-                    )}
-                  </div>
+                  <span className="text-xs text-muted-foreground">右击操作</span>
                 )}
               </TableCell>
             </TableRow>
@@ -1385,7 +1365,7 @@ const PurchaseTable = ({
         {category.items.length === 0 && !newRow && (
           <TableRow>
             <TableCell colSpan={10} className="h-24 text-center text-xs text-muted-foreground">
-              暂无条目
+              暂无条目，在表格中右击即可新增
             </TableCell>
           </TableRow>
         )}
@@ -1405,11 +1385,6 @@ const PurchaseTable = ({
               {formatAmount(category.items.reduce((a, it) => a + it.unitPrice * (it.sampleQuantity + it.productionQuantity), 0))}
             </TableCell>
             <TableCell colSpan={2} className="p-2 text-right">
-              {canCreate && !newRow && (
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={startCreate}>
-                  新增条目
-                </Button>
-              )}
               {newRow && (
                 <Button size="sm" variant="outline" className="h-7 text-xs" onClick={cancelCreate}>
                   取消新增
@@ -1418,17 +1393,10 @@ const PurchaseTable = ({
             </TableCell>
           </TableRow>
         )}
-        {category.items.length === 0 && !newRow && canCreate && (
-          <TableRow>
-            <TableCell colSpan={10} className="p-2 text-center">
-              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={startCreate}>
-                新增条目
-              </Button>
-            </TableCell>
-          </TableRow>
-        )}
       </TableBody>
     </Table>
+    <TableContextMenu menu={menu} onClose={closeContextMenu} />
+    </>
   );
 };
 
@@ -1461,6 +1429,7 @@ const OtherTable = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editRow, setEditRow] = useState<OtherDraft | null>(null);
   const [busy, setBusy] = useState(false);
+  const { menu, openContextMenu, closeContextMenu } = useTableContextMenu();
 
   const startCreate = () => {
     setNewRow({ ...EMPTY_OT });
@@ -1531,8 +1500,21 @@ const OtherTable = ({
     }
   };
 
+  const contextActions = (it?: ProjectBudgetItem) => [
+    ...(it && canEdit
+      ? [{ label: "编辑预算条目", icon: <Pencil className="size-3.5" />, onSelect: () => startEdit(it) }]
+      : []),
+    ...(it && canDelete
+      ? [{ label: "删除预算条目", icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: () => handleDelete(it) }]
+      : []),
+    ...(!it && canCreate
+      ? [{ label: "新增预算条目", icon: <Plus className="size-3.5" />, onSelect: startCreate }]
+      : []),
+  ];
+
   return (
-    <Table>
+    <>
+    <Table onContextMenu={(event) => openContextMenu(event, contextActions())}>
       <TableHeader>
         <TableRow>
           <TableHead className="w-[60px]">序号</TableHead>
@@ -1588,9 +1570,9 @@ const OtherTable = ({
         {category.items.map((it, idx) => {
           const isEditing = editingId === it.id && editRow;
           return (
-            <TableRow key={it.id} className={isEditing ? "bg-muted/30" : undefined}>
+            <TableRow key={it.id} className={isEditing ? "bg-muted/30" : undefined} onContextMenu={(event) => openContextMenu(event, contextActions(it))}>
               <TableCell className="p-2 text-xs text-muted-foreground">{idx + 1}</TableCell>
-              <TableCell className={isEditing ? "p-2" : "font-medium"}>
+              <TableCell className={isEditing ? "p-2" : "font-medium cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     value={editRow!.title}
@@ -1601,7 +1583,7 @@ const OtherTable = ({
                   it.title
                 )}
               </TableCell>
-              <TableCell className="p-2 text-right text-xs font-semibold tabular-nums">
+              <TableCell className="p-2 text-right text-xs font-semibold tabular-nums cursor-pointer hover:bg-primary/5" onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     type="number"
@@ -1615,7 +1597,7 @@ const OtherTable = ({
                   formatAmount(it.amount)
                 )}
               </TableCell>
-              <TableCell className={isEditing ? "p-2" : undefined}>
+              <TableCell className={isEditing ? "p-2" : "cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     value={editRow!.remark}
@@ -1643,26 +1625,7 @@ const OtherTable = ({
                     </Button>
                   </div>
                 ) : (
-                  <div className="flex items-center gap-1.5">
-                    {canEdit && (
-                      <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => startEdit(it)}>
-                        编辑
-                      </Button>
-                    )}
-                    {canDelete && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 text-xs text-destructive"
-                        onClick={() => handleDelete(it)}
-                      >
-                        删除
-                      </Button>
-                    )}
-                    {!canEdit && !canDelete && (
-                      <span className="text-xs text-muted-foreground">只读</span>
-                    )}
-                  </div>
+                  <span className="text-xs text-muted-foreground">右击操作</span>
                 )}
               </TableCell>
             </TableRow>
@@ -1671,7 +1634,7 @@ const OtherTable = ({
         {category.items.length === 0 && !newRow && (
           <TableRow>
             <TableCell colSpan={5} className="h-24 text-center text-xs text-muted-foreground">
-              暂无差旅事项
+              暂无差旅事项，在表格中右击即可新增
             </TableCell>
           </TableRow>
         )}
@@ -1684,11 +1647,6 @@ const OtherTable = ({
               {formatAmount(category.items.reduce((a, it) => a + it.amount, 0))}
             </TableCell>
             <TableCell colSpan={2} className="p-2 text-right">
-              {canCreate && !newRow && (
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={startCreate}>
-                  新增差旅
-                </Button>
-              )}
               {newRow && (
                 <Button size="sm" variant="outline" className="h-7 text-xs" onClick={cancelCreate}>
                   取消新增
@@ -1697,17 +1655,10 @@ const OtherTable = ({
             </TableCell>
           </TableRow>
         )}
-        {category.items.length === 0 && !newRow && canCreate && (
-          <TableRow>
-            <TableCell colSpan={5} className="p-2 text-center">
-              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={startCreate}>
-                新增差旅
-              </Button>
-            </TableCell>
-          </TableRow>
-        )}
       </TableBody>
     </Table>
+    <TableContextMenu menu={menu} onClose={closeContextMenu} />
+    </>
   );
 };
 
@@ -1737,6 +1688,7 @@ const RateTable = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editRow, setEditRow] = useState<RateDraft | null>(null);
   const [busy, setBusy] = useState(false);
+  const { menu, openContextMenu, closeContextMenu } = useTableContextMenu();
 
   const startEdit = (it: ProjectBudgetItem) => {
     setEditingId(it.id);
@@ -1789,8 +1741,16 @@ const RateTable = ({
     }
   };
 
+  const contextActions = (it?: ProjectBudgetItem) => it
+    ? [
+        ...(canEdit ? [{ label: "编辑费率", icon: <Pencil className="size-3.5" />, onSelect: () => startEdit(it) }] : []),
+        ...(canDelete ? [{ label: "删除费率", icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: () => handleDelete(it) }] : []),
+      ]
+    : [];
+
   return (
-    <Table className="table-fixed">
+    <>
+    <Table className="table-fixed" onContextMenu={(event) => openContextMenu(event, contextActions())}>
       <TableHeader>
         <TableRow>
           <TableHead className="w-[60px]">序号</TableHead>
@@ -1807,9 +1767,9 @@ const RateTable = ({
           const isEditing = editingId === it.id && editRow;
           const outOfRange = it.currentRate < it.minRate || it.currentRate > it.maxRate;
           return (
-            <TableRow key={it.id} className={isEditing ? "bg-muted/30" : undefined}>
+            <TableRow key={it.id} className={isEditing ? "bg-muted/30" : undefined} onContextMenu={(event) => openContextMenu(event, contextActions(it))}>
               <TableCell className="p-2 text-xs text-muted-foreground">{idx + 1}</TableCell>
-              <TableCell className={isEditing ? "p-2" : "font-medium"}>
+              <TableCell className={isEditing ? "p-2" : "font-medium cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     value={editRow!.title}
@@ -1820,7 +1780,7 @@ const RateTable = ({
                   it.title
                 )}
               </TableCell>
-              <TableCell className={isEditing ? "p-2" : "text-right text-xs tabular-nums"}>
+              <TableCell className={isEditing ? "p-2" : "text-right text-xs tabular-nums cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     type="number"
@@ -1834,7 +1794,7 @@ const RateTable = ({
                   formatPercent(it.minRate)
                 )}
               </TableCell>
-              <TableCell className={isEditing ? "p-2" : "text-right text-xs tabular-nums"}>
+              <TableCell className={isEditing ? "p-2" : "text-right text-xs tabular-nums cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     type="number"
@@ -1848,7 +1808,7 @@ const RateTable = ({
                   formatPercent(it.maxRate)
                 )}
               </TableCell>
-              <TableCell className={isEditing ? "p-2" : "text-right text-xs font-semibold tabular-nums"}>
+              <TableCell className={isEditing ? "p-2" : "text-right text-xs font-semibold tabular-nums cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     type="number"
@@ -1869,7 +1829,7 @@ const RateTable = ({
                   <div className="text-[10px] text-red-600">超出建议范围</div>
                 )}
               </TableCell>
-              <TableCell className={isEditing ? "p-2" : "text-xs text-muted-foreground"}>
+              <TableCell className={isEditing ? "p-2" : "text-xs text-muted-foreground cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
                   <Input
                     value={editRow!.remark}
@@ -1897,26 +1857,7 @@ const RateTable = ({
                     </Button>
                   </div>
                 ) : (
-                  <div className="flex items-center gap-1.5">
-                    {canEdit && (
-                      <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => startEdit(it)}>
-                        编辑
-                      </Button>
-                    )}
-                    {canDelete && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 text-xs text-destructive"
-                        onClick={() => handleDelete(it)}
-                      >
-                        删除
-                      </Button>
-                    )}
-                    {!canEdit && !canDelete && (
-                      <span className="text-xs text-muted-foreground">只读</span>
-                    )}
-                  </div>
+                  <span className="text-xs text-muted-foreground">右击操作</span>
                 )}
               </TableCell>
             </TableRow>
@@ -1931,5 +1872,7 @@ const RateTable = ({
         )}
       </TableBody>
     </Table>
+    <TableContextMenu menu={menu} onClose={closeContextMenu} />
+    </>
   );
 };

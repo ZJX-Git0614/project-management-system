@@ -166,7 +166,7 @@ const categoryLeaf = (task: Pick<GanttHierarchyCategorizedTask, "taskCategory" |
 
 /**
  * Rebuilds only the moved branches' category paths after a hierarchy change.
- * The terminal category remains user-owned; obsolete ancestor segments are replaced.
+ * The terminal category is retained while obsolete ancestor segments are replaced.
  */
 export const synchronizeGanttTaskCategories = <T extends GanttHierarchyCategorizedTask>(
   tasks: T[],
@@ -214,4 +214,52 @@ export const synchronizeGanttTaskCategories = <T extends GanttHierarchyCategoriz
       ? { ...task, taskCategory: resolveCategory(task.id) }
       : task
   ));
+};
+
+/** Keeps category paths aligned when a task name used as a category segment changes. */
+export const synchronizeGanttTaskCategoriesAfterNameChange = <T extends GanttHierarchyCategorizedTask>(
+  tasks: T[],
+  taskId: string,
+  previousName: string,
+  nextName: string,
+): T[] => {
+  const before = previousName.trim();
+  const after = nextName.trim();
+  if (!after || before === after) return tasks;
+
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
+  if (!taskById.has(taskId)) return tasks;
+
+  const childIdsByParentId = new Map<string, string[]>();
+  tasks.forEach((task) => {
+    if (!task.parentId) return;
+    childIdsByParentId.set(task.parentId, [...(childIdsByParentId.get(task.parentId) ?? []), task.id]);
+  });
+
+  const affectedTaskIds = new Set<string>();
+  const visit = (id: string) => {
+    if (affectedTaskIds.has(id)) return;
+    affectedTaskIds.add(id);
+    (childIdsByParentId.get(id) ?? []).forEach(visit);
+  };
+  visit(taskId);
+
+  return tasks.map((task) => {
+    if (!affectedTaskIds.has(task.id)) return task;
+
+    const category = task.taskCategory.trim();
+    if (!before) {
+      return task.id === taskId && !category
+        ? { ...task, taskCategory: after }
+        : task;
+    }
+
+    const nextCategory = category
+      .split("/")
+      .map((segment) => segment.trim())
+      .filter(Boolean)
+      .map((segment) => segment === before ? after : segment)
+      .join(" / ");
+    return nextCategory !== category ? { ...task, taskCategory: nextCategory } : task;
+  });
 };

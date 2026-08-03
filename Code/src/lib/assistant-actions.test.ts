@@ -49,14 +49,16 @@ describe("assistant action intent parsing", () => {
       .toBe("供应商交付延期");
     expect(parseRiskCreationName("从计划分析冲突创建风险"))
       .toBeNull();
+    expect(parseRiskCreationName("帮我把以上风险写入风险登记册"))
+      .toBeNull();
     expect(parseRiskCreationName("有哪些风险"))
       .toBeNull();
   });
 
   it("parses safe, fully specified Gantt creation and deletion commands", () => {
-    expect(parseGanttTaskCreateIntent("新增任务：接口联调；任务类别：软件开发；计划开始：2026-08-01；工期：2.5"))
-      .toEqual({ taskName: "接口联调", taskCategory: "软件开发", startDate: "2026-08-01", durationDays: 2.5, parentTaskCode: undefined });
-    expect(parseGanttTaskCreateIntent("新增任务：接口联调；任务类别：软件开发"))
+    expect(parseGanttTaskCreateIntent("新增任务：接口联调；计划开始：2026-08-01；工期：2.5"))
+      .toEqual({ taskName: "接口联调", startDate: "2026-08-01", durationDays: 2.5, parentTaskCode: undefined });
+    expect(parseGanttTaskCreateIntent("新增任务：接口联调"))
       .toBeNull();
     expect(parseGanttTaskDeleteIntent("删除 Task3.2 和 Task4"))
       .toEqual({ taskCodes: ["Task3.2", "Task4"] });

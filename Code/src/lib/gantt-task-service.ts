@@ -13,6 +13,7 @@ import {
   type GanttHierarchyDirection,
 } from "@/lib/gantt-hierarchy";
 import { normalizeGanttCalendarMode, type GanttCalendarMode } from "@/lib/gantt-calendar";
+import { calculateGanttCpm, type GanttCpmMetrics } from "@/lib/gantt-cpm";
 import { scheduleGanttTasks } from "@/lib/gantt-schedule";
 
 const ganttTaskInclude = {
@@ -31,6 +32,16 @@ const ganttTaskInclude = {
 
 type GanttTaskRecord = Prisma.ProjectGanttTaskGetPayload<{ include: typeof ganttTaskInclude }>;
 type GanttWriteClient = Prisma.TransactionClient | typeof prisma;
+
+type GanttScheduleUpdate = {
+  id: string;
+  startDate: string;
+  finishDate: string;
+  durationDays: number;
+  durationMinutes: number;
+  estimatedWorkHours: number;
+  metrics: GanttCpmMetrics;
+};
 
 const bulkUpdateGanttTaskCodes = async (
   client: GanttWriteClient,
@@ -83,6 +94,51 @@ const bulkUpdateGanttStructure = async (
   `);
 };
 
+const bulkUpdateGanttSchedule = async (
+  client: GanttWriteClient,
+  rows: GanttScheduleUpdate[],
+  calculatedAt: Date,
+) => {
+  if (rows.length === 0) return;
+  await client.$executeRaw(Prisma.sql`
+    UPDATE "ProjectGanttTask" AS target
+    SET "startDate" = source."startDate",
+        "finishDate" = source."finishDate",
+        "durationDays" = source."durationDays",
+        "durationMinutes" = source."durationMinutes",
+        "estimatedWorkHours" = source."estimatedWorkHours",
+        "earlyStartDate" = source."earlyStartDate",
+        "earlyFinishDate" = source."earlyFinishDate",
+        "lateStartDate" = source."lateStartDate",
+        "lateFinishDate" = source."lateFinishDate",
+        "totalFloatMinutes" = source."totalFloatMinutes",
+        "freeFloatMinutes" = source."freeFloatMinutes",
+        "scheduleStatus" = source."scheduleStatus",
+        "scheduleCalculatedAt" = ${calculatedAt},
+        "updatedAt" = NOW()
+    FROM (VALUES ${Prisma.join(rows.map((row) => Prisma.sql`(
+      ${row.id}::text,
+      ${row.startDate}::text,
+      ${row.finishDate}::text,
+      ${row.durationDays}::double precision,
+      ${row.durationMinutes}::integer,
+      ${row.estimatedWorkHours}::double precision,
+      ${row.metrics.earlyStartDate}::text,
+      ${row.metrics.earlyFinishDate}::text,
+      ${row.metrics.lateStartDate}::text,
+      ${row.metrics.lateFinishDate}::text,
+      ${row.metrics.totalFloatMinutes ?? null}::integer,
+      ${row.metrics.freeFloatMinutes ?? null}::integer,
+      ${row.metrics.scheduleStatus}::text
+    )`) )}) AS source(
+      "id", "startDate", "finishDate", "durationDays", "durationMinutes", "estimatedWorkHours",
+      "earlyStartDate", "earlyFinishDate", "lateStartDate", "lateFinishDate",
+      "totalFloatMinutes", "freeFloatMinutes", "scheduleStatus"
+    )
+    WHERE target."id" = source."id"
+  `);
+};
+
 export const serializeGanttTask = (task: GanttTaskRecord) => {
   const predecessorTaskIds = task.predecessorDependencies.map((dependency) => dependency.predecessorTaskId);
   const predecessorNames = task.predecessorDependencies
@@ -95,6 +151,7 @@ export const serializeGanttTask = (task: GanttTaskRecord) => {
     predecessorTask: predecessorNames.length > 0 ? predecessorNames.join(",") : task.predecessorTask,
     createdAt: task.createdAt.toISOString(),
     updatedAt: task.updatedAt.toISOString(),
+    scheduleCalculatedAt: task.scheduleCalculatedAt?.toISOString() ?? null,
     predecessorDependencies: task.predecessorDependencies.map((dependency) => ({
       ...dependency,
       createdAt: dependency.createdAt.toISOString(),
@@ -134,38 +191,49 @@ export const recalculateProjectGanttSchedule = async (
   requestedMode?: GanttCalendarMode,
 ) => {
   const mode = requestedMode ?? await getProjectGanttCalendarMode(projectId);
-  const tasks = await prisma.projectGanttTask.findMany({
+  const [project, tasks] = await Promise.all([
+    prisma.project.findUnique({ where: { id: projectId }, select: { expectedEndDate: true } }),
+    prisma.projectGanttTask.findMany({
     where: { projectId },
     orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
     include: {
       predecessorDependencies: {
-        select: { predecessorTaskId: true, type: true, lag: true },
+        select: { predecessorTaskId: true, type: true, lag: true, lagFormat: true },
       },
     },
-  });
+    }),
+  ]);
   const scheduled = scheduleGanttTasks(tasks, mode);
+  const cpm = calculateGanttCpm(scheduled, mode, project?.expectedEndDate ?? "");
   const currentById = new Map(tasks.map((task) => [task.id, task]));
-  const updates = scheduled.filter((task) => {
+  const updates = scheduled.flatMap((task) => {
     const current = currentById.get(task.id)!;
-    return current.startDate !== task.startDate
+    const metrics = cpm.metricsByTaskId.get(task.id);
+    if (!metrics) return [];
+    const changed = current.startDate !== task.startDate
       || current.finishDate !== task.finishDate
       || current.durationDays !== task.durationDays
       || current.durationMinutes !== task.durationMinutes
-      || Math.abs(current.estimatedWorkHours - task.estimatedWorkHours) > 0.001;
+      || Math.abs(current.estimatedWorkHours - task.estimatedWorkHours) > 0.001
+      || current.earlyStartDate !== metrics.earlyStartDate
+      || current.earlyFinishDate !== metrics.earlyFinishDate
+      || current.lateStartDate !== metrics.lateStartDate
+      || current.lateFinishDate !== metrics.lateFinishDate
+      || current.totalFloatMinutes !== metrics.totalFloatMinutes
+      || current.freeFloatMinutes !== metrics.freeFloatMinutes
+      || current.scheduleStatus !== metrics.scheduleStatus;
+    return changed ? [{
+      id: task.id,
+      startDate: task.startDate,
+      finishDate: task.finishDate,
+      durationDays: task.durationDays,
+      durationMinutes: task.durationMinutes,
+      estimatedWorkHours: task.estimatedWorkHours,
+      metrics,
+    }] : [];
   });
 
-  if (updates.length > 0) {
-    await prisma.$transaction(updates.map((task) => prisma.projectGanttTask.update({
-      where: { id: task.id },
-      data: {
-        startDate: task.startDate,
-        finishDate: task.finishDate,
-        durationDays: task.durationDays,
-        durationMinutes: task.durationMinutes,
-        estimatedWorkHours: task.estimatedWorkHours,
-      },
-    })));
-  }
+  await bulkUpdateGanttSchedule(prisma, updates, new Date());
   return mode;
 };
 
@@ -473,7 +541,7 @@ const taskSnapshotCreateData = (
     taskCode: String(rawTask.taskCode ?? ""),
     taskCategory: String(rawTask.taskCategory ?? ""),
     taskName: String(rawTask.taskName ?? ""),
-    taskDescription: String(rawTask.taskDescription ?? ""),
+    taskDescription: String(rawTask.taskDescription ?? "").trim() || "无",
     startDate: String(rawTask.startDate ?? ""),
     finishDate: String(rawTask.finishDate ?? ""),
     durationDays: Number(rawTask.durationDays ?? 0),
@@ -1104,7 +1172,7 @@ export const restoreGanttTaskDeletionBatch = async (params: {
           taskCode: String(rawTask.taskCode ?? ""),
           taskCategory: String(rawTask.taskCategory ?? ""),
           taskName: String(rawTask.taskName ?? ""),
-          taskDescription: String(rawTask.taskDescription ?? ""),
+          taskDescription: String(rawTask.taskDescription ?? "").trim() || "无",
           startDate: String(rawTask.startDate ?? ""),
           finishDate: String(rawTask.finishDate ?? ""),
           durationDays: Number(rawTask.durationDays ?? 0),
@@ -1354,7 +1422,7 @@ const cloneGanttTaskData = (
   taskCode: "",
   taskCategory: task.taskCategory,
   taskName: task.taskName,
-  taskDescription: task.taskDescription,
+  taskDescription: task.taskDescription.trim() || "无",
   startDate: task.startDate,
   finishDate: task.finishDate,
   durationDays: task.durationDays,
@@ -1418,7 +1486,7 @@ export const insertProjectGanttTasks = async (params: {
           taskCode: "",
           taskCategory: anchor.taskCategory,
           taskName: "",
-          taskDescription: "",
+          taskDescription: "无",
           startDate: "",
           finishDate: "",
           durationDays: 0,

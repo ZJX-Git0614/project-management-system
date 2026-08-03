@@ -1,7 +1,8 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getUserFromRequest } from "@/lib/auth"
-import { ok, err, unauthorized, notFound } from "@/lib/api-utils"
+import { ok, err, forbidden, notFound, unauthorizedFromRequest } from "@/lib/api-utils"
+import { resolveProjectMemberAccount } from "@/lib/project-member-accounts"
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth"
 
 // GET /api/projects/[id]/members
 export async function GET(
@@ -9,8 +10,9 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req)
+  if (!user) return unauthorizedFromRequest(req)
+  if (!await userHasPermission(user, "project-members:view")) return forbidden()
 
   const project = await prisma.project.findUnique({ where: { id }, select: { id: true } })
   if (!project) return notFound("项目")
@@ -32,8 +34,9 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req)
+  if (!user) return unauthorizedFromRequest(req)
+  if (!await userHasPermission(user, "project-members:create")) return forbidden()
 
   const project = await prisma.project.findUnique({ where: { id } })
   if (!project) return notFound("项目")
@@ -44,16 +47,11 @@ export async function POST(
   const body = await req.json()
   if (!body.roleName || !body.personName) return err("角色和人员不能为空")
 
-  const account = await prisma.userAccount.findFirst({
-    where: {
-      displayName: body.personName,
-      enabled: true,
-    },
-    select: {
-      assignedRoleNames: true,
-    },
+  const account = await resolveProjectMemberAccount({
+    accountId: typeof body.accountId === "string" ? body.accountId : undefined,
+    personName: typeof body.personName === "string" ? body.personName : undefined,
   })
-  if (!account) return err("请选择后台账号管理中的启用账号")
+  if (!account) return err("请选择后台账号管理中的唯一启用账号")
 
   const assignedRoleNames = JSON.parse(account.assignedRoleNames || "[]") as string[]
   if (!assignedRoleNames.includes(body.roleName)) {
@@ -63,8 +61,9 @@ export async function POST(
   const member = await prisma.projectMember.create({
     data: {
       projectId: id,
+      accountId: account.id,
       roleName: body.roleName,
-      personName: body.personName,
+      personName: account.displayName,
     },
   })
 
@@ -75,7 +74,7 @@ export async function POST(
       entityId: member.id,
       actionType: "CREATE",
       operator: user.displayName,
-      detail: `添加项目成员 ${body.personName}（${body.roleName}）`,
+      detail: `添加项目成员 ${account.displayName}（${body.roleName}）`,
     },
   })
 

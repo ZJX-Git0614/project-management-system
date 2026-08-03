@@ -131,6 +131,38 @@ describe("gantt file transfer", () => {
     expect(worksheetXml).toContain('sqref="L2:L1048576"');
   });
 
+  it("keeps the system Gantt template and adds a downloadable progress report sheet", () => {
+    const buffer = buildGanttExcel(tasks, {
+      report: {
+        total: 2,
+        completed: 0,
+        inProgress: 1,
+        notStarted: 1,
+        overdue: 1,
+        averageProgress: 25,
+        categoryBreakdown: [{ category: "设计", total: 2, averageProgress: 25 }],
+        summary: "共 2 项，已完成 0 项、进行中 1 项、未开始 1 项，平均进度 25%，逾期未完成 1 项。",
+      },
+      reportFilters: ["任务类别包含“设计”"],
+      generatedAt: new Date("2026-08-02T12:00:00.000Z"),
+    });
+    const workbook = XLSX.read(buffer, { type: "buffer", cellStyles: true });
+    const taskSheet = workbook.Sheets["项目进度"];
+    const reportSheet = workbook.Sheets["进度总结"];
+    const taskHeaders = XLSX.utils.sheet_to_json<string[]>(taskSheet, { header: 1 })[0];
+    const reportRows = XLSX.utils.sheet_to_json<unknown[]>(reportSheet, { header: 1, defval: "" });
+
+    expect(workbook.SheetNames).toEqual(["项目进度", "进度总结"]);
+    expect(taskHeaders).toEqual(expect.arrayContaining(["任务ID", "任务描述", "负责人", "紧前任务ID", "备注"]));
+    expect(reportRows.flat()).toEqual(expect.arrayContaining([
+      "任务进度总结报告",
+      "任务类别包含“设计”",
+      "设计",
+      "████████",
+    ]));
+    expect(reportSheet.A1.s?.fgColor?.rgb).toBe("1F4E78");
+  });
+
   it("builds an empty system Excel import template with the supported columns", () => {
     const workbook = XLSX.read(buildGanttExcelTemplate(), { type: "buffer", cellStyles: true });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];

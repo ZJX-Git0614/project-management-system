@@ -1,8 +1,8 @@
 import { NextRequest } from "next/server";
 
 import { prisma } from "@/lib/prisma";
-import { getUserFromRequest } from "@/lib/auth";
-import { ensureMutableProject, err, notFound, ok, unauthorized } from "@/lib/api-utils";
+import { ensureMutableProject, err, notFound, ok } from "@/lib/api-utils";
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import {
   calculateTaskFinishDate,
   estimatedHoursForDuration,
@@ -25,8 +25,9 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const user = getUserFromRequest(req);
-  if (!user) return unauthorized();
+  const user = await getAuthenticatedUser(req);
+  if (!user) return err("未登录", 401);
+  if (!(await userHasPermission(user, "project-gantt:view"))) return err("权限不足", 403);
 
   const project = await prisma.project.findUnique({ where: { id } });
   if (!project) return notFound("项目");
@@ -41,16 +42,16 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const user = getUserFromRequest(req);
-  if (!user) return unauthorized();
+  const user = await getAuthenticatedUser(req);
+  if (!user) return err("未登录", 401);
+  if (!(await userHasPermission(user, "project-gantt:create"))) return err("权限不足", 403);
 
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
 
   const body = await req.json() as Record<string, unknown>;
-  const taskCategory = String(body.taskCategory ?? "").trim();
   const taskName = String(body.taskName ?? "").trim();
-  const taskDescription = String(body.taskDescription ?? "").trim();
+  const taskDescription = String(body.taskDescription ?? "").trim() || "无";
   const requestedStartDate = String(body.startDate ?? "").trim();
   const durationDays = Number(body.durationDays ?? 0);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(requestedStartDate)) return err("计划开始时间格式应为 YYYY-MM-DD");
@@ -76,10 +77,16 @@ export async function POST(
   if (actualEndDate && !/^\d{4}-\d{2}-\d{2}$/.test(actualEndDate)) return err("实际完成时间格式应为 YYYY-MM-DD");
   if (!Number.isFinite(Number(body.actualWorkHours ?? 0)) || Number(body.actualWorkHours ?? 0) < 0) return err("实际工时必须为大于或等于 0 的数字");
   if (!Number.isInteger(progress) || progress < 0 || progress > 100) return err("当前进度必须为 0-100 的整数");
-  if (parentId) {
-    const parent = await prisma.projectGanttTask.findFirst({ where: { id: parentId, projectId: id } });
-    if (!parent) return notFound("父级甘特任务");
-  }
+  const parentTask = parentId
+    ? await prisma.projectGanttTask.findFirst({
+        where: { id: parentId, projectId: id },
+        select: { id: true, taskCategory: true, taskName: true },
+      })
+    : null;
+  if (parentId && !parentTask) return notFound("父级甘特任务");
+  const taskCategory = parentTask
+    ? parentTask.taskCategory.trim() || parentTask.taskName.trim()
+    : taskName;
   if (budgetItemId) {
     const budgetItem = await prisma.projectBudgetItem.findFirst({ where: { id: budgetItemId, projectId: id }, select: { id: true } });
     if (!budgetItem) return notFound("预算条目");

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   GANTT_HIDEABLE_COLUMN_KEYS,
+  GANTT_DEFAULT_HIDDEN_COLUMN_KEYS,
   GANTT_EXPANDED_COLUMN_KEYS,
   GANTT_COLUMN_MIN_WIDTHS,
   fitGanttColumnWidth,
@@ -55,5 +56,10 @@ describe("gantt column layout", () => {
       GANTT_EXPANDED_COLUMN_KEYS.indexOf("taskName") + 1,
     );
     expect(GANTT_EXPANDED_COLUMN_KEYS.at(-1)).toBe("remark");
+  });
+
+  it("shows every expanded column by default", () => {
+    expect(GANTT_DEFAULT_HIDDEN_COLUMN_KEYS).toEqual([]);
+    expect(ganttVisibleColumnKeys(false, new Set(GANTT_DEFAULT_HIDDEN_COLUMN_KEYS))).toEqual(GANTT_EXPANDED_COLUMN_KEYS);
   });
 });

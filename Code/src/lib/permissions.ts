@@ -65,17 +65,6 @@ export const PERMISSION_TREE = [
             ],
           },
           {
-            key: "project-gantt",
-            label: "项目进度管理",
-            type: "section",
-            children: [
-              { key: "project-gantt:view", label: "查看项目进度管理", type: "section" },
-              { key: "project-gantt:create", label: "新增甘特任务", type: "action" },
-              { key: "project-gantt:edit", label: "编辑甘特任务", type: "action" },
-              { key: "project-gantt:delete", label: "删除甘特任务", type: "action" },
-            ],
-          },
-          {
             key: "project-budget",
             label: "项目预算管理",
             type: "section",
@@ -114,11 +103,14 @@ export const PERMISSION_TREE = [
     type: "group",
     children: [
       {
-        key: "overview",
-        label: "项目进度总揽",
+        key: "project-wbs",
+        label: "项目WBS管理",
         type: "page",
         children: [
-          { key: "overview:view", label: "查看项目进度总揽", type: "section" },
+          { key: "project-gantt:view", label: "查看项目WBS管理", type: "section" },
+          { key: "project-gantt:create", label: "新增甘特任务", type: "action" },
+          { key: "project-gantt:edit", label: "编辑甘特任务", type: "action" },
+          { key: "project-gantt:delete", label: "删除甘特任务", type: "action" },
         ],
       },
       {
@@ -277,7 +269,7 @@ export const PERMISSION_ROUTE_RULES: PermissionRouteRule[] = [
   { pathname: "/role-config", permissionKey: "role-config:view" },
   { pathname: "/admin/permissions", permissionKey: "permission-config:view" },
   { pathname: "/admin/accounts", permissionKey: "account-management:view" },
-  { pathname: "/overview", permissionKey: "overview:view" },
+  { pathname: "/overview", permissionKey: "project-gantt:view" },
   { pathname: "/weekly-items", permissionKey: "weekly-items:view" },
   { pathname: "/risk-register", permissionKey: "risk-register:view" },
 ];
@@ -285,6 +277,23 @@ export const PERMISSION_ROUTE_RULES: PermissionRouteRule[] = [
 const cloneKeys = (keys: readonly string[]) => [...keys];
 
 const allNodeKeysFor = (nodeKey: string): string[] => [nodeKey, ...PERMISSION_DESCENDANT_KEYS[nodeKey]];
+
+/**
+ * 旧版本将甘特页面拆成“项目进度总揽”和“项目进度管理”两套节点。
+ * 新版统一为项目 WBS 管理；保留映射避免已保存的角色配置失效。
+ */
+const LEGACY_PERMISSION_KEY_MIGRATIONS: Record<string, readonly string[]> = {
+  "project-gantt": ["project-wbs", "project-gantt:view"],
+  overview: ["project-wbs", "project-gantt:view"],
+  "overview:view": ["project-gantt:view"],
+};
+
+const normalizePermissionKeys = (keys: unknown[]): string[] => keys
+  .flatMap((key) => {
+    if (typeof key !== "string") return [];
+    return LEGACY_PERMISSION_KEY_MIGRATIONS[key] ?? [key];
+  })
+  .filter((key) => key in PERMISSION_NODE_BY_KEY);
 
 export const DEFAULT_PERMISSION_TREE: PermissionTreeState = {
   [ADMIN_ROLE_NAME]: cloneKeys(PERMISSION_NODE_KEYS),
@@ -304,8 +313,6 @@ export const DEFAULT_PERMISSION_TREE: PermissionTreeState = {
     "project-info",
     "project-info:view",
     "project-info:core-view",
-    "project-gantt",
-    "project-gantt:view",
     "project-performance",
     "earned-value",
     "earned-value:view",
@@ -314,8 +321,7 @@ export const DEFAULT_PERMISSION_TREE: PermissionTreeState = {
     "project-members",
     "project-members:view",
     "project-progress",
-    "overview",
-    "overview:view",
+    "project-wbs",
     "weekly-items",
     "weekly-items:view",
     "project-scope",
@@ -345,7 +351,7 @@ export const normalizePermissionTree = (tree: Partial<PermissionTreeState> | und
       continue;
     }
 
-    const validKeys = value.filter((key): key is string => typeof key === "string" && key in PERMISSION_NODE_BY_KEY);
+    const validKeys = normalizePermissionKeys(value);
     const expanded = new Set<string>();
 
     validKeys.forEach((key) => {
