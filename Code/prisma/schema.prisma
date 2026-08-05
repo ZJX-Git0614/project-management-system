@@ -39,81 +39,85 @@ model Project {
   ganttCalendarMode String   @default("CALENDAR_DAYS")
   ganttRevision     Int      @default(0)
 
-  projectMembers       ProjectMember[]
-  ganttTasks           ProjectGanttTask[]
-  ganttDependencies    ProjectGanttDependency[]
-  scheduleMetadata     ProjectScheduleImportMetadata?
-  scheduleSnapshots    ProjectScheduleSnapshot[]
-  scheduleAnalyses     ScheduleAnalysisRun[]
-  ganttDeletionBatches ProjectGanttDeletionBatch[]
-  budgetCategories     ProjectBudgetCategory[]
-  budgetItems          ProjectBudgetItem[]
-  budgetSetting        ProjectBudgetSetting?
-  weeklyItems          WeeklyItem[]
-  monthlyItems         MonthlyItem[]
-  todos                TodoItem[]
-  operationHistories   OperationHistory[]
-  riskRegisterItems    RiskRegisterItem[]
-  documentFiles        ProjectDocumentFile[]
-  assistantAttachments AssistantAttachment[]
-  assistantArtifacts   AssistantArtifact[]
-  assistantPlans       AssistantPlanRun[]
+  projectMembers         ProjectMember[]
+  ganttTasks             ProjectGanttTask[]
+  ganttDependencies      ProjectGanttDependency[]
+  scheduleMetadata       ProjectScheduleImportMetadata?
+  scheduleSnapshots      ProjectScheduleSnapshot[]
+  moduleHistorySnapshots ProjectModuleHistorySnapshot[]
+  scheduleAnalyses       ScheduleAnalysisRun[]
+  ganttDeletionBatches   ProjectGanttDeletionBatch[]
+  budgetCategories       ProjectBudgetCategory[]
+  budgetItems            ProjectBudgetItem[]
+  budgetSetting          ProjectBudgetSetting?
+  weeklyItems            WeeklyItem[]
+  monthlyItems           MonthlyItem[]
+  todos                  TodoItem[]
+  operationHistories     OperationHistory[]
+  riskRegisterItems      RiskRegisterItem[]
+  documentFiles          ProjectDocumentFile[]
+  assistantAttachments   AssistantAttachment[]
+  assistantArtifacts     AssistantArtifact[]
+  assistantPlans         AssistantPlanRun[]
 }
 
 model ProjectGanttTask {
-  id                   String    @id @default(cuid())
-  createdAt            DateTime  @default(now())
-  updatedAt            DateTime  @updatedAt
-  projectId            String
-  parentId             String?
-  ownerMemberId        String?
-  taskCode             String    @default("")
-  taskCategory         String
-  taskName             String
-  taskDescription      String    @default("无")
-  startDate            String
-  finishDate           String    @default("")
-  earlyStartDate       String    @default("")
-  earlyFinishDate      String    @default("")
-  lateStartDate        String    @default("")
-  lateFinishDate       String    @default("")
-  totalFloatMinutes    Int?
-  freeFloatMinutes     Int?
-  scheduleStatus       String    @default("UNSCHEDULED")
-  scheduleCalculatedAt DateTime?
-  durationDays         Float
-  durationMinutes      Int       @default(0)
-  durationFormat       Int       @default(7)
-  actualStartDate      String    @default("")
-  actualEndDate        String    @default("")
-  estimatedWorkHours   Float     @default(0)
-  actualWorkHours      Float     @default(0)
-  progress             Int       @default(0)
-  predecessorTask      String    @default("")
-  taskMode             String    @default("AUTO")
-  isMilestone          Boolean   @default(false)
-  externalUid          String    @default("")
-  wbsCode              String    @default("")
-  outlineNumber        String    @default("")
-  calendarUid          String    @default("")
-  constraintType       Int?
-  constraintDate       String    @default("")
-  baselineStartDate    String    @default("")
-  baselineFinishDate   String    @default("")
-  baselineCost         Float     @default(0)
-  budgetAtCompletion   Float     @default(0)
-  actualCost           Float     @default(0)
-  budgetItemId         String?
-  baselines            Json      @default("[]")
-  remark               String    @default("")
-  sortOrder            Int       @default(0)
+  id                    String    @id @default(cuid())
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  projectId             String
+  parentId              String?
+  ownerMemberId         String?
+  taskCode              String    @default("")
+  taskCategory          String
+  taskName              String
+  taskDescription       String    @default("无")
+  startDate             String
+  finishDate            String    @default("")
+  earlyStartDate        String    @default("")
+  earlyFinishDate       String    @default("")
+  lateStartDate         String    @default("")
+  lateFinishDate        String    @default("")
+  totalFloatMinutes     Int?
+  freeFloatMinutes      Int?
+  scheduleStatus        String    @default("UNSCHEDULED")
+  scheduleCalculatedAt  DateTime?
+  durationDays          Float
+  durationMinutes       Int       @default(0)
+  durationFormat        Int       @default(7)
+  actualStartDate       String    @default("")
+  actualEndDate         String    @default("")
+  estimatedWorkHours    Float     @default(0)
+  actualWorkHours       Float     @default(0)
+  progress              Int       @default(0)
+  predecessorTask       String    @default("")
+  taskMode              String    @default("AUTO")
+  isMilestone           Boolean   @default(false)
+  externalUid           String    @default("")
+  wbsCode               String    @default("")
+  outlineNumber         String    @default("")
+  calendarUid           String    @default("")
+  constraintType        Int?
+  constraintDate        String    @default("")
+  resourceNotBeforeDate String    @default("")
+  baselineStartDate     String    @default("")
+  baselineFinishDate    String    @default("")
+  baselineCost          Float     @default(0)
+  budgetAtCompletion    Float     @default(0)
+  actualCost            Float     @default(0)
+  budgetItemId          String?
+  baselines             Json      @default("[]")
+  remark                String    @default("")
+  sortOrder             Int       @default(0)
 
   project                 Project                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   ownerMember             ProjectMember?           @relation(fields: [ownerMemberId], references: [id], onDelete: SetNull)
+  ownerLinks              ProjectGanttTaskOwner[]
   budgetItem              ProjectBudgetItem?       @relation(fields: [budgetItemId], references: [id], onDelete: SetNull)
   parent                  ProjectGanttTask?        @relation("GanttTaskChildren", fields: [parentId], references: [id], onDelete: Cascade)
   children                ProjectGanttTask[]       @relation("GanttTaskChildren")
   weeklyItems             WeeklyItem[]
+  weeklyItemLinks         WeeklyItemGanttTask[]
   riskItems               RiskRegisterItem[]
   predecessorDependencies ProjectGanttDependency[] @relation("GanttDependencySuccessor")
   successorDependencies   ProjectGanttDependency[] @relation("GanttDependencyPredecessor")
@@ -121,6 +125,18 @@ model ProjectGanttTask {
   @@index([projectId, externalUid])
   @@index([projectId, budgetItemId])
   @@index([projectId, ownerMemberId])
+}
+
+model ProjectGanttTaskOwner {
+  taskId          String
+  projectMemberId String
+  createdAt       DateTime @default(now())
+
+  task          ProjectGanttTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  projectMember ProjectMember    @relation(fields: [projectMemberId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, projectMemberId])
+  @@index([projectMemberId])
 }
 
 model ProjectGanttDependency {
@@ -192,6 +208,21 @@ model ProjectScheduleSnapshot {
   analysisRuns ScheduleAnalysisRun[]
 
   @@index([projectId, createdAt])
+}
+
+model ProjectModuleHistorySnapshot {
+  id           String   @id @default(cuid())
+  createdAt    DateTime @default(now())
+  projectId    String
+  module       String
+  sessionId    String
+  label        String   @default("")
+  snapshotJson String   @db.Text
+  createdBy    String   @default("")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, module, sessionId, createdAt])
 }
 
 model ScheduleAnalysisRun {
@@ -303,11 +334,17 @@ model ProjectMember {
   roleName   String
   personName String
 
-  project    Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  account    UserAccount?       @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  ganttTasks ProjectGanttTask[]
+  project        Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  account        UserAccount?            @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  ganttTasks     ProjectGanttTask[]
+  ganttTaskLinks ProjectGanttTaskOwner[]
 
-  @@index([projectId, accountId])
+  @@unique([projectId, accountId])
+}
+
+model PmsDataMigration {
+  key       String   @id
+  appliedAt DateTime @default(now())
 }
 
 model WeeklyItem {
@@ -337,11 +374,25 @@ model WeeklyItem {
   riskStatus       String   @default("NONE")
   remark           String   @default("")
 
-  ganttTask ProjectGanttTask?  @relation(fields: [ganttTaskId], references: [id], onDelete: SetNull)
-  project   Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  riskItems RiskRegisterItem[]
+  ganttTask      ProjectGanttTask?            @relation(fields: [ganttTaskId], references: [id], onDelete: SetNull)
+  project        Project                      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  riskItems      RiskRegisterItem[]
+  ganttTaskLinks WeeklyItemGanttTask[]
+  riskLinks      RiskRegisterItemWeeklyItem[]
 
   @@index([projectId, ganttTaskId])
+}
+
+model WeeklyItemGanttTask {
+  weeklyItemId String
+  ganttTaskId  String
+  createdAt    DateTime @default(now())
+
+  weeklyItem WeeklyItem       @relation(fields: [weeklyItemId], references: [id], onDelete: Cascade)
+  ganttTask  ProjectGanttTask @relation(fields: [ganttTaskId], references: [id], onDelete: Cascade)
+
+  @@id([weeklyItemId, ganttTaskId])
+  @@index([ganttTaskId])
 }
 
 // 保留旧版月度事项数据，避免结构同步删除仍有历史记录的表。
@@ -414,6 +465,28 @@ model AdminAuditLog {
   @@index([projectId, createdAt])
 }
 
+model SystemEventLog {
+  id           String   @id @default(cuid())
+  createdAt    DateTime @default(now())
+  level        String   @default("INFO")
+  category     String   @default("SYSTEM")
+  module       String   @default("")
+  eventType    String
+  operatorId   String   @default("")
+  operatorName String   @default("")
+  projectId    String   @default("")
+  projectName  String   @default("")
+  message      String   @db.Text
+  details      String   @default("{}") @db.Text
+  traceId      String   @default("")
+  sizeBytes    Int      @default(0)
+
+  @@index([createdAt])
+  @@index([level, createdAt])
+  @@index([module, createdAt])
+  @@index([projectId, createdAt])
+}
+
 model SystemBackupSettings {
   id                             String    @id @default("default")
   createdAt                      DateTime  @default(now())
@@ -460,6 +533,26 @@ model SystemBackupRecord {
   @@index([status, createdAt])
 }
 
+model ProjectRestoreBatch {
+  id                    String    @id @default(cuid())
+  createdAt             DateTime  @default(now())
+  completedAt           DateTime?
+  rolledBackAt          DateTime?
+  expiresAt             DateTime
+  status                String    @default("PREPARING")
+  operatorId            String    @default("")
+  operatorName          String    @default("")
+  sourceFileName        String    @default("")
+  projectIds            String    @default("[]") @db.Text
+  projectNames          String    @default("[]") @db.Text
+  protectionSnapshotDir String    @default("") @db.Text
+  summary               String    @default("{}") @db.Text
+  errorMessage          String    @default("") @db.Text
+
+  @@index([createdAt])
+  @@index([status, expiresAt])
+}
+
 model RiskRegisterItem {
   id             String   @id @default(cuid())
   createdAt      DateTime @default(now())
@@ -481,12 +574,25 @@ model RiskRegisterItem {
   status         String   @default("识别中")
   targetDate     String   @default("")
 
-  ganttTask  ProjectGanttTask? @relation(fields: [ganttTaskId], references: [id], onDelete: SetNull)
-  weeklyItem WeeklyItem?       @relation(fields: [weeklyItemId], references: [id], onDelete: SetNull)
-  project    Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  ganttTask       ProjectGanttTask?            @relation(fields: [ganttTaskId], references: [id], onDelete: SetNull)
+  weeklyItem      WeeklyItem?                  @relation(fields: [weeklyItemId], references: [id], onDelete: SetNull)
+  project         Project                      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  weeklyItemLinks RiskRegisterItemWeeklyItem[]
 
   @@index([projectId, ganttTaskId])
   @@index([projectId, weeklyItemId])
+}
+
+model RiskRegisterItemWeeklyItem {
+  riskItemId   String
+  weeklyItemId String
+  createdAt    DateTime @default(now())
+
+  riskItem   RiskRegisterItem @relation(fields: [riskItemId], references: [id], onDelete: Cascade)
+  weeklyItem WeeklyItem       @relation(fields: [weeklyItemId], references: [id], onDelete: Cascade)
+
+  @@id([riskItemId, weeklyItemId])
+  @@index([weeklyItemId])
 }
 
 model ProjectDocumentFile {

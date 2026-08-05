@@ -12,12 +12,12 @@
 | 项目管理 | 项目创建、编辑、状态维护、项目列表筛选和导出 |
 | 项目范围管理 | 按项目阶段维护文档文件夹，上传、下载和删除项目文档，记录目录关联和操作日志 |
 | 项目绩效管理 | 按状态日期计算 PV、EV、AC、SV、CV、SPI、CPI、ETC、BAC、EAC、VAC 和 TCPI，支持典型/非典型偏差预测 |
-| 项目进度管理 | 项目甘特任务增删改、父子任务、稳定主键依赖、关键路径标记、进度条、拖拽排序、列折叠、多档日期缩放，以及 MPP/XML/Excel 导入导出 |
-| 项目事项管理 | 事项增删改、选择删除、责任人下拉、关联任务、风险被动关联、事项 ID 自动编号、拖拽排序和导出 |
+| 项目进度管理 | 项目 WBS 任务增删改、父子任务、稳定主键依赖、关键路径标记、资源冲突检测与候选优化排期、进度条、拖拽排序、列折叠、多档日期缩放，以及 MPP/XML/Excel 导入导出 |
+| 项目事项管理 | 事项增删改、WBS 树形多任务关联、风险被动关联、撤销/重做、右击插入/复制/剪切/粘贴、事项 ID 自动编号、拖拽排序和导出 |
 | 项目成本管理 | 项目预算分类、预算明细、合同金额、利润率目标、公摊/审价/风险费率管理 |
-| 项目风险管理 | 风险登记册增删改、风险 ID 自动编号、关联项目事项、选择删除和拖拽排序 |
-| 项目智能助手 | 实时数据库问答、OpenAI 兼容/Ollama 模型供应商、RAGLite 知识检索、类型化工具契约、最多 6 步 DAG 计划与检查点续跑、失败分类和验收证据，以及计划对比/转换、文档修订和风险待办闭环 |
-| 智能助手设置 | 超级管理员可配置助手启停、名称、欢迎语、人设、外观、模型、向量检索、Agent 工具范围、会话保留策略和连接测试；密钥加密保存 |
+| 项目风险管理 | 风险登记册增删改、树形多事项关联、由事项自动推导受影响 WBS 任务、风险明细、撤销/重做、右击结构操作、风险 ID 自动编号和拖拽排序 |
+| 项目智能助手 | 实时数据库问答、OpenAI 兼容/Ollama 模型供应商、RAGLite 知识检索、WBS 资源优化建议及确认写回、类型化工具契约、最多 6 步 DAG 计划与检查点续跑、失败分类和验收证据，以及计划对比/转换、文档修订和风险待办闭环 |
+| 智能助手设置 | 超级管理员可配置助手启停、名称、欢迎语、人设、外观、模型、向量检索、Agent 工具范围、Ollama/RAGLite 本地服务启停与自启、会话保留策略和连接测试；密钥加密保存 |
 | 系统数据管理 | 超级管理员可按项目清空业务模块或整个项目并写入操作日志；支持手动/定时数据库备份、备份导入导出和 WebDAV 云盘目录 |
 | 操作历史 | 项目、成员、预算、事项、风险、模块清理等关键操作留痕 |
 
@@ -31,6 +31,8 @@
 | 认证 | JWT, bcryptjs |
 | 测试 | Vitest, React Testing Library |
 | 部署 | 本地 Node.js 或 Docker Compose |
+
+前端业务列表应复用[透明表格组件库](docs/透明表格组件库.md)，保持 WBS 风格的透明行内控件和无边框表格操作。
 
 ## 快速启动
 
@@ -54,9 +56,11 @@ ASSISTANT_MODEL_API_KEY="your-api-key"
 ASSISTANT_CONFIG_ENCRYPTION_KEY="replace-with-a-private-encryption-key"
 RAGLITE_SERVICE_URL="http://your-raglite-service:8001"
 RAGLITE_SERVICE_TOKEN="your-raglite-token"
+ASSISTANT_SERVICE_MANAGER_URL="http://host.docker.internal:8766"
+ASSISTANT_SERVICE_MANAGER_TOKEN="windows-host-bridge-token"
 ```
 
-助手模型和 RAGLite 变量可选，也可以由超级管理员在“系统设置 → 智能助手设置”中维护；未配置模型时使用 PostgreSQL 实时数据检索模式。供应商密钥和 RAGLite Token 会使用 `ASSISTANT_CONFIG_ENCRYPTION_KEY` 加密后存入数据库，生产环境必须配置独立高强度密钥。`.env` 不会提交到 GitHub。Docker Compose 中的默认密码、JWT secret 和加密密钥仅用于本地演示，生产环境必须替换。
+助手模型和 RAGLite 变量可选，也可以由超级管理员在“系统设置 → 智能助手设置”中维护；未配置模型时使用 PostgreSQL 实时数据检索模式。Windows 部署脚本会自动生成主机服务桥接令牌并写入 `.env`，不需要手工填写。供应商密钥和 RAGLite Token 会使用 `ASSISTANT_CONFIG_ENCRYPTION_KEY` 加密后存入数据库，生产环境必须配置独立高强度密钥。`.env` 不会提交到 GitHub。Docker Compose 中的默认密码、JWT secret 和加密密钥仅用于本地演示，生产环境必须替换。
 
 ### 3. 初始化数据库
 
@@ -106,6 +110,8 @@ npm run db:seed    # 初始化基础账号/角色/权限
 npx prisma studio  # Prisma 数据库管理界面
 ```
 
+数据库连接、增删改查、备份恢复、Navicat、结构迁移和蓝绿部署兼容要求详见 [数据库操作手册](docs/数据库操作手册.md)。
+
 ## 目录结构
 
 ```text
@@ -135,7 +141,8 @@ Code/
 - 仓库不应包含 `.env`、数据库文件、导出表格或真实业务数据。
 - `prisma/seed.ts` 只写入基础账号、角色和权限树，不写入项目数据。
 - 业务元数据存储在 PostgreSQL 中；上传的项目文档存储在 `PROJECT_DOCUMENT_STORAGE_DIR`，Docker 部署使用独立持久化卷。数据库与文件目录都应纳入备份策略，不应提交到 GitHub。
-- Docker 生产启动会先执行 Prisma 的结构同步，再按顺序执行 `prisma/manual-migrations/*.sql` 的增量回填脚本；当前脚本只增加字段、索引、外键并回填关联键，不删除业务数据。
+- 正式 Docker 部署默认设置 `SKIP_PRISMA_DB_PUSH=true`，不在生产启动时执行 `prisma db push`；应用按顺序执行 `prisma/manual-migrations/*.sql` 中经过审核的兼容迁移。后续蓝绿部署应进一步把迁移从应用启动流程剥离为一次性迁移任务。
+- 修改 `prisma/schema.prisma`、`prisma/manual-migrations/`、数据库连接、备份恢复或部署迁移流程时，必须在同一提交中同步更新 [数据库操作手册](docs/数据库操作手册.md)。数据库变化但手册未同步时，不应构建正式更新包。
 - 超级管理员的数据清理功能会记录操作日志，但清理动作不可恢复，使用前需确认项目和模块。
 
 ### 数据备份与恢复

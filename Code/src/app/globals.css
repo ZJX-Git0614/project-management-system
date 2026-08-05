@@ -135,6 +135,34 @@ body {
   animation: gantt-history-cell-flash 0.5s ease-out both;
 }
 
+/* 列表表格统一采用 WBS 风格：内容区透明，仅在悬停、选中或编辑聚焦时显示状态。 */
+[data-slot="table"] tbody tr {
+  background-color: transparent;
+}
+
+[data-slot="table"] tbody [data-slot="input"],
+[data-slot="table"] tbody [data-slot="select"],
+[data-slot="table"] tbody textarea {
+  border-color: transparent;
+  background-color: transparent;
+  box-shadow: none;
+}
+
+[data-slot="table"] tbody [data-slot="input"]:hover,
+[data-slot="table"] tbody [data-slot="select"]:hover,
+[data-slot="table"] tbody textarea:hover {
+  border-color: hsl(225 12% 24%);
+  background-color: rgba(255, 255, 255, 0.025);
+}
+
+[data-slot="table"] tbody [data-slot="input"]:focus-visible,
+[data-slot="table"] tbody [data-slot="select"]:focus-visible,
+[data-slot="table"] tbody textarea:focus-visible {
+  border-color: hsl(217 91% 60% / 0.58);
+  background-color: hsl(225 25% 5% / 0.82);
+  box-shadow: 0 0 0 2px hsl(217 91% 60% / 0.16);
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -264,8 +292,22 @@ body {
   box-shadow: var(--app-shadow-popover);
 }
 
+.gantt-context-submenu::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -7px;
+  width: 7px;
+  content: "";
+}
+
 .gantt-context-menu-open-left .gantt-context-submenu {
   right: calc(100% + 6px);
+  left: auto;
+}
+
+.gantt-context-menu-open-left .gantt-context-submenu::before {
+  right: -7px;
   left: auto;
 }
 

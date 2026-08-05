@@ -96,4 +96,20 @@ describe("gantt calendar", () => {
 
     expect(result[1]).toMatchObject({ startDate: "2026-07-02", finishDate: "2026-07-03" });
   });
+
+  it("keeps an accepted resource optimization after dependency recalculation", () => {
+    const result = scheduleGanttTasks([
+      { id: "a", startDate: "2026-07-01", durationDays: 3, taskMode: "AUTO" },
+      {
+        id: "b",
+        startDate: "2026-07-10",
+        durationDays: 2,
+        taskMode: "AUTO",
+        resourceNotBeforeDate: "2026-07-10",
+        predecessorDependencies: [{ predecessorTaskId: "a", type: 1, lag: 0 }],
+      },
+    ], "WORKING_DAYS");
+
+    expect(result[1]).toMatchObject({ startDate: "2026-07-10", finishDate: "2026-07-13" });
+  });
 });

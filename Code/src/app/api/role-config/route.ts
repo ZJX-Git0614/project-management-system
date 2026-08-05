@@ -1,8 +1,9 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { getUserFromRequest } from "@/lib/auth"
-import { ok, err, unauthorized } from "@/lib/api-utils"
+import { err, forbidden, ok, unauthorized, unauthorizedFromRequest } from "@/lib/api-utils"
 import { buildPersonsByRoleFromAccounts } from "@/lib/role-persons"
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth"
 
 const parsePersons = (value: string) => {
   try {
@@ -39,23 +40,25 @@ export async function GET(req: NextRequest) {
 
 // POST /api/role-config
 export async function POST(req: NextRequest) {
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req)
+  if (!user) return unauthorizedFromRequest(req)
+  if (!await userHasPermission(user, "role-config:edit")) return forbidden()
 
   const body = await req.json()
-  if (!body.roleName)
-    return err("角色名称不能为空")
+  if (body.systemPreset !== undefined) return err("系统预置标记不可修改", 403)
+  const roleName = typeof body.roleName === "string" ? body.roleName.trim() : ""
+  if (!roleName) return err("角色名称不能为空")
 
   const existing = await prisma.roleConfig.findUnique({
-    where: { roleName: body.roleName },
+    where: { roleName },
   })
   if (existing) return err("角色名称已存在")
 
   const config = await prisma.roleConfig.create({
     data: {
-      roleName: body.roleName,
-      allowMultiple: body.allowMultiple || false,
-      systemPreset: body.systemPreset || false,
+      roleName,
+      allowMultiple: Boolean(body.allowMultiple),
+      systemPreset: false,
       persons: JSON.stringify(body.persons || []),
     },
   })

@@ -83,6 +83,12 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 
 Ensure-PrivateEnvironment
 
+$assistantBridgeInstaller = Join-Path $PSScriptRoot "install-assistant-service-bridge.ps1"
+if (-not (Test-Path $assistantBridgeInstaller)) {
+  throw "Missing deployment file: install-assistant-service-bridge.ps1"
+}
+& $assistantBridgeInstaller -DeploymentDirectory $PSScriptRoot -SourceDirectory $PSScriptRoot
+
 docker info *> $null
 Assert-LastExitCode "Docker Desktop is not running. Start Docker Desktop and retry."
 

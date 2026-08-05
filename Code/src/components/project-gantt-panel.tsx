@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { BriefcaseBusiness, CalendarDays, ChevronDown, Download, FileSpreadsheet, FileType2, Maximize2, Minimize2, Redo2, Undo2, Upload } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { BriefcaseBusiness, CalendarDays, ChevronDown, Download, FileSpreadsheet, FileType2, Maximize2, Minimize2, Redo2, TriangleAlert, Undo2, Upload, WandSparkles } from "lucide-react";
 
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Select } from "@/components/ui/select";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -31,6 +33,7 @@ import {
   type GanttCalendarMode,
 } from "@/lib/gantt-calendar";
 import { renumberGanttTaskCodes } from "@/lib/gantt-task-codes";
+import { ganttTaskDepths } from "@/lib/gantt-column-layout";
 import {
   changeGanttTaskHierarchy,
   synchronizeGanttTaskCategories,
@@ -72,6 +75,7 @@ interface GanttDeleteResult {
   deletedTaskCount?: number;
   detachedWeeklyItemCount?: number;
   detachedRiskCount?: number;
+  affectedRiskCount?: number;
   clearedPredecessorCount?: number;
   expiresAt?: string;
 }
@@ -97,8 +101,18 @@ export interface GanttHistoryFocusRequest extends GanttHistoryFocusTarget {
   requestId: number;
 }
 
+let fallbackClientIdSequence = 0;
+const createClientId = () => {
+  if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+  fallbackClientIdSequence += 1;
+  return `client-${fallbackClientIdSequence}`;
+};
+
 type ScheduleImportPreview = {
-  file: File;
+  file?: File;
+  attachmentId?: string;
+  fileName: string;
+  hierarchyMode: "AUTO" | "FLAT";
   analysisRunId: string;
   snapshotId: string;
   analysis: {
@@ -114,6 +128,78 @@ type ScheduleImportPreview = {
     };
     issues: Array<{ ruleId: string; severity: "INFO" | "WARNING" | "ERROR"; taskCodes: string[]; message: string; suggestion: string }>;
   };
+  sourceWarnings?: Array<{ sourceFile: string; taskName?: string; message: string }>;
+  previewTasks: Array<{
+    id: string;
+    parentId: string | null;
+    taskCode: string;
+    taskName: string;
+    taskDescription: string;
+    ownerName: string;
+    startDate: string;
+    finishDate: string;
+    durationDays: number;
+    progress: number;
+    taskMode: string;
+    isMilestone: boolean;
+    predecessorExternalIds: string[];
+    match: {
+      currentTaskId: string | null;
+      rule: string;
+      confidence: number;
+      candidateTaskIds?: string[];
+      candidateTasks?: Array<{ id: string; taskCode: string; taskName: string }>;
+    } | null;
+  }>;
+  fieldMappings: Array<{ source: string; target: string; required: boolean; status: string }>;
+};
+
+type ResourceConflictTask = {
+  id: string;
+  projectId: string;
+  projectName: string;
+  taskCode: string;
+  taskName: string;
+  startDate: string;
+  finishDate: string;
+  isCurrentProject: boolean;
+};
+
+type ResourceConflictView = {
+  id: string;
+  ownerKey: string;
+  taskIds: string[];
+  startDate: string;
+  finishDate: string;
+  tasks: ResourceConflictTask[];
+};
+
+type ResourceScheduleCandidateView = {
+  id: string;
+  kind: "MINIMAL_CHANGE" | "EARLIEST_FINISH" | "ON_TIME";
+  title: string;
+  explanation: string;
+  applicable: boolean;
+  changes: Array<{
+    taskId: string;
+    startDate: string;
+    finishDate: string;
+    task: ResourceConflictTask | null;
+  }>;
+  remainingConflicts: ResourceConflictView[];
+  metrics: {
+    completionDate: string;
+    delayedDays: number;
+    movedTaskCount: number;
+    totalShiftDays: number;
+  };
+};
+
+type ResourceScheduleAnalysisView = {
+  revision: number;
+  snapshotHash: string;
+  conflicts: ResourceConflictView[];
+  candidates: ResourceScheduleCandidateView[];
 };
 
 export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPanelProps) => {
@@ -132,11 +218,18 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
   const [mppExportAvailable, setMppExportAvailable] = useState(false);
   const [importPreview, setImportPreview] = useState<ScheduleImportPreview | null>(null);
+  const [importMatchResolutions, setImportMatchResolutions] = useState<Record<string, string>>({});
   const [historySession, setHistorySession] = useState<{ projectId: string; state: GanttHistoryState }>({ projectId: "", state: emptyGanttHistoryState() });
   const [historyBusy, setHistoryBusy] = useState(false);
   const [historyFocusRequest, setHistoryFocusRequest] = useState<GanttHistoryFocusRequest | null>(null);
   const [operationError, setOperationError] = useState<{ title: string; message: string } | null>(null);
+  const [resourceAnalysis, setResourceAnalysis] = useState<ResourceScheduleAnalysisView | null>(null);
+  const [resourceDialogOpen, setResourceDialogOpen] = useState(false);
+  const [resourceAnalysisLoading, setResourceAnalysisLoading] = useState(false);
+  const [resourceApplyingKind, setResourceApplyingKind] = useState<ResourceScheduleCandidateView["kind"] | null>(null);
+  const historyFocusRequestIdRef = useRef(0);
   const importInputRef = useRef<HTMLInputElement>(null);
+  const processedAssistantAttachmentId = useRef<string | null>(null);
   const ganttCardRef = useRef<HTMLDivElement>(null);
   const [ganttPortalContainer, setGanttPortalContainer] = useState<HTMLElement | null>(null);
   const setGanttCardElement = useCallback((element: HTMLDivElement | null) => {
@@ -145,12 +238,26 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   }, []);
   const confirm = useConfirm();
   const { can } = usePermission();
+  const searchParams = useSearchParams();
 
   const readOnly = projectStatus === ProjectStatus.COMPLETED || projectStatus === ProjectStatus.VOIDED;
   const canView = can("project-gantt:view");
   const canCreate = can("project-gantt:create") && !readOnly;
   const canEdit = can("project-gantt:edit") && !readOnly;
   const canDelete = can("project-gantt:delete") && !readOnly;
+
+  const fetchResourceAnalysis = useCallback(async (includeCandidates = false) => {
+    try {
+      const data = await api.get<ResourceScheduleAnalysisView>(
+        `/api/projects/${projectId}/gantt-tasks/resource-schedule${includeCandidates ? "?includeCandidates=1" : ""}`,
+      );
+      setResourceAnalysis(data);
+      return data;
+    } catch {
+      setResourceAnalysis(null);
+      return null;
+    }
+  }, [projectId]);
 
   const fetchTasks = useCallback(async ({ showLoading = false, clearOnError = false }: FetchTasksOptions = {}) => {
     if (showLoading) {
@@ -160,6 +267,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     try {
       const data = await api.get<ProjectGanttTask[]>(`/api/projects/${projectId}/gantt-tasks`);
       setTasks(data);
+      void fetchResourceAnalysis(false);
       return data;
     } catch {
       if (clearOnError) {
@@ -171,7 +279,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
         setLoading(false);
       }
     }
-  }, [projectId]);
+  }, [fetchResourceAnalysis, projectId]);
 
   useEffect(() => {
     void Promise.resolve().then(() => fetchTasks({ showLoading: true, clearOnError: true }));
@@ -214,6 +322,51 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   }, []);
 
   const currentHistory = historySession.projectId === projectId ? historySession.state : emptyGanttHistoryState();
+  const resourceConflictMessagesByTaskId = useMemo(() => {
+    const messagesByTaskId = new Map<string, Set<string>>();
+    const taskById = new Map(tasks.map((task) => [task.id, task]));
+    const append = (taskId: string, message: string) => {
+      const messages = messagesByTaskId.get(taskId) ?? new Set<string>();
+      messages.add(message);
+      messagesByTaskId.set(taskId, messages);
+    };
+    (resourceAnalysis?.conflicts ?? []).forEach((conflict) => {
+      const ownerIdentity = conflict.ownerKey.replace(/^(account|person):/, "");
+      const ownerName = conflict.ownerKey.startsWith("account:")
+        ? projectMembers.find((member) => member.accountId === ownerIdentity)?.personName ?? "同一负责人"
+        : ownerIdentity || "同一负责人";
+      const involvedTasks = conflict.tasks
+        .map((task) => `${task.isCurrentProject ? "" : `${task.projectName} / `}${task.taskCode ? `${task.taskCode} · ` : ""}${task.taskName}`)
+        .join("、");
+      const message = `${ownerName}在 ${conflict.startDate} 至 ${conflict.finishDate} 的任务发生重叠：${involvedTasks}`;
+      conflict.tasks.filter((task) => task.isCurrentProject).forEach((task) => {
+        let taskId: string | null = task.id;
+        const visited = new Set<string>();
+        while (taskId && !visited.has(taskId)) {
+          visited.add(taskId);
+          append(taskId, message);
+          taskId = taskById.get(taskId)?.parentId ?? null;
+        }
+      });
+    });
+    return Object.fromEntries(
+      Array.from(messagesByTaskId.entries()).map(([taskId, messages]) => [taskId, Array.from(messages)]),
+    );
+  }, [projectMembers, resourceAnalysis?.conflicts, tasks]);
+  const importPreviewDepthById = useMemo(
+    () => ganttTaskDepths(importPreview?.previewTasks ?? []),
+    [importPreview?.previewTasks],
+  );
+  const unresolvedSuspiciousMatchCount = useMemo(() => (
+    (importPreview?.previewTasks ?? []).filter((task) => (
+      task.match?.rule === "AMBIGUOUS" && !importMatchResolutions[task.id]
+    )).length
+  ), [importMatchResolutions, importPreview?.previewTasks]);
+  const blockingImportErrorCount = useMemo(() => (
+    (importPreview?.analysis.issues ?? []).filter((issue) => (
+      issue.severity === "ERROR" && issue.ruleId !== "SCHEDULE_SUSPICIOUS_MATCH"
+    )).length
+  ), [importPreview?.analysis.issues]);
   const setCurrentHistory = (updater: (state: GanttHistoryState) => GanttHistoryState) => {
     setHistorySession((current) => ({
       projectId,
@@ -224,9 +377,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     const key = "ceastar:gantt-history-session:v1";
     const existing = window.sessionStorage.getItem(key);
     if (existing) return existing;
-    const created = typeof crypto.randomUUID === "function"
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const created = createClientId();
     window.sessionStorage.setItem(key, created);
     return created;
   };
@@ -235,7 +386,8 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     { sessionId: historySessionId(), label },
   );
   const signalHistoryTarget = (target: GanttHistoryFocusTarget) => {
-    setHistoryFocusRequest({ ...target, requestId: Date.now() + Math.random() });
+    historyFocusRequestIdRef.current += 1;
+    setHistoryFocusRequest({ ...target, requestId: historyFocusRequestIdRef.current });
   };
   const commitHistoryEntry = (entry: GanttHistoryEntry) => {
     setCurrentHistory((state) => pushGanttHistoryEntry(state, entry));
@@ -249,7 +401,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     const result = await action();
     void captureHistorySnapshot(`${label}:after`).then((after) => {
       commitHistoryEntry({
-        id: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+        id: createClientId(),
         kind: "SNAPSHOT",
         label,
         beforeSnapshotId: before.snapshotId,
@@ -265,13 +417,53 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     return result;
   };
 
-  const handleImportFile = async (file?: File) => {
-    if (!file) return;
+  const openResourceScheduleDialog = async () => {
+    setResourceDialogOpen(true);
+    setResourceAnalysisLoading(true);
+    const analysis = await fetchResourceAnalysis(true);
+    setResourceAnalysisLoading(false);
+    if (!analysis) {
+      setResourceDialogOpen(false);
+      setOperationError({ title: "资源排期分析失败", message: "无法读取当前资源冲突，请稍后重试" });
+    }
+  };
+
+  const applyResourceScheduleCandidate = async (candidate: ResourceScheduleCandidateView) => {
+    if (!resourceAnalysis || resourceApplyingKind) return;
+    setResourceApplyingKind(candidate.kind);
+    try {
+      await runWithSnapshotHistory(
+        `应用${candidate.title}资源排期`,
+        { taskIds: candidate.changes.map((change) => change.taskId) },
+        async () => {
+          await api.post(`/api/projects/${projectId}/gantt-tasks/resource-schedule`, {
+            candidateKind: candidate.kind,
+            revision: resourceAnalysis.revision,
+            snapshotHash: resourceAnalysis.snapshotHash,
+          });
+          await fetchTasks();
+        },
+      );
+      setResourceDialogOpen(false);
+    } catch (error) {
+      setOperationError({
+        title: "应用资源排期失败",
+        message: error instanceof Error ? error.message : "资源排期方案应用失败",
+      });
+      await fetchResourceAnalysis(true);
+    } finally {
+      setResourceApplyingKind(null);
+    }
+  };
+
+  const requestImportPreview = useCallback(async ({ file, attachmentId, fileName, hierarchyMode = "AUTO" }: { file?: File; attachmentId?: string; fileName: string; hierarchyMode?: "AUTO" | "FLAT" }) => {
     setImporting(true);
     try {
       const formData = new FormData();
-      formData.append("file", file);
+      if (file) formData.append("file", file);
+      if (attachmentId) formData.append("attachmentId", attachmentId);
       formData.append("mode", "PREVIEW");
+      formData.append("hierarchyMode", hierarchyMode);
       const response = await fetch(`/api/projects/${projectId}/gantt-tasks/import`, {
         method: "POST",
         headers: api.getToken() ? { Authorization: `Bearer ${api.getToken()}` } : {},
@@ -279,14 +471,28 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       });
       const body = await response.json();
       if (!response.ok || !body.success) throw new Error(body.error || "导入失败");
-      setImportPreview({ file, ...body.data });
+      setImportPreview({ file, attachmentId, fileName, hierarchyMode, ...body.data });
+      setImportMatchResolutions({});
     } catch (error) {
       setOperationError({ title: "计划文件解析失败", message: error instanceof Error ? error.message : "导入失败" });
     } finally {
       setImporting(false);
-      if (importInputRef.current) importInputRef.current.value = "";
     }
+  }, [projectId]);
+
+  const handleImportFile = async (file?: File) => {
+    if (!file) return;
+    await requestImportPreview({ file, fileName: file.name });
+    if (importInputRef.current) importInputRef.current.value = "";
   };
+
+  useEffect(() => {
+    const attachmentId = searchParams?.get("scheduleImportAttachmentId")?.trim() || "";
+    const hierarchyMode = searchParams?.get("scheduleImportHierarchyMode") === "FLAT" ? "FLAT" : "AUTO";
+    if (!attachmentId || processedAssistantAttachmentId.current === attachmentId) return;
+    processedAssistantAttachmentId.current = attachmentId;
+    void requestImportPreview({ attachmentId, fileName: "智能助手上传的排期文件", hierarchyMode });
+  }, [requestImportPreview, searchParams]);
 
   const applyImport = async (mode: "APPEND" | "MERGE") => {
     if (!importPreview) return;
@@ -297,8 +503,11 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
         { taskIds: [] },
         async () => {
           const formData = new FormData();
-          formData.append("file", importPreview.file);
+          if (importPreview.file) formData.append("file", importPreview.file);
+          if (importPreview.attachmentId) formData.append("attachmentId", importPreview.attachmentId);
+          formData.append("matchResolutions", JSON.stringify(importMatchResolutions));
           formData.append("mode", mode);
+          formData.append("hierarchyMode", importPreview.hierarchyMode);
           const response = await fetch(`/api/projects/${projectId}/gantt-tasks/import`, {
             method: "POST",
             headers: api.getToken() ? { Authorization: `Bearer ${api.getToken()}` } : {},
@@ -432,18 +641,18 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       });
       const deletedTaskCount = result.deletedTaskCount ?? 0;
       const detachedWeeklyItemCount = result.detachedWeeklyItemCount ?? 0;
-      const detachedRiskCount = result.detachedRiskCount ?? 0;
+      const affectedRiskCount = result.affectedRiskCount ?? result.detachedRiskCount ?? 0;
       if (result.deletionBatchId) {
         commitHistoryEntry({
-          id: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+          id: createClientId(),
           kind: "DELETION",
           label: "删除任务",
           deletionBatchId: result.deletionBatchId,
           target: { taskIds: deleteRoots.map((task) => task.id), anchorTaskId: deleteRoots[0]?.id },
         });
       }
-      if (deletedTaskCount > 0 && (detachedWeeklyItemCount > 0 || detachedRiskCount > 0)) {
-        alert("已删除 " + deletedTaskCount + " 条甘特任务，并解除 " + detachedWeeklyItemCount + " 条事项、" + detachedRiskCount + " 条风险关联；可在最近删除中撤销。");
+      if (deletedTaskCount > 0 && (detachedWeeklyItemCount > 0 || affectedRiskCount > 0)) {
+        alert("已删除 " + deletedTaskCount + " 条甘特任务，并更新 " + detachedWeeklyItemCount + " 条事项的任务关联、" + affectedRiskCount + " 条风险的受影响任务范围；风险与事项的关联保持不变，可撤销恢复。");
       }
     } catch (error) {
       alert(error instanceof Error ? error.message : "删除失败");
@@ -537,6 +746,16 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     }
   };
 
+  const handleReassignBranch = async (taskId: string, ownerMemberId: string | null) => {
+    await runWithSnapshotHistory("分支批量改派负责人", { taskIds: [taskId], columnKey: "owner" }, async () => {
+      await api.put(`/api/projects/${projectId}/gantt-tasks/${taskId}`, {
+        ownerMemberId,
+        ownerChangeMode: "BRANCH_REASSIGN",
+      });
+      await fetchTasks();
+    });
+  };
+
   const toggleFullScreen = async () => {
     const element = ganttCardRef.current;
     if (!element) return;
@@ -573,10 +792,11 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     setHistoryBusy(true);
     try {
       if (entry.kind === "SNAPSHOT") {
-        await api.post(`/api/projects/${projectId}/gantt-tasks/history/restore`, {
+        const result = await api.post<GanttRestoreResult>(`/api/projects/${projectId}/gantt-tasks/history/restore`, {
           snapshotId: entry.beforeSnapshotId,
           actionLabel: `撤销：${entry.label}`,
         });
+        if (result.warnings?.length) alert(`${result.message}\n\n注意：\n${result.warnings.join("\n")}`);
       } else {
         const result = await api.post<GanttRestoreResult>(`/api/projects/${projectId}/gantt-tasks/deletions/${entry.deletionBatchId}/restore`);
         if (result.warnings?.length) alert(`${result.message}\n\n注意：\n${result.warnings.join("\n")}`);
@@ -598,10 +818,11 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     setHistoryBusy(true);
     try {
       if (entry.kind === "SNAPSHOT") {
-        await api.post(`/api/projects/${projectId}/gantt-tasks/history/restore`, {
+        const result = await api.post<GanttRestoreResult>(`/api/projects/${projectId}/gantt-tasks/history/restore`, {
           snapshotId: entry.afterSnapshotId,
           actionLabel: `重做：${entry.label}`,
         });
+        if (result.warnings?.length) alert(`${result.message}\n\n注意：\n${result.warnings.join("\n")}`);
       } else {
         const result = await api.post<GanttDeleteResult>(`/api/projects/${projectId}/gantt-tasks/deletions/${entry.deletionBatchId}/redo`);
         if (result.deletionBatchId) {
@@ -672,10 +893,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
         <CardHeader className="pb-2">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <CardTitle className="text-sm">项目进度管理</CardTitle>
-              <CardDescription className="text-xs">
-                左侧维护任务信息，右侧按时间轴展示排期、紧前关系和关键路径
-              </CardDescription>
+              <CardTitle className="text-sm">项目WBS管理</CardTitle>
             </div>
             <div className="flex flex-wrap items-start justify-end gap-2">
               {range && (
@@ -694,8 +912,23 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   </div>
                 </div>
               )}
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className={cn(
+                  "h-8 text-xs",
+                  (resourceAnalysis?.conflicts?.length ?? 0) > 0 && "text-destructive hover:bg-destructive/8 hover:text-destructive",
+                )}
+                disabled={resourceAnalysisLoading || (resourceAnalysis?.conflicts?.length ?? 0) === 0}
+                onClick={() => void openResourceScheduleDialog()}
+                title={(resourceAnalysis?.conflicts?.length ?? 0) > 0 ? "查看资源冲突并选择优化排期方案" : "当前没有资源冲突"}
+              >
+                <WandSparkles className="size-3.5" />
+                资源优化 {resourceAnalysis?.conflicts?.length ?? 0}
+              </Button>
               {(canCreate || canEdit || canDelete) && (
-                <div className="flex items-center gap-2" role="group" aria-label="撤销与取消撤销">
+                <div className="flex items-center gap-2" role="group" aria-label="撤销与重做">
                   <Button
                     type="button"
                     size="icon"
@@ -766,7 +999,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   <input
                     ref={importInputRef}
                     type="file"
-                    accept=".mpp,.xml,.xlsx"
+                    accept=".mpp,.xml,.xls,.xlsx,.csv,.md,.txt,.docx,.pdf"
                     className="hidden"
                     onChange={(event) => void handleImportFile(event.target.files?.[0])}
                   />
@@ -845,21 +1078,94 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
             onPasteTasks={handlePasteTasks}
             onActionError={(message) => setOperationError({ title: "甘特任务操作失败", message })}
             onReorderTasks={handleReorderTasks}
+            onReassignBranch={handleReassignBranch}
             onUpdateTask={handleUpdateTask}
             projectId={projectId}
             projectMembers={projectMembers}
             reordering={reordering}
+            resourceConflictMessagesByTaskId={resourceConflictMessagesByTaskId}
             savingTaskId={savingTaskId}
             tasks={tasks}
           />
         </CardContent>
       </Card>
+      <Dialog open={resourceDialogOpen} onOpenChange={(open) => !resourceApplyingKind && setResourceDialogOpen(open)}>
+        <DialogContent container={fullScreen ? ganttPortalContainer : undefined} className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>资源冲突与优化排期</DialogTitle>
+            <DialogDescription>
+              系统只调整当前项目未开始的可排程叶子任务，不修改负责人、手工排程任务、进行中或已完成任务，也不会移动其他项目任务。历史升级保护的固定任务仅在你选择方案后调整日期，并继续保持固定；应用后可通过 WBS 顶部撤销按钮恢复。
+            </DialogDescription>
+          </DialogHeader>
+          {resourceAnalysisLoading ? (
+            <div className="py-10 text-center text-sm text-muted-foreground">正在计算候选方案...</div>
+          ) : (
+            <div className="max-h-[65vh] space-y-4 overflow-y-auto pr-1">
+              <div className="flex items-center gap-2 border-b border-border/70 pb-3 text-sm">
+                <TriangleAlert className="size-4 text-destructive" />
+                <span>检测到 {resourceAnalysis?.conflicts?.length ?? 0} 组资源冲突</span>
+              </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                {(resourceAnalysis?.candidates ?? []).map((candidate) => (
+                  <section key={candidate.kind} className="flex min-h-[220px] flex-col rounded-md border border-border/70 p-4">
+                    <div className="text-sm font-semibold">{candidate.title}</div>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">{candidate.explanation}</p>
+                    <dl className="mt-4 grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+                      <dt className="text-muted-foreground">调整任务</dt>
+                      <dd className="text-right font-medium">{candidate.metrics.movedTaskCount}</dd>
+                      <dt className="text-muted-foreground">累计移动</dt>
+                      <dd className="text-right font-medium">{candidate.metrics.totalShiftDays} 天</dd>
+                      <dt className="text-muted-foreground">预计完成</dt>
+                      <dd className="text-right font-medium">{candidate.metrics.completionDate || "-"}</dd>
+                      <dt className="text-muted-foreground">剩余冲突</dt>
+                      <dd className="text-right font-medium text-destructive">{candidate.remainingConflicts.length}</dd>
+                    </dl>
+                    {candidate.changes.length > 0 && (
+                      <div className="mt-3 border-t border-border/60 pt-3">
+                        <div className="text-[11px] font-medium text-muted-foreground">调整预览</div>
+                        <ul className="mt-1 space-y-1 text-[11px] leading-4">
+                          {candidate.changes.slice(0, 4).map((change) => (
+                            <li key={change.taskId} className="min-w-0">
+                              <span className="block truncate" title={`${change.task?.taskCode || ""} ${change.task?.taskName || "任务"}`}>
+                                {change.task?.taskCode || "任务"} · {change.task?.taskName || "未命名"}
+                              </span>
+                              <span className="text-muted-foreground">→ {change.startDate} 至 {change.finishDate}</span>
+                            </li>
+                          ))}
+                          {candidate.changes.length > 4 && <li className="text-muted-foreground">另有 {candidate.changes.length - 4} 个任务</li>}
+                        </ul>
+                      </div>
+                    )}
+                    {!candidate.applicable && (
+                      <p className="mt-3 text-xs leading-5 text-amber-500">
+                        手工排程、进行中任务或其他项目占用使此方案无法减少冲突，请先调整这些约束。
+                      </p>
+                    )}
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="mt-auto w-full"
+                      disabled={!candidate.applicable || Boolean(resourceApplyingKind)}
+                      onClick={() => void applyResourceScheduleCandidate(candidate)}
+                    >
+                      {resourceApplyingKind === candidate.kind ? "应用中..." : "应用此方案"}
+                    </Button>
+                  </section>
+                ))}
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="outline" disabled={Boolean(resourceApplyingKind)} onClick={() => setResourceDialogOpen(false)}>关闭</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={Boolean(importPreview)} onOpenChange={(open) => !open && !importing && setImportPreview(null)}>
-        <DialogContent container={fullScreen ? ganttPortalContainer : undefined} className="max-w-3xl">
+        <DialogContent container={fullScreen ? ganttPortalContainer : undefined} className="max-w-6xl">
           <DialogHeader>
             <DialogTitle>计划导入预览</DialogTitle>
             <DialogDescription>
-              已分析 {importPreview?.file.name}，当前计划尚未修改。系统导出的 Excel 包含隐藏数据库键，修改日期、名称等字段后可使用“合并更新”增量导入。
+              已分析 {importPreview?.fileName}，当前计划尚未修改。稳定任务 ID、外部 UID 或唯一 WBS 会自动匹配；仅名称相同的任务必须先人工确认，不能直接覆盖。
             </DialogDescription>
           </DialogHeader>
           {importPreview && (
@@ -881,28 +1187,112 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   </div>
                 ))}
               </div>
-              <div className="max-h-72 overflow-y-auto rounded-md border border-border">
-                {importPreview.analysis.issues.length === 0 ? (
-                  <div className="px-3 py-6 text-center text-xs text-muted-foreground">未发现结构性冲突</div>
-                ) : importPreview.analysis.issues.slice(0, 50).map((issue, index) => (
-                  <div key={`${issue.ruleId}-${index}`} className="border-b border-border px-3 py-2.5 last:border-b-0">
-                    <div className="flex items-center gap-2 text-xs">
-                      <span className={issue.severity === "ERROR" ? "font-semibold text-destructive" : "font-semibold text-amber-500"}>
-                        {issue.severity === "ERROR" ? "错误" : issue.severity === "WARNING" ? "警告" : "提示"}
-                      </span>
-                      <span className="font-medium">{issue.taskCodes.filter(Boolean).join("、") || "计划整体"}</span>
-                      <span>{issue.message}</span>
-                    </div>
-                    <div className="mt-1 text-[11px] text-muted-foreground">{issue.suggestion}</div>
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-transparent px-3 py-2">
+                <div>
+                  <div className="text-xs font-medium">导入层级方式</div>
+                  <div className="text-[11px] text-muted-foreground">切换后会重新生成完整预览，不会修改当前 WBS。</div>
+                </div>
+                <Select
+                  value={importPreview.hierarchyMode}
+                  onChange={(event) => {
+                    const hierarchyMode = event.target.value === "FLAT" ? "FLAT" : "AUTO";
+                    void requestImportPreview({
+                      file: importPreview.file,
+                      attachmentId: importPreview.attachmentId,
+                      fileName: importPreview.fileName,
+                      hierarchyMode,
+                    });
+                  }}
+                  className="h-8 w-[210px] text-xs"
+                  aria-label="导入层级方式"
+                  disabled={importing}
+                >
+                  <option value="AUTO">按文件分类生成 WBS 层级</option>
+                  <option value="FLAT">保持扁平任务</option>
+                </Select>
+              </div>
+              <div className="grid gap-4 lg:grid-cols-[minmax(0,1.7fr)_minmax(320px,1fr)]">
+                <div className="overflow-hidden rounded-md border border-border">
+                  <div className="grid grid-cols-[minmax(260px,1fr)_110px_110px_72px_110px] border-b border-border bg-muted/45 px-2 py-2 text-[11px] font-medium text-muted-foreground">
+                    <span>导入后的 WBS 层级预览</span><span>计划开始</span><span>计划完成</span><span>工期</span><span>匹配结果</span>
                   </div>
-                ))}
+                  <div className="max-h-80 overflow-auto">
+                    {importPreview.previewTasks.map((task) => (
+                      <div key={task.id} className="grid grid-cols-[minmax(260px,1fr)_110px_110px_72px_110px] items-center border-b border-border/70 px-2 py-1.5 text-xs last:border-b-0">
+                        <div className="min-w-0 truncate" style={{ paddingLeft: `${(importPreviewDepthById.get(task.id) ?? 0) * 18}px` }} title={`${task.taskCode} · ${task.taskName}`}>
+                          <span className="font-mono text-[10px] text-muted-foreground">{task.taskCode}</span>
+                          {task.isMilestone && <span className="mx-1 text-amber-400">★</span>}
+                          <span className="ml-1 font-medium">{task.taskName}</span>
+                        </div>
+                        <span className="font-mono text-[11px]">{task.startDate || "-"}</span>
+                        <span className="font-mono text-[11px]">{task.finishDate || "-"}</span>
+                        <span>{task.durationDays} 天</span>
+                        {task.match?.rule === "AMBIGUOUS" ? (
+                          <select
+                            value={importMatchResolutions[task.id] ?? ""}
+                            onChange={(event) => setImportMatchResolutions((current) => ({ ...current, [task.id]: event.target.value }))}
+                            className="h-7 min-w-0 rounded border border-destructive/45 bg-background px-1 text-[11px] text-foreground"
+                            aria-label={`选择${task.taskName}的匹配方式`}
+                          >
+                            <option value="">请选择</option>
+                            <option value="__new__">作为新任务</option>
+                            {(task.match.candidateTasks ?? []).map((candidate) => (
+                              <option key={candidate.id} value={candidate.id}>{candidate.taskCode} · {candidate.taskName}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className={cn("truncate text-[11px]", task.match?.currentTaskId ? "text-primary" : "text-emerald-500")}>
+                            {task.match?.currentTaskId ? "更新现有任务" : "新增任务"}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  <div className="overflow-hidden rounded-md border border-border">
+                    <div className="border-b border-border bg-muted/45 px-3 py-2 text-xs font-medium">字段映射</div>
+                    {importPreview.fieldMappings.map((mapping) => (
+                      <div key={`${mapping.source}-${mapping.target}`} className="grid grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border/70 px-3 py-2 text-[11px] last:border-b-0">
+                        <span className="truncate text-muted-foreground" title={mapping.source}>{mapping.source}</span>
+                        <span>→</span>
+                        <span className="truncate" title={mapping.target}>{mapping.target}{mapping.required ? " *" : ""}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="max-h-52 overflow-y-auto rounded-md border border-border">
+                    {(importPreview.sourceWarnings ?? []).map((warning, index) => (
+                      <div key={`source-warning-${index}`} className="border-b border-border px-3 py-2.5 last:border-b-0">
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="font-semibold text-amber-500">源文件提示</span>
+                          <span className="font-medium">{warning.taskName || warning.sourceFile}</span>
+                          <span>{warning.message}</span>
+                        </div>
+                      </div>
+                    ))}
+                    {importPreview.analysis.issues.length === 0 && (importPreview.sourceWarnings ?? []).length === 0 ? (
+                      <div className="px-3 py-6 text-center text-xs text-muted-foreground">未发现结构性冲突</div>
+                    ) : importPreview.analysis.issues.slice(0, 50).map((issue, index) => (
+                      <div key={`${issue.ruleId}-${index}`} className="border-b border-border px-3 py-2.5 last:border-b-0">
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className={issue.severity === "ERROR" ? "font-semibold text-destructive" : "font-semibold text-amber-500"}>
+                            {issue.severity === "ERROR" ? "错误" : issue.severity === "WARNING" ? "警告" : "提示"}
+                          </span>
+                          <span className="font-medium">{issue.taskCodes.filter(Boolean).join("、") || "计划整体"}</span>
+                          <span>{issue.message}</span>
+                        </div>
+                        <div className="mt-1 text-[11px] text-muted-foreground">{issue.suggestion}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
           )}
           <DialogFooter>
             <Button variant="ghost" disabled={importing} onClick={() => setImportPreview(null)}>取消</Button>
-            <Button variant="outline" disabled={importing} onClick={() => void applyImport("APPEND")}>追加为新任务</Button>
-            <Button disabled={importing || Boolean(importPreview?.analysis.summary.errors)} onClick={() => void applyImport("MERGE")}>
+            <Button variant="outline" disabled={importing || blockingImportErrorCount > 0} onClick={() => void applyImport("APPEND")}>追加为新任务</Button>
+            <Button disabled={importing || blockingImportErrorCount > 0 || unresolvedSuspiciousMatchCount > 0} onClick={() => void applyImport("MERGE")}>
               {importing ? "正在应用..." : "合并更新"}
             </Button>
           </DialogFooter>

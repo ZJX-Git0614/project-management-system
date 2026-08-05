@@ -9,6 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Table, TableActionButton, TableBody, TableCell, TableEmptyState, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 
@@ -280,10 +281,20 @@ export function SystemBackupPanel() {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("confirmText", "恢复数据库");
-      const result = await api.upload<{ message: string }>("/api/admin/system-data/backups/restore", formData);
+      const result = await api.upload<{
+        message: string;
+        sessionPreserved: boolean;
+        token?: string;
+        user?: Parameters<typeof api.saveAuth>[1];
+      }>("/api/admin/system-data/backups/restore", formData);
       alert(result.message);
-      api.clearAuth();
-      window.location.replace("/login?restored=1");
+      if (result.sessionPreserved && result.token && result.user) {
+        api.saveAuth(result.token, result.user);
+        window.location.reload();
+      } else {
+        api.clearAuth();
+        window.location.replace("/login?restored=1");
+      }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "数据库恢复失败");
     } finally {
@@ -433,40 +444,38 @@ export function SystemBackupPanel() {
           </div>
         </div>
 
-        <div className="overflow-x-auto rounded-md border border-border">
-          <table className="w-full min-w-[900px] text-left text-xs">
-            <thead className="bg-muted/40 text-muted-foreground">
-              <tr>
-                <th className="px-3 py-2">备份时间</th><th className="px-3 py-2">方式</th><th className="px-3 py-2">状态</th>
-                <th className="px-3 py-2">大小</th><th className="px-3 py-2">云盘</th><th className="px-3 py-2">操作人</th><th className="px-3 py-2 text-right">文件</th>
-              </tr>
-            </thead>
-            <tbody>
+        <Table className="min-w-[900px]">
+            <TableHeader>
+              <TableRow>
+                <TableHead>备份时间</TableHead><TableHead>方式</TableHead><TableHead>状态</TableHead>
+                <TableHead>大小</TableHead><TableHead>云盘</TableHead><TableHead>操作人</TableHead><TableHead className="text-right">文件</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {data?.records.map((record) => (
-                <tr key={record.id} className="border-t border-border odd:bg-background even:bg-muted/10">
-                  <td className="px-3 py-2 tabular-nums">{formatDateTime(record.createdAt)}</td>
-                  <td className="px-3 py-2">{record.triggerMode === "AUTOMATIC" ? "自动" : "手动"}</td>
-                  <td className={cn("px-3 py-2", record.status === "FAILED" && "text-destructive", record.status === "PARTIAL" && "text-amber-500")}>{statusLabel[record.status] || record.status}</td>
-                  <td className="px-3 py-2 tabular-nums">{formatBytes(record.sizeBytes)}</td>
-                  <td className="px-3 py-2">{statusLabel[record.cloudStatus] || record.cloudStatus}</td>
-                  <td className="px-3 py-2">{record.operator || "系统"}</td>
-                  <td className="px-3 py-2">
+                <TableRow key={record.id}>
+                  <TableCell className="tabular-nums">{formatDateTime(record.createdAt)}</TableCell>
+                  <TableCell>{record.triggerMode === "AUTOMATIC" ? "自动" : "手动"}</TableCell>
+                  <TableCell className={cn(record.status === "FAILED" && "text-destructive", record.status === "PARTIAL" && "text-amber-500")}>{statusLabel[record.status] || record.status}</TableCell>
+                  <TableCell className="tabular-nums">{formatBytes(record.sizeBytes)}</TableCell>
+                  <TableCell>{statusLabel[record.cloudStatus] || record.cloudStatus}</TableCell>
+                  <TableCell>{record.operator || "系统"}</TableCell>
+                  <TableCell>
                     <div className="flex justify-end gap-1">
-                      <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-[11px]" disabled={!record.databaseFileName} onClick={() => void downloadBackup(record, "database")}><Download className="size-3" />数据库</Button>
-                      <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-[11px]" disabled={!record.documentArchiveFileName} onClick={() => void downloadBackup(record, "documents")}><Download className="size-3" />文档</Button>
+                      <TableActionButton disabled={!record.databaseFileName} onClick={() => void downloadBackup(record, "database")}><Download className="size-3" />数据库</TableActionButton>
+                      <TableActionButton disabled={!record.documentArchiveFileName} onClick={() => void downloadBackup(record, "documents")}><Download className="size-3" />文档</TableActionButton>
                     </div>
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               ))}
-              {!loading && data?.records.length === 0 && <tr><td colSpan={7} className="h-20 text-center text-muted-foreground">暂无备份记录</td></tr>}
-            </tbody>
-          </table>
-        </div>
+              {!loading && data?.records.length === 0 && <TableEmptyState colSpan={7}>暂无备份记录</TableEmptyState>}
+            </TableBody>
+        </Table>
         {(data?.pagination.totalPages ?? 1) > 1 && (
           <div className="flex items-center justify-end gap-2 text-xs">
-            <Button type="button" size="sm" variant="outline" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>上一页</Button>
+            <TableActionButton disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>上一页</TableActionButton>
             <span className="min-w-16 text-center text-muted-foreground">{page} / {data?.pagination.totalPages ?? 1}</span>
-            <Button type="button" size="sm" variant="outline" disabled={page >= (data?.pagination.totalPages ?? 1) || loading} onClick={() => setPage((current) => current + 1)}>下一页</Button>
+            <TableActionButton disabled={page >= (data?.pagination.totalPages ?? 1) || loading} onClick={() => setPage((current) => current + 1)}>下一页</TableActionButton>
           </div>
         )}
       </CardContent>

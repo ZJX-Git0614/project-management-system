@@ -2,7 +2,12 @@ import * as XLSX from "@e965/xlsx";
 import { describe, expect, it } from "vitest";
 
 import { parseGanttExcel } from "@/lib/gantt-file-transfer";
-import { convertScheduleFile, mergeScheduleFiles } from "@/lib/schedule-file-merge";
+import {
+  convertScheduleFile,
+  mergeScheduleFiles,
+  orderImportedScheduleTasksByHierarchy,
+  parseScheduleImportSource,
+} from "@/lib/schedule-file-merge";
 
 const buildFrontendWorkbook = () => {
   const workbook = XLSX.utils.book_new();
@@ -96,5 +101,74 @@ describe("schedule file merge", () => {
       { fileName: "计划一.md", buffer: source },
       { fileName: "计划二.md", buffer: source },
     ], "")).rejects.toThrow("当前项目未设置开始日期");
+  });
+
+  it("parses a single Markdown schedule directly for WBS import preview", async () => {
+    const result = await parseScheduleImportSource({
+      fileName: "实施排期.md",
+      buffer: Buffer.from([
+        "| 任务编号 | 任务名称 | 计划开始 | 工期 | 依赖 |",
+        "| --- | --- | --- | --- | --- |",
+        "| A-01 | 需求确认 | 2026-08-05 | 2 | 无 |",
+        "| A-02 | 方案设计 | 2026-08-07 | 3 | A-01 |",
+      ].join("\n")),
+    }, "2026-08-01", { hierarchyMode: "FLAT" });
+
+    expect(result.tasks).toHaveLength(2);
+    expect(result.tasks[1]).toMatchObject({ taskName: "方案设计", predecessorExternalIds: ["A-01"] });
+  });
+
+  it("retains owners from a generic CSV and orders parents before children", async () => {
+    const result = await parseScheduleImportSource({
+      fileName: "排期.csv",
+      buffer: Buffer.from([
+        "任务ID,父任务ID,任务名称,负责人,计划开始,工期",
+        "child,parent,子任务,张三,2026-08-06,1",
+        "parent,,父任务,李四,2026-08-05,2",
+      ].join("\n")),
+    }, "2026-08-01", { hierarchyMode: "FLAT" });
+
+    expect(result.tasks.find((task) => task.externalId === "child")?.ownerName).toBe("张三");
+    expect(orderImportedScheduleTasksByHierarchy(result.tasks).map((task) => task.externalId)).toEqual(["parent", "child"]);
+  });
+
+  it("parses an extracted DOCX numbered task list and retains recognizable fields", async () => {
+    const extractedText = [
+      "# 实施阶段",
+      "1. 需求确认 | 开始：2026-08-05 工期：2天 负责人：张三 进度：20%",
+      "2. 方案设计 | 开始：2026-08-07 工期：3天 依赖：document-row-2",
+    ].join("\n");
+    const result = await parseScheduleImportSource({
+      fileName: "实施排期.docx",
+      buffer: Buffer.from("placeholder"),
+      extractedText,
+    }, "2026-08-01", { hierarchyMode: "FLAT" });
+
+    expect(result.tasks).toHaveLength(2);
+    expect(result.tasks[0]).toMatchObject({ taskName: "需求确认", ownerName: "张三", progress: 20, durationDays: 2 });
+    expect(result.tasks[1].predecessorExternalIds).toEqual(["document-row-2"]);
+  });
+
+  it("generates WBS parent nodes from generic category paths unless flat mode is selected", async () => {
+    const result = await parseScheduleImportSource({
+      fileName: "模块排期.csv",
+      buffer: Buffer.from([
+        "模块,子模块,任务名称,计划开始,工期",
+        "平台,权限,角色配置,2026-08-05,2",
+        "平台,权限,账号授权,2026-08-07,1",
+      ].join("\n")),
+    }, "2026-08-01");
+
+    expect(result.tasks.map((task) => task.taskName)).toEqual(["平台", "权限", "角色配置", "账号授权"]);
+    const permission = result.tasks.find((task) => task.taskName === "权限");
+    expect(result.tasks.find((task) => task.taskName === "角色配置")?.parentExternalId).toBe(permission?.externalId);
+  });
+
+  it("blocks a PDF import when no text was extracted", async () => {
+    await expect(parseScheduleImportSource({
+      fileName: "扫描排期.pdf",
+      buffer: Buffer.from("%PDF"),
+      extractedText: "",
+    }, "2026-08-01")).rejects.toThrow("OCR");
   });
 });

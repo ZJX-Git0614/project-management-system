@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import { createContext, type FocusEvent, type KeyboardEvent, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { ClipboardPaste, Copy, Pencil, Plus, Redo2, Scissors, Trash2, Undo2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import {
   Table,
+  TableActionButton,
   TableBody,
   TableCell,
   TableHead,
@@ -28,7 +29,10 @@ import type {
   ProjectBudgetCategory,
   ProjectBudgetItem,
 } from "@/domain/models";
-import { TableContextMenu, useTableContextMenu } from "@/components/table-context-menu";
+import { TableContextMenu, type TableContextMenuAction, useTableContextMenu } from "@/components/table-context-menu";
+import { cn } from "@/lib/utils";
+import { useModuleHistory } from "@/lib/use-module-history";
+import { useCommitOnOutsidePointer } from "@/lib/use-commit-on-outside-pointer";
 
 interface ProjectBudgetPanelProps {
   projectId: string;
@@ -38,6 +42,127 @@ interface ProjectBudgetPanelProps {
 
 type CategoryWithMeta = ProjectBudgetCategory & {
   items: ProjectBudgetItem[];
+};
+
+type RunBudgetAction = <T>(label: string, targetIds: string[], action: () => Promise<T>) => Promise<T>;
+const BudgetHistoryContext = createContext<RunBudgetAction>(async (_label, _targetIds, action) => action());
+
+const handleBudgetRowKeyDown = (
+  event: KeyboardEvent<HTMLElement>,
+  cancel: () => void,
+) => {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    cancel();
+    return;
+  }
+  if (event.key !== "Enter") return;
+  if (event.target instanceof HTMLTextAreaElement && event.shiftKey) return;
+  event.preventDefault();
+  if (event.target instanceof HTMLElement) event.target.blur();
+};
+
+const handleBudgetRowBlur = (event: FocusEvent<HTMLElement>, submit: () => void | Promise<void>) => {
+  const nextTarget = event.relatedTarget instanceof HTMLElement ? event.relatedTarget : null;
+  if (nextTarget && event.currentTarget.contains(nextTarget)) return;
+  void submit();
+};
+
+type BudgetClipboard = {
+  projectId: string;
+  categoryId: string;
+  mode: "COPY" | "MOVE";
+  itemId: string;
+};
+
+interface BudgetStructureResult {
+  categoryId: string;
+  createdItemIds: string[];
+  movedItemIds: string[];
+}
+
+const useBudgetRowStructure = ({
+  category,
+  projectId,
+  canCreate,
+  canEdit,
+  onChanged,
+}: {
+  category: CategoryWithMeta;
+  projectId: string;
+  canCreate: boolean;
+  canEdit: boolean;
+  onChanged: () => void | Promise<void>;
+}) => {
+  const runAction = useContext(BudgetHistoryContext);
+  const [clipboard, setClipboard] = useState<BudgetClipboard | null>(null);
+
+  useEffect(() => {
+    setClipboard(null);
+  }, [category.id, projectId]);
+
+  const copyOrCut = (mode: BudgetClipboard["mode"], itemId: string) => {
+    setClipboard({ projectId, categoryId: category.id, mode, itemId });
+  };
+
+  const performStructure = async (
+    operation: "INSERT" | "COPY" | "MOVE",
+    anchorItemId: string,
+    position: "BEFORE" | "AFTER",
+  ) => {
+    const sourceItemIds = operation === "INSERT" ? [] : clipboard ? [clipboard.itemId] : [];
+    if (operation !== "INSERT" && (!clipboard || clipboard.projectId !== projectId || clipboard.categoryId !== category.id)) return;
+    if (operation === "MOVE" && sourceItemIds.includes(anchorItemId)) {
+      alert("剪切的预算条目不能粘贴到自身，请选择其他目标行");
+      return;
+    }
+    const label = operation === "INSERT" ? "插入预算条目" : operation === "COPY" ? "复制粘贴预算条目" : "剪切移动预算条目";
+    const historyTargets = [...sourceItemIds];
+    try {
+      await runAction(label, historyTargets, async () => {
+        const response = await api.post<BudgetStructureResult>(`/api/projects/${projectId}/budget-items/structure`, {
+          operation,
+          anchorItemId,
+          position,
+          sourceItemIds,
+          count: 1,
+        });
+        historyTargets.push(...response.createdItemIds);
+        return response;
+      });
+      if (operation === "MOVE") setClipboard(null);
+      await onChanged();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : `${label}失败`);
+    }
+  };
+
+  const actionsFor = (item: ProjectBudgetItem): TableContextMenuAction[] => [
+    ...(canEdit ? [
+      { label: "剪切", icon: <Scissors className="size-4" />, onSelect: () => copyOrCut("MOVE", item.id) },
+      { label: "复制", icon: <Copy className="size-4" />, onSelect: () => copyOrCut("COPY", item.id) },
+      {
+        label: "粘贴",
+        icon: <ClipboardPaste className="size-4" />,
+        disabled: !clipboard || clipboard.categoryId !== category.id,
+        children: [
+          { label: "粘贴到行上方", disabled: clipboard?.mode === "MOVE" && clipboard.itemId === item.id, onSelect: () => performStructure(clipboard?.mode ?? "COPY", item.id, "BEFORE") },
+          { label: "粘贴到行下方", disabled: clipboard?.mode === "MOVE" && clipboard.itemId === item.id, onSelect: () => performStructure(clipboard?.mode ?? "COPY", item.id, "AFTER") },
+        ],
+      },
+    ] : []),
+    ...(canCreate ? [{
+      label: "插入",
+      icon: <Plus className="size-4" />,
+      separatorBefore: true,
+      children: [
+        { label: "在上方插入 1 条预算", onSelect: () => performStructure("INSERT", item.id, "BEFORE") },
+        { label: "在下方插入 1 条预算", onSelect: () => performStructure("INSERT", item.id, "AFTER") },
+      ],
+    }] : []),
+  ];
+
+  return { actionsFor };
 };
 
 const formatAmount = (n: number | undefined | null) => {
@@ -82,6 +207,14 @@ const calcCategorySubtotal = (cat: CategoryWithMeta, contractAmount: number): nu
   return categorySubtotal(cat);
 };
 
+const budgetItemLabel = (item: ProjectBudgetItem) => item.title || [item.person, item.groupName].filter(Boolean).join(" · ") || "预算条目";
+const budgetDeleteMessage = (item: ProjectBudgetItem) => {
+  const target = budgetItemLabel(item);
+  if (!item.linkedTasks?.length) return `确认删除「${target}」？`;
+  const links = item.linkedTasks.map((task) => `${task.taskCode} · ${task.taskName}`).join("、");
+  return `确认删除「${target}」？\n当前与以下 WBS 任务存在关联：${links}\n删除后这些任务将自动改为不关联状态；撤销删除可恢复关联。`;
+};
+
 // ================ 主组件 ================
 export const ProjectBudgetPanel = ({
   projectId,
@@ -102,8 +235,8 @@ export const ProjectBudgetPanel = ({
   const canDeleteItem = can("project-budget:delete") && !readOnly;
   const canManageCategory = can("project-budget:category-manage") && !readOnly;
 
-  const fetchAll = useCallback(async () => {
-    setLoading(true);
+  const fetchAll = useCallback(async (showLoading = true) => {
+    if (showLoading) setLoading(true);
     setLoadError(null);
     try {
       const [cats, items] = await Promise.all([
@@ -123,13 +256,29 @@ export const ProjectBudgetPanel = ({
       setLoadError(e instanceof Error ? e.message : "加载预算失败");
       setCategories([]);
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   }, [projectId]);
 
   useEffect(() => {
-    void Promise.resolve().then(fetchAll);
+    void Promise.resolve().then(() => fetchAll());
   }, [fetchAll]);
+
+  const {
+    undo,
+    redo,
+    runWithHistory,
+    undoEntry,
+    redoEntry,
+    historyBusy,
+  } = useModuleHistory({
+    projectId,
+    module: "PROJECT_BUDGET",
+    enabled: !readOnly,
+    onRestored: () => fetchAll(false),
+    onError: (errorTitle, message) => alert(`${errorTitle}\n${message}`),
+    onWarning: (message) => alert(message),
+  });
 
   // RATE 分类：当前费率（currentRate）按"分类名 → 费率"映射；用于 KPI 计算
   // RATE 分类下约定只放 1 条档位条目，取第一条的 currentRate
@@ -198,8 +347,21 @@ export const ProjectBudgetPanel = ({
   }
 
   return (
+    <BudgetHistoryContext.Provider value={runWithHistory}>
     <div className="space-y-4">
-      <BudgetSummary summary={summary} />
+      <BudgetSummary
+        summary={summary}
+        historyControls={(canCreateItem || canEditItem || canDeleteItem || canManageCategory) ? (
+          <div className="flex items-center gap-2" role="group" aria-label="撤销与重做">
+            <Button type="button" size="icon" variant="outline" className="size-8" disabled={!undoEntry || historyBusy} onClick={() => void undo()} title={undoEntry ? `撤销：${undoEntry.label}` : "没有可撤销的操作"} aria-label="撤销">
+              <Undo2 className="size-3.5" />
+            </Button>
+            <Button type="button" size="icon" variant="outline" className="size-8" disabled={!redoEntry || historyBusy} onClick={() => void redo()} title={redoEntry ? `重做：${redoEntry.label}` : "没有可重做的操作"} aria-label="重做">
+              <Redo2 className="size-3.5" />
+            </Button>
+          </div>
+        ) : null}
+      />
 
       <CategoriesSection
         categories={categories}
@@ -209,16 +371,18 @@ export const ProjectBudgetPanel = ({
         canEditItem={canEditItem}
         canDeleteItem={canDeleteItem}
         canManageCategory={canManageCategory}
-        onChanged={() => void fetchAll()}
+        onChanged={() => fetchAll(false)}
         confirm={confirm}
       />
     </div>
+    </BudgetHistoryContext.Provider>
   );
 };
 
 // ================ 预算总览 ================
 const BudgetSummary = ({
   summary,
+  historyControls,
 }: {
   summary: {
     manpower: number;
@@ -236,6 +400,7 @@ const BudgetSummary = ({
     auditDeductionRate: number;
     riskReserveRate: number;
   };
+  historyControls?: React.ReactNode;
 }) => {
   const kpis = [
     { label: "合同金额", value: formatAmount(summary.contract), tone: "text-slate-900" },
@@ -253,7 +418,10 @@ const BudgetSummary = ({
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-sm">预算总览</CardTitle>
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="text-sm">预算总览</CardTitle>
+          {historyControls}
+        </div>
       </CardHeader>
       <CardContent>
         <div className="grid grid-cols-2 gap-2 md:grid-cols-3 lg:grid-cols-5">
@@ -366,6 +534,7 @@ const NewCategoryButton = ({
   projectId: string;
   onCreated: () => void | Promise<void>;
 }) => {
+  const runAction = useContext(BudgetHistoryContext);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [kind, setKind] = useState<BudgetCategoryKind>(BudgetCategoryKind.MANPOWER);
@@ -380,11 +549,15 @@ const NewCategoryButton = ({
     }
     setSubmitting(true);
     try {
-      await api.post(`/api/projects/${projectId}/budget-categories`, {
-        name: name.trim(),
-        kind,
-        description: description.trim(),
-        sortOrder: Number(sortOrder) || 0,
+      const targetIds: string[] = [];
+      await runAction(`新增预算分类「${name.trim()}」`, targetIds, async () => {
+        const created = await api.post<ProjectBudgetCategory>(`/api/projects/${projectId}/budget-categories`, {
+          name: name.trim(),
+          kind,
+          description: description.trim(),
+          sortOrder: Number(sortOrder) || 0,
+        });
+        targetIds.push(created.id);
       });
       setOpen(false);
       setName("");
@@ -491,14 +664,16 @@ const CategoryCard = ({
   onChanged: () => void | Promise<void>;
   confirm: (msg: string) => Promise<boolean>;
 }) => {
+  const runAction = useContext(BudgetHistoryContext);
   const [editOpen, setEditOpen] = useState(false);
   const subtotal = calcCategorySubtotal(category, (projectAmountWan || 0) * 10000);
-  const isRateCategory = category.kind === BudgetCategoryKind.RATE;
 
   const handleDelete = async () => {
     if (!(await confirm(`确认删除分类「${category.name}」？下挂条目不会被自动删除，请先清理`))) return;
     try {
-      await api.delete(`/api/projects/${projectId}/budget-categories/${category.id}`);
+      await runAction(`删除预算分类「${category.name}」`, [category.id], () => (
+        api.delete(`/api/projects/${projectId}/budget-categories/${category.id}`)
+      ));
       await onChanged();
     } catch (e) {
       alert(e instanceof Error ? e.message : "删除分类失败");
@@ -523,7 +698,7 @@ const CategoryCard = ({
               <div className="text-[10px] text-muted-foreground">分类小计</div>
               <div className="font-semibold tabular-nums">{formatAmount(subtotal)}</div>
             </div>
-            {canManageCategory && !isRateCategory && (
+            {canManageCategory && (
               <>
                 <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setEditOpen(true)}>
                   编辑分类
@@ -579,6 +754,7 @@ const CategoryCard = ({
           <RateTable
             category={category}
             projectId={projectId}
+            canCreate={canCreateItem}
             canEdit={canEditItem}
             canDelete={canDeleteItem}
             onChanged={onChanged}
@@ -612,6 +788,7 @@ const EditCategoryDialog = ({
   onClose: () => void;
   onSaved: () => Promise<void>;
 }) => {
+  const runAction = useContext(BudgetHistoryContext);
   const [name, setName] = useState(category.name);
   const [kind, setKind] = useState<BudgetCategoryKind>(category.kind as BudgetCategoryKind);
   const [description, setDescription] = useState(category.description);
@@ -625,12 +802,14 @@ const EditCategoryDialog = ({
     }
     setSubmitting(true);
     try {
-      await api.put(`/api/projects/${projectId}/budget-categories/${category.id}`, {
-        name: name.trim(),
-        kind,
-        description: description.trim(),
-        sortOrder: Number(sortOrder) || 0,
-      });
+      await runAction(`编辑预算分类「${category.name}」`, [category.id], () => (
+        api.put(`/api/projects/${projectId}/budget-categories/${category.id}`, {
+          name: name.trim(),
+          kind,
+          description: description.trim(),
+          sortOrder: Number(sortOrder) || 0,
+        })
+      ));
       await onSaved();
     } catch (e) {
       alert(e instanceof Error ? e.message : "保存失败");
@@ -726,19 +905,34 @@ const ManpowerTable = ({
   onChanged: () => void | Promise<void>;
   confirm: (msg: string) => Promise<boolean>;
 }) => {
+  const runAction = useContext(BudgetHistoryContext);
   const [newRow, setNewRow] = useState<ManpowerDraft | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editRow, setEditRow] = useState<ManpowerDraft | null>(null);
-  const [busy, setBusy] = useState(false);
+  const submittingRef = useRef(false);
+  const [invalidFields, setInvalidFields] = useState<string[]>([]);
   const { menu, openContextMenu, closeContextMenu } = useTableContextMenu();
+  const activeEditRowRef = useRef<HTMLTableRowElement>(null);
+  const { actionsFor: structureActionsFor } = useBudgetRowStructure({
+    category,
+    projectId,
+    canCreate,
+    canEdit,
+    onChanged,
+  });
 
   const startCreate = () => {
+    setInvalidFields([]);
     setNewRow({ ...EMPTY_MP });
     setEditingId(null);
     setEditRow(null);
   };
-  const cancelCreate = () => setNewRow(null);
+  const cancelCreate = () => {
+    setInvalidFields([]);
+    setNewRow(null);
+  };
   const startEdit = (it: ProjectBudgetItem) => {
+    setInvalidFields([]);
     setEditingId(it.id);
     setEditRow({
       groupName: it.groupName,
@@ -750,69 +944,81 @@ const ManpowerTable = ({
     setNewRow(null);
   };
   const cancelEdit = () => {
+    setInvalidFields([]);
     setEditingId(null);
     setEditRow(null);
   };
 
   const submitCreate = async () => {
-    if (!newRow) return;
-    if (!newRow.groupName.trim() || !newRow.person.trim()) {
-      alert("组别与人员不能为空");
-      return;
-    }
-    setBusy(true);
+    if (!newRow || submittingRef.current) return;
+    const errors = [!newRow.groupName.trim() ? "groupName" : "", !newRow.person.trim() ? "person" : ""].filter(Boolean);
+    setInvalidFields(errors);
+    if (errors.length > 0) return;
+    submittingRef.current = true;
     try {
-      await api.post(`/api/projects/${projectId}/budget-items`, {
-        categoryId: category.id,
-        ...newRow,
+      const targetIds: string[] = [];
+      await runAction(`新增预算条目「${newRow.person}」`, targetIds, async () => {
+        const created = await api.post<ProjectBudgetItem>(`/api/projects/${projectId}/budget-items`, {
+          categoryId: category.id,
+          ...newRow,
+        });
+        targetIds.push(created.id);
       });
       setNewRow(null);
       await onChanged();
     } catch (e) {
       alert(e instanceof Error ? e.message : "保存失败");
     } finally {
-      setBusy(false);
+      submittingRef.current = false;
     }
   };
 
   const submitEdit = async () => {
-    if (!editingId || !editRow) return;
-    if (!editRow.groupName.trim() || !editRow.person.trim()) {
-      alert("组别与人员不能为空");
-      return;
-    }
-    setBusy(true);
+    if (!editingId || !editRow || submittingRef.current) return;
+    const errors = [!editRow.groupName.trim() ? "groupName" : "", !editRow.person.trim() ? "person" : ""].filter(Boolean);
+    setInvalidFields(errors);
+    if (errors.length > 0) return;
+    submittingRef.current = true;
     try {
-      await api.put(`/api/projects/${projectId}/budget-items/${editingId}`, {
-        categoryId: category.id,
-        ...editRow,
-      });
+      await runAction(`编辑预算条目「${editRow.person}」`, [editingId], () => (
+        api.put(`/api/projects/${projectId}/budget-items/${editingId}`, {
+          categoryId: category.id,
+          ...editRow,
+        })
+      ));
       setEditingId(null);
       setEditRow(null);
       await onChanged();
     } catch (e) {
       alert(e instanceof Error ? e.message : "保存失败");
     } finally {
-      setBusy(false);
+      submittingRef.current = false;
     }
   };
 
+  useCommitOnOutsidePointer(Boolean(newRow || editingId), activeEditRowRef, () => (
+    newRow ? submitCreate() : submitEdit()
+  ));
+
   const handleDelete = async (it: ProjectBudgetItem) => {
-    if (!(await confirm(`确认删除「${it.person}（${it.groupName}）」？`))) return;
+    if (!(await confirm(budgetDeleteMessage(it)))) return;
     try {
-      await api.delete(`/api/projects/${projectId}/budget-items/${it.id}`);
+      await runAction(`删除预算条目「${budgetItemLabel(it)}」`, [it.id], () => (
+        api.delete(`/api/projects/${projectId}/budget-items/${it.id}`)
+      ));
       await onChanged();
     } catch (e) {
       alert(e instanceof Error ? e.message : "删除失败");
     }
   };
 
-  const contextActions = (it?: ProjectBudgetItem) => [
+  const contextActions = (it?: ProjectBudgetItem): TableContextMenuAction[] => [
+    ...(it ? structureActionsFor(it) : []),
     ...(it && canEdit
-      ? [{ label: "编辑预算条目", icon: <Pencil className="size-3.5" />, onSelect: () => startEdit(it) }]
+      ? [{ label: "编辑预算条目", icon: <Pencil className="size-3.5" />, separatorBefore: true, onSelect: () => startEdit(it) }]
       : []),
     ...(it && canDelete
-      ? [{ label: "删除预算条目", icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: () => handleDelete(it) }]
+      ? [{ label: "删除预算条目", icon: <Trash2 className="size-3.5" />, destructive: true, separatorBefore: true, onSelect: () => handleDelete(it) }]
       : []),
     ...(!it && canCreate
       ? [{ label: "新增预算条目", icon: <Plus className="size-3.5" />, onSelect: startCreate }]
@@ -831,29 +1037,34 @@ const ManpowerTable = ({
           <TableHead className="w-[140px]">人均月成本</TableHead>
           <TableHead className="w-[140px] text-right">小计</TableHead>
           <TableHead>备注</TableHead>
-          <TableHead className="w-[180px]">操作</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {newRow && (
-          <TableRow className="bg-muted/30">
+          <TableRow ref={activeEditRowRef} className="bg-muted/30" onKeyDownCapture={(event) => handleBudgetRowKeyDown(event, cancelCreate)} onBlurCapture={(event) => handleBudgetRowBlur(event, submitCreate)}>
             <TableCell className="p-2 text-xs text-muted-foreground">新</TableCell>
             <TableCell className="p-2">
               <Input
                 value={newRow.groupName}
-                onChange={(e) => setNewRow({ ...newRow, groupName: e.target.value })}
-                className="h-7 text-xs"
+                onChange={(e) => { setInvalidFields((prev) => prev.filter((field) => field !== "groupName")); setNewRow({ ...newRow, groupName: e.target.value }); }}
+                className={cn("h-7 text-xs", invalidFields.includes("groupName") && "border-destructive ring-1 ring-destructive/30")}
                 autoFocus
                 placeholder="组别"
               />
+              {invalidFields.includes("groupName") && (
+                <p className="mt-1 text-[11px] text-destructive">请填写组别</p>
+              )}
             </TableCell>
             <TableCell className="p-2">
               <Input
                 value={newRow.person}
-                onChange={(e) => setNewRow({ ...newRow, person: e.target.value })}
-                className="h-7 text-xs"
+                onChange={(e) => { setInvalidFields((prev) => prev.filter((field) => field !== "person")); setNewRow({ ...newRow, person: e.target.value }); }}
+                className={cn("h-7 text-xs", invalidFields.includes("person") && "border-destructive ring-1 ring-destructive/30")}
                 placeholder="人员"
               />
+              {invalidFields.includes("person") && (
+                <p className="mt-1 text-[11px] text-destructive">请填写人员</p>
+              )}
             </TableCell>
             <TableCell className="p-2">
               <Input
@@ -888,42 +1099,42 @@ const ManpowerTable = ({
                 placeholder="可选"
               />
             </TableCell>
-            <TableCell className="p-2">
-              <div className="flex items-center gap-1.5">
-                <Button size="sm" className="h-7 text-xs" onClick={submitCreate} disabled={busy}>
-                  保存
-                </Button>
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={cancelCreate} disabled={busy}>
-                  取消
-                </Button>
-              </div>
-            </TableCell>
           </TableRow>
         )}
         {category.items.map((it, idx) => {
           const isEditing = editingId === it.id && editRow;
           const subtotal = it.personMonths * it.monthlyCostPerPerson;
           return (
-            <TableRow key={it.id} className={isEditing ? "bg-muted/30" : undefined} onContextMenu={(event) => openContextMenu(event, contextActions(it))}>
+            <TableRow key={it.id} ref={isEditing ? activeEditRowRef : undefined} data-table-row-id={it.id} className={isEditing ? "bg-muted/30" : undefined} onContextMenu={(event) => openContextMenu(event, contextActions(it), { title: budgetItemLabel(it), description: category.name })} onKeyDownCapture={isEditing ? (event) => handleBudgetRowKeyDown(event, cancelEdit) : undefined} onBlurCapture={isEditing ? (event) => handleBudgetRowBlur(event, submitEdit) : undefined}>
               <TableCell className="p-2 text-xs text-muted-foreground">{idx + 1}</TableCell>
               <TableCell className={isEditing ? "p-2" : "cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
-                  <Input
-                    value={editRow!.groupName}
-                    onChange={(e) => setEditRow({ ...editRow!, groupName: e.target.value })}
-                    className="h-7 text-xs"
-                  />
+                  <div>
+                    <Input
+                      value={editRow!.groupName}
+                      onChange={(e) => { setInvalidFields((prev) => prev.filter((field) => field !== "groupName")); setEditRow({ ...editRow!, groupName: e.target.value }); }}
+                      className={cn("h-7 text-xs", invalidFields.includes("groupName") && "border-destructive ring-1 ring-destructive/30")}
+                    />
+                    {invalidFields.includes("groupName") && (
+                      <p className="mt-1 text-[11px] text-destructive">请填写组别</p>
+                    )}
+                  </div>
                 ) : (
                   it.groupName
                 )}
               </TableCell>
               <TableCell className={isEditing ? "p-2 font-medium" : "font-medium cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
-                  <Input
-                    value={editRow!.person}
-                    onChange={(e) => setEditRow({ ...editRow!, person: e.target.value })}
-                    className="h-7 text-xs"
-                  />
+                  <div>
+                    <Input
+                      value={editRow!.person}
+                      onChange={(e) => { setInvalidFields((prev) => prev.filter((field) => field !== "person")); setEditRow({ ...editRow!, person: e.target.value }); }}
+                      className={cn("h-7 text-xs", invalidFields.includes("person") && "border-destructive ring-1 ring-destructive/30")}
+                    />
+                    {invalidFields.includes("person") && (
+                      <p className="mt-1 text-[11px] text-destructive">请填写人员</p>
+                    )}
+                  </div>
                 ) : (
                   it.person
                 )}
@@ -977,32 +1188,12 @@ const ManpowerTable = ({
                   it.remark
                 )}
               </TableCell>
-              <TableCell className="p-2">
-                {isEditing ? (
-                  <div className="flex items-center gap-1.5">
-                    <Button size="sm" className="h-7 text-xs" onClick={submitEdit} disabled={busy}>
-                      保存
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 text-xs"
-                      onClick={cancelEdit}
-                      disabled={busy}
-                    >
-                      取消
-                    </Button>
-                  </div>
-                ) : (
-                  <span className="text-xs text-muted-foreground">右击操作</span>
-                )}
-              </TableCell>
             </TableRow>
           );
         })}
         {category.items.length === 0 && !newRow && (
           <TableRow>
-            <TableCell colSpan={8} className="h-24 text-center text-xs text-muted-foreground">
+            <TableCell colSpan={7} className="h-24 text-center text-xs text-muted-foreground">
               暂无条目，在表格中右击即可新增
             </TableCell>
           </TableRow>
@@ -1015,11 +1206,11 @@ const ManpowerTable = ({
             <TableCell className="p-2 text-right text-xs font-semibold tabular-nums">
               {formatAmount(category.items.reduce((a, it) => a + it.personMonths * it.monthlyCostPerPerson, 0))}
             </TableCell>
-            <TableCell colSpan={2} className="p-2 text-right">
+            <TableCell className="p-2 text-right">
               {newRow && (
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={cancelCreate}>
+                <TableActionButton onClick={cancelCreate}>
                   取消新增
-                </Button>
+                </TableActionButton>
               )}
             </TableCell>
           </TableRow>
@@ -1064,19 +1255,34 @@ const PurchaseTable = ({
   onChanged: () => void | Promise<void>;
   confirm: (msg: string) => Promise<boolean>;
 }) => {
+  const runAction = useContext(BudgetHistoryContext);
   const [newRow, setNewRow] = useState<PurchaseDraft | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editRow, setEditRow] = useState<PurchaseDraft | null>(null);
-  const [busy, setBusy] = useState(false);
+  const submittingRef = useRef(false);
+  const [titleInvalid, setTitleInvalid] = useState(false);
   const { menu, openContextMenu, closeContextMenu } = useTableContextMenu();
+  const activeEditRowRef = useRef<HTMLTableRowElement>(null);
+  const { actionsFor: structureActionsFor } = useBudgetRowStructure({
+    category,
+    projectId,
+    canCreate,
+    canEdit,
+    onChanged,
+  });
 
   const startCreate = () => {
+    setTitleInvalid(false);
     setNewRow({ ...EMPTY_PR });
     setEditingId(null);
     setEditRow(null);
   };
-  const cancelCreate = () => setNewRow(null);
+  const cancelCreate = () => {
+    setTitleInvalid(false);
+    setNewRow(null);
+  };
   const startEdit = (it: ProjectBudgetItem) => {
+    setTitleInvalid(false);
     setEditingId(it.id);
     setEditRow({
       title: it.title,
@@ -1088,69 +1294,83 @@ const PurchaseTable = ({
     setNewRow(null);
   };
   const cancelEdit = () => {
+    setTitleInvalid(false);
     setEditingId(null);
     setEditRow(null);
   };
 
   const submitCreate = async () => {
-    if (!newRow) return;
+    if (!newRow || submittingRef.current) return;
     if (!newRow.title.trim()) {
-      alert("项目/物料名称不能为空");
+      setTitleInvalid(true);
       return;
     }
-    setBusy(true);
+    submittingRef.current = true;
     try {
-      await api.post(`/api/projects/${projectId}/budget-items`, {
-        categoryId: category.id,
-        ...newRow,
+      const targetIds: string[] = [];
+      await runAction(`新增预算条目「${newRow.title}」`, targetIds, async () => {
+        const created = await api.post<ProjectBudgetItem>(`/api/projects/${projectId}/budget-items`, {
+          categoryId: category.id,
+          ...newRow,
+        });
+        targetIds.push(created.id);
       });
       setNewRow(null);
       await onChanged();
     } catch (e) {
       alert(e instanceof Error ? e.message : "保存失败");
     } finally {
-      setBusy(false);
+      submittingRef.current = false;
     }
   };
 
   const submitEdit = async () => {
-    if (!editingId || !editRow) return;
+    if (!editingId || !editRow || submittingRef.current) return;
     if (!editRow.title.trim()) {
-      alert("项目/物料名称不能为空");
+      setTitleInvalid(true);
       return;
     }
-    setBusy(true);
+    submittingRef.current = true;
     try {
-      await api.put(`/api/projects/${projectId}/budget-items/${editingId}`, {
-        categoryId: category.id,
-        ...editRow,
-      });
+      await runAction(`编辑预算条目「${editRow.title}」`, [editingId], () => (
+        api.put(`/api/projects/${projectId}/budget-items/${editingId}`, {
+          categoryId: category.id,
+          ...editRow,
+        })
+      ));
       setEditingId(null);
       setEditRow(null);
       await onChanged();
     } catch (e) {
       alert(e instanceof Error ? e.message : "保存失败");
     } finally {
-      setBusy(false);
+      submittingRef.current = false;
     }
   };
 
+  useCommitOnOutsidePointer(Boolean(newRow || editingId), activeEditRowRef, () => (
+    newRow ? submitCreate() : submitEdit()
+  ));
+
   const handleDelete = async (it: ProjectBudgetItem) => {
-    if (!(await confirm(`确认删除「${it.title}」？`))) return;
+    if (!(await confirm(budgetDeleteMessage(it)))) return;
     try {
-      await api.delete(`/api/projects/${projectId}/budget-items/${it.id}`);
+      await runAction(`删除预算条目「${budgetItemLabel(it)}」`, [it.id], () => (
+        api.delete(`/api/projects/${projectId}/budget-items/${it.id}`)
+      ));
       await onChanged();
     } catch (e) {
       alert(e instanceof Error ? e.message : "删除失败");
     }
   };
 
-  const contextActions = (it?: ProjectBudgetItem) => [
+  const contextActions = (it?: ProjectBudgetItem): TableContextMenuAction[] => [
+    ...(it ? structureActionsFor(it) : []),
     ...(it && canEdit
-      ? [{ label: "编辑预算条目", icon: <Pencil className="size-3.5" />, onSelect: () => startEdit(it) }]
+      ? [{ label: "编辑预算条目", icon: <Pencil className="size-3.5" />, separatorBefore: true, onSelect: () => startEdit(it) }]
       : []),
     ...(it && canDelete
-      ? [{ label: "删除预算条目", icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: () => handleDelete(it) }]
+      ? [{ label: "删除预算条目", icon: <Trash2 className="size-3.5" />, destructive: true, separatorBefore: true, onSelect: () => handleDelete(it) }]
       : []),
     ...(!it && canCreate
       ? [{ label: "新增预算条目", icon: <Plus className="size-3.5" />, onSelect: startCreate }]
@@ -1171,20 +1391,22 @@ const PurchaseTable = ({
           <TableHead className="w-[140px] text-right">量产小计</TableHead>
           <TableHead className="w-[140px] text-right">合计</TableHead>
           <TableHead>备注</TableHead>
-          <TableHead className="w-[180px]">操作</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {newRow && (
-          <TableRow className="bg-muted/30">
+          <TableRow ref={activeEditRowRef} className="bg-muted/30" onKeyDownCapture={(event) => handleBudgetRowKeyDown(event, cancelCreate)} onBlurCapture={(event) => handleBudgetRowBlur(event, submitCreate)}>
             <TableCell className="p-2 text-xs text-muted-foreground">新</TableCell>
             <TableCell className="p-2">
               <Input
                 value={newRow.title}
-                onChange={(e) => setNewRow({ ...newRow, title: e.target.value })}
-                className="h-7 text-xs"
+                onChange={(e) => { setTitleInvalid(false); setNewRow({ ...newRow, title: e.target.value }); }}
+                className={cn("h-7 text-xs", titleInvalid && "border-destructive ring-1 ring-destructive/30")}
                 autoFocus
               />
+              {titleInvalid && (
+                <p className="mt-1 text-[11px] text-destructive">请填写项目或物料名称</p>
+              )}
             </TableCell>
             <TableCell className="p-2">
               <Input
@@ -1233,16 +1455,6 @@ const PurchaseTable = ({
                 placeholder="可选"
               />
             </TableCell>
-            <TableCell className="p-2">
-              <div className="flex items-center gap-1.5">
-                <Button size="sm" className="h-7 text-xs" onClick={submitCreate} disabled={busy}>
-                  保存
-                </Button>
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={cancelCreate} disabled={busy}>
-                  取消
-                </Button>
-              </div>
-            </TableCell>
           </TableRow>
         )}
         {category.items.map((it, idx) => {
@@ -1251,15 +1463,20 @@ const PurchaseTable = ({
           const production = it.unitPrice * it.productionQuantity;
           const total = sample + production;
           return (
-            <TableRow key={it.id} className={isEditing ? "bg-muted/30" : undefined} onContextMenu={(event) => openContextMenu(event, contextActions(it))}>
+            <TableRow key={it.id} ref={isEditing ? activeEditRowRef : undefined} data-table-row-id={it.id} className={isEditing ? "bg-muted/30" : undefined} onContextMenu={(event) => openContextMenu(event, contextActions(it), { title: budgetItemLabel(it), description: category.name })} onKeyDownCapture={isEditing ? (event) => handleBudgetRowKeyDown(event, cancelEdit) : undefined} onBlurCapture={isEditing ? (event) => handleBudgetRowBlur(event, submitEdit) : undefined}>
               <TableCell className="p-2 text-xs text-muted-foreground">{idx + 1}</TableCell>
               <TableCell className={isEditing ? "p-2" : "font-medium cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
-                  <Input
-                    value={editRow!.title}
-                    onChange={(e) => setEditRow({ ...editRow!, title: e.target.value })}
-                    className="h-7 text-xs"
-                  />
+                  <div>
+                    <Input
+                      value={editRow!.title}
+                      onChange={(e) => { setTitleInvalid(false); setEditRow({ ...editRow!, title: e.target.value }); }}
+                      className={cn("h-7 text-xs", titleInvalid && "border-destructive ring-1 ring-destructive/30")}
+                    />
+                    {titleInvalid && (
+                      <p className="mt-1 text-[11px] text-destructive">请填写项目或物料名称</p>
+                    )}
+                  </div>
                 ) : (
                   it.title
                 )}
@@ -1339,32 +1556,12 @@ const PurchaseTable = ({
                   it.remark
                 )}
               </TableCell>
-              <TableCell className="p-2">
-                {isEditing ? (
-                  <div className="flex items-center gap-1.5">
-                    <Button size="sm" className="h-7 text-xs" onClick={submitEdit} disabled={busy}>
-                      保存
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 text-xs"
-                      onClick={cancelEdit}
-                      disabled={busy}
-                    >
-                      取消
-                    </Button>
-                  </div>
-                ) : (
-                  <span className="text-xs text-muted-foreground">右击操作</span>
-                )}
-              </TableCell>
             </TableRow>
           );
         })}
         {category.items.length === 0 && !newRow && (
           <TableRow>
-            <TableCell colSpan={10} className="h-24 text-center text-xs text-muted-foreground">
+            <TableCell colSpan={9} className="h-24 text-center text-xs text-muted-foreground">
               暂无条目，在表格中右击即可新增
             </TableCell>
           </TableRow>
@@ -1384,11 +1581,11 @@ const PurchaseTable = ({
             <TableCell className="p-2 text-right text-xs font-semibold tabular-nums">
               {formatAmount(category.items.reduce((a, it) => a + it.unitPrice * (it.sampleQuantity + it.productionQuantity), 0))}
             </TableCell>
-            <TableCell colSpan={2} className="p-2 text-right">
+            <TableCell className="p-2 text-right">
               {newRow && (
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={cancelCreate}>
+                <TableActionButton onClick={cancelCreate}>
                   取消新增
-                </Button>
+                </TableActionButton>
               )}
             </TableCell>
           </TableRow>
@@ -1425,87 +1622,116 @@ const OtherTable = ({
   onChanged: () => void | Promise<void>;
   confirm: (msg: string) => Promise<boolean>;
 }) => {
+  const runAction = useContext(BudgetHistoryContext);
   const [newRow, setNewRow] = useState<OtherDraft | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editRow, setEditRow] = useState<OtherDraft | null>(null);
-  const [busy, setBusy] = useState(false);
+  const submittingRef = useRef(false);
+  const [titleInvalid, setTitleInvalid] = useState(false);
   const { menu, openContextMenu, closeContextMenu } = useTableContextMenu();
+  const activeEditRowRef = useRef<HTMLTableRowElement>(null);
+  const { actionsFor: structureActionsFor } = useBudgetRowStructure({
+    category,
+    projectId,
+    canCreate,
+    canEdit,
+    onChanged,
+  });
 
   const startCreate = () => {
+    setTitleInvalid(false);
     setNewRow({ ...EMPTY_OT });
     setEditingId(null);
     setEditRow(null);
   };
-  const cancelCreate = () => setNewRow(null);
+  const cancelCreate = () => {
+    setTitleInvalid(false);
+    setNewRow(null);
+  };
   const startEdit = (it: ProjectBudgetItem) => {
+    setTitleInvalid(false);
     setEditingId(it.id);
     setEditRow({ title: it.title, amount: it.amount, remark: it.remark });
     setNewRow(null);
   };
   const cancelEdit = () => {
+    setTitleInvalid(false);
     setEditingId(null);
     setEditRow(null);
   };
 
   const submitCreate = async () => {
-    if (!newRow) return;
+    if (!newRow || submittingRef.current) return;
     if (!newRow.title.trim()) {
-      alert("差旅事项不能为空");
+      setTitleInvalid(true);
       return;
     }
-    setBusy(true);
+    submittingRef.current = true;
     try {
-      await api.post(`/api/projects/${projectId}/budget-items`, {
-        categoryId: category.id,
-        ...newRow,
+      const targetIds: string[] = [];
+      await runAction(`新增预算条目「${newRow.title}」`, targetIds, async () => {
+        const created = await api.post<ProjectBudgetItem>(`/api/projects/${projectId}/budget-items`, {
+          categoryId: category.id,
+          ...newRow,
+        });
+        targetIds.push(created.id);
       });
       setNewRow(null);
       await onChanged();
     } catch (e) {
       alert(e instanceof Error ? e.message : "保存失败");
     } finally {
-      setBusy(false);
+      submittingRef.current = false;
     }
   };
 
   const submitEdit = async () => {
-    if (!editingId || !editRow) return;
+    if (!editingId || !editRow || submittingRef.current) return;
     if (!editRow.title.trim()) {
-      alert("差旅事项不能为空");
+      setTitleInvalid(true);
       return;
     }
-    setBusy(true);
+    submittingRef.current = true;
     try {
-      await api.put(`/api/projects/${projectId}/budget-items/${editingId}`, {
-        categoryId: category.id,
-        ...editRow,
-      });
+      await runAction(`编辑预算条目「${editRow.title}」`, [editingId], () => (
+        api.put(`/api/projects/${projectId}/budget-items/${editingId}`, {
+          categoryId: category.id,
+          ...editRow,
+        })
+      ));
       setEditingId(null);
       setEditRow(null);
       await onChanged();
     } catch (e) {
       alert(e instanceof Error ? e.message : "保存失败");
     } finally {
-      setBusy(false);
+      submittingRef.current = false;
     }
   };
 
+  useCommitOnOutsidePointer(Boolean(newRow || editingId), activeEditRowRef, () => (
+    newRow ? submitCreate() : submitEdit()
+  ));
+
   const handleDelete = async (it: ProjectBudgetItem) => {
-    if (!(await confirm(`确认删除「${it.title}」？`))) return;
+    if (!(await confirm(budgetDeleteMessage(it)))) return;
     try {
-      await api.delete(`/api/projects/${projectId}/budget-items/${it.id}`);
+      await runAction(`删除预算条目「${budgetItemLabel(it)}」`, [it.id], () => (
+        api.delete(`/api/projects/${projectId}/budget-items/${it.id}`)
+      ));
       await onChanged();
     } catch (e) {
       alert(e instanceof Error ? e.message : "删除失败");
     }
   };
 
-  const contextActions = (it?: ProjectBudgetItem) => [
+  const contextActions = (it?: ProjectBudgetItem): TableContextMenuAction[] => [
+    ...(it ? structureActionsFor(it) : []),
     ...(it && canEdit
-      ? [{ label: "编辑预算条目", icon: <Pencil className="size-3.5" />, onSelect: () => startEdit(it) }]
+      ? [{ label: "编辑预算条目", icon: <Pencil className="size-3.5" />, separatorBefore: true, onSelect: () => startEdit(it) }]
       : []),
     ...(it && canDelete
-      ? [{ label: "删除预算条目", icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: () => handleDelete(it) }]
+      ? [{ label: "删除预算条目", icon: <Trash2 className="size-3.5" />, destructive: true, separatorBefore: true, onSelect: () => handleDelete(it) }]
       : []),
     ...(!it && canCreate
       ? [{ label: "新增预算条目", icon: <Plus className="size-3.5" />, onSelect: startCreate }]
@@ -1521,21 +1747,23 @@ const OtherTable = ({
           <TableHead>差旅事项</TableHead>
           <TableHead className="w-[180px] text-right">金额</TableHead>
           <TableHead>备注</TableHead>
-          <TableHead className="w-[180px]">操作</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {newRow && (
-          <TableRow className="bg-muted/30">
+          <TableRow ref={activeEditRowRef} className="bg-muted/30" onKeyDownCapture={(event) => handleBudgetRowKeyDown(event, cancelCreate)} onBlurCapture={(event) => handleBudgetRowBlur(event, submitCreate)}>
             <TableCell className="p-2 text-xs text-muted-foreground">新</TableCell>
             <TableCell className="p-2">
               <Input
                 value={newRow.title}
-                onChange={(e) => setNewRow({ ...newRow, title: e.target.value })}
-                className="h-7 text-xs"
+                onChange={(e) => { setTitleInvalid(false); setNewRow({ ...newRow, title: e.target.value }); }}
+                className={cn("h-7 text-xs", titleInvalid && "border-destructive ring-1 ring-destructive/30")}
                 autoFocus
                 placeholder="差旅事项"
               />
+              {titleInvalid && (
+                <p className="mt-1 text-[11px] text-destructive">请填写差旅事项</p>
+              )}
             </TableCell>
             <TableCell className="p-2">
               <Input
@@ -1555,30 +1783,25 @@ const OtherTable = ({
                 placeholder="可选"
               />
             </TableCell>
-            <TableCell className="p-2">
-              <div className="flex items-center gap-1.5">
-                <Button size="sm" className="h-7 text-xs" onClick={submitCreate} disabled={busy}>
-                  保存
-                </Button>
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={cancelCreate} disabled={busy}>
-                  取消
-                </Button>
-              </div>
-            </TableCell>
           </TableRow>
         )}
         {category.items.map((it, idx) => {
           const isEditing = editingId === it.id && editRow;
           return (
-            <TableRow key={it.id} className={isEditing ? "bg-muted/30" : undefined} onContextMenu={(event) => openContextMenu(event, contextActions(it))}>
+            <TableRow key={it.id} ref={isEditing ? activeEditRowRef : undefined} data-table-row-id={it.id} className={isEditing ? "bg-muted/30" : undefined} onContextMenu={(event) => openContextMenu(event, contextActions(it), { title: budgetItemLabel(it), description: category.name })} onKeyDownCapture={isEditing ? (event) => handleBudgetRowKeyDown(event, cancelEdit) : undefined} onBlurCapture={isEditing ? (event) => handleBudgetRowBlur(event, submitEdit) : undefined}>
               <TableCell className="p-2 text-xs text-muted-foreground">{idx + 1}</TableCell>
               <TableCell className={isEditing ? "p-2" : "font-medium cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
-                  <Input
-                    value={editRow!.title}
-                    onChange={(e) => setEditRow({ ...editRow!, title: e.target.value })}
-                    className="h-7 text-xs"
-                  />
+                  <div>
+                    <Input
+                      value={editRow!.title}
+                      onChange={(e) => { setTitleInvalid(false); setEditRow({ ...editRow!, title: e.target.value }); }}
+                      className={cn("h-7 text-xs", titleInvalid && "border-destructive ring-1 ring-destructive/30")}
+                    />
+                    {titleInvalid && (
+                      <p className="mt-1 text-[11px] text-destructive">请填写差旅事项</p>
+                    )}
+                  </div>
                 ) : (
                   it.title
                 )}
@@ -1608,32 +1831,12 @@ const OtherTable = ({
                   it.remark
                 )}
               </TableCell>
-              <TableCell className="p-2">
-                {isEditing ? (
-                  <div className="flex items-center gap-1.5">
-                    <Button size="sm" className="h-7 text-xs" onClick={submitEdit} disabled={busy}>
-                      保存
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 text-xs"
-                      onClick={cancelEdit}
-                      disabled={busy}
-                    >
-                      取消
-                    </Button>
-                  </div>
-                ) : (
-                  <span className="text-xs text-muted-foreground">右击操作</span>
-                )}
-              </TableCell>
             </TableRow>
           );
         })}
         {category.items.length === 0 && !newRow && (
           <TableRow>
-            <TableCell colSpan={5} className="h-24 text-center text-xs text-muted-foreground">
+            <TableCell colSpan={4} className="h-24 text-center text-xs text-muted-foreground">
               暂无差旅事项，在表格中右击即可新增
             </TableCell>
           </TableRow>
@@ -1646,11 +1849,11 @@ const OtherTable = ({
             <TableCell className="p-2 text-right text-xs font-semibold tabular-nums">
               {formatAmount(category.items.reduce((a, it) => a + it.amount, 0))}
             </TableCell>
-            <TableCell colSpan={2} className="p-2 text-right">
+            <TableCell className="p-2 text-right">
               {newRow && (
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={cancelCreate}>
+                <TableActionButton onClick={cancelCreate}>
                   取消新增
-                </Button>
+                </TableActionButton>
               )}
             </TableCell>
           </TableRow>
@@ -1673,6 +1876,7 @@ type RateDraft = {
 const RateTable = ({
   category,
   projectId,
+  canCreate,
   canEdit,
   canDelete,
   onChanged,
@@ -1680,17 +1884,29 @@ const RateTable = ({
 }: {
   category: CategoryWithMeta;
   projectId: string;
+  canCreate: boolean;
   canEdit: boolean;
   canDelete: boolean;
   onChanged: () => void | Promise<void>;
   confirm: (msg: string) => Promise<boolean>;
 }) => {
+  const runAction = useContext(BudgetHistoryContext);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editRow, setEditRow] = useState<RateDraft | null>(null);
-  const [busy, setBusy] = useState(false);
+  const submittingRef = useRef(false);
+  const [invalidFields, setInvalidFields] = useState<string[]>([]);
   const { menu, openContextMenu, closeContextMenu } = useTableContextMenu();
+  const activeEditRowRef = useRef<HTMLTableRowElement>(null);
+  const { actionsFor: structureActionsFor } = useBudgetRowStructure({
+    category,
+    projectId,
+    canCreate,
+    canEdit,
+    onChanged,
+  });
 
   const startEdit = (it: ProjectBudgetItem) => {
+    setInvalidFields([]);
     setEditingId(it.id);
     setEditRow({
       title: it.title,
@@ -1701,50 +1917,58 @@ const RateTable = ({
     });
   };
   const cancelEdit = () => {
+    setInvalidFields([]);
     setEditingId(null);
     setEditRow(null);
   };
 
   const submitEdit = async () => {
-    if (!editingId || !editRow) return;
+    if (!editingId || !editRow || submittingRef.current) return;
     if (!editRow.title.trim()) {
-      alert("费率名称不能为空");
+      setInvalidFields(["title"]);
       return;
     }
     if (editRow.minRate > editRow.maxRate) {
-      alert("建议下限不能大于建议上限");
+      setInvalidFields(["minRate", "maxRate"]);
       return;
     }
-    setBusy(true);
+    submittingRef.current = true;
     try {
-      await api.put(`/api/projects/${projectId}/budget-items/${editingId}`, {
-        categoryId: category.id,
-        ...editRow,
-      });
+      await runAction(`编辑费率「${editRow.title}」`, [editingId], () => (
+        api.put(`/api/projects/${projectId}/budget-items/${editingId}`, {
+          categoryId: category.id,
+          ...editRow,
+        })
+      ));
       setEditingId(null);
       setEditRow(null);
       await onChanged();
     } catch (e) {
       alert(e instanceof Error ? e.message : "保存失败");
     } finally {
-      setBusy(false);
+      submittingRef.current = false;
     }
   };
 
+  useCommitOnOutsidePointer(Boolean(editingId), activeEditRowRef, submitEdit);
+
   const handleDelete = async (it: ProjectBudgetItem) => {
-    if (!(await confirm(`确认删除「${it.title}」？`))) return;
+    if (!(await confirm(budgetDeleteMessage(it)))) return;
     try {
-      await api.delete(`/api/projects/${projectId}/budget-items/${it.id}`);
+      await runAction(`删除费率「${budgetItemLabel(it)}」`, [it.id], () => (
+        api.delete(`/api/projects/${projectId}/budget-items/${it.id}`)
+      ));
       await onChanged();
     } catch (e) {
       alert(e instanceof Error ? e.message : "删除失败");
     }
   };
 
-  const contextActions = (it?: ProjectBudgetItem) => it
+  const contextActions = (it?: ProjectBudgetItem): TableContextMenuAction[] => it
     ? [
-        ...(canEdit ? [{ label: "编辑费率", icon: <Pencil className="size-3.5" />, onSelect: () => startEdit(it) }] : []),
-        ...(canDelete ? [{ label: "删除费率", icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: () => handleDelete(it) }] : []),
+        ...structureActionsFor(it),
+        ...(canEdit ? [{ label: "编辑费率", icon: <Pencil className="size-3.5" />, separatorBefore: true, onSelect: () => startEdit(it) }] : []),
+        ...(canDelete ? [{ label: "删除费率", icon: <Trash2 className="size-3.5" />, destructive: true, separatorBefore: true, onSelect: () => handleDelete(it) }] : []),
       ]
     : [];
 
@@ -1759,7 +1983,6 @@ const RateTable = ({
           <TableHead className="w-[140px] text-right">建议上限</TableHead>
           <TableHead className="w-[140px] text-right">当前使用</TableHead>
           <TableHead>备注</TableHead>
-          <TableHead className="w-[180px]">操作</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -1767,43 +1990,55 @@ const RateTable = ({
           const isEditing = editingId === it.id && editRow;
           const outOfRange = it.currentRate < it.minRate || it.currentRate > it.maxRate;
           return (
-            <TableRow key={it.id} className={isEditing ? "bg-muted/30" : undefined} onContextMenu={(event) => openContextMenu(event, contextActions(it))}>
+            <TableRow key={it.id} ref={isEditing ? activeEditRowRef : undefined} data-table-row-id={it.id} className={isEditing ? "bg-muted/30" : undefined} onContextMenu={(event) => openContextMenu(event, contextActions(it), { title: budgetItemLabel(it), description: category.name })} onKeyDownCapture={isEditing ? (event) => handleBudgetRowKeyDown(event, cancelEdit) : undefined} onBlurCapture={isEditing ? (event) => handleBudgetRowBlur(event, submitEdit) : undefined}>
               <TableCell className="p-2 text-xs text-muted-foreground">{idx + 1}</TableCell>
               <TableCell className={isEditing ? "p-2" : "font-medium cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
-                  <Input
-                    value={editRow!.title}
-                    onChange={(e) => setEditRow({ ...editRow!, title: e.target.value })}
-                    className="h-7 text-xs"
-                  />
+                  <div>
+                    <Input
+                      value={editRow!.title}
+                      onChange={(e) => { setInvalidFields((prev) => prev.filter((field) => field !== "title")); setEditRow({ ...editRow!, title: e.target.value }); }}
+                      className={cn("h-7 text-xs", invalidFields.includes("title") && "border-destructive ring-1 ring-destructive/30")}
+                    />
+                    {invalidFields.includes("title") && (
+                      <p className="mt-1 text-[11px] text-destructive">请填写费率名称</p>
+                    )}
+                  </div>
                 ) : (
                   it.title
                 )}
               </TableCell>
               <TableCell className={isEditing ? "p-2" : "text-right text-xs tabular-nums cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
-                  <Input
-                    type="number"
-                    min={0}
-                    step={0.01}
-                    value={editRow!.minRate}
-                    onChange={(e) => setEditRow({ ...editRow!, minRate: Number(e.target.value) || 0 })}
-                    className="h-7 text-xs tabular-nums text-right"
-                  />
+                  <div>
+                    <Input
+                      type="number"
+                      min={0}
+                      step={0.01}
+                      value={editRow!.minRate}
+                      onChange={(e) => { setInvalidFields((prev) => prev.filter((field) => field !== "minRate" && field !== "maxRate")); setEditRow({ ...editRow!, minRate: Number(e.target.value) || 0 }); }}
+                      className={cn("h-7 text-xs tabular-nums text-right", invalidFields.includes("minRate") && "border-destructive ring-1 ring-destructive/30")}
+                    />
+                    {invalidFields.includes("minRate") && (
+                      <p className="mt-1 text-right text-[11px] text-destructive">下限不能大于上限</p>
+                    )}
+                  </div>
                 ) : (
                   formatPercent(it.minRate)
                 )}
               </TableCell>
               <TableCell className={isEditing ? "p-2" : "text-right text-xs tabular-nums cursor-pointer hover:bg-primary/5"} onClick={() => !isEditing && canEdit && startEdit(it)}>
                 {isEditing ? (
-                  <Input
-                    type="number"
-                    min={0}
-                    step={0.01}
-                    value={editRow!.maxRate}
-                    onChange={(e) => setEditRow({ ...editRow!, maxRate: Number(e.target.value) || 0 })}
-                    className="h-7 text-xs tabular-nums text-right"
-                  />
+                  <div>
+                    <Input
+                      type="number"
+                      min={0}
+                      step={0.01}
+                      value={editRow!.maxRate}
+                      onChange={(e) => { setInvalidFields((prev) => prev.filter((field) => field !== "minRate" && field !== "maxRate")); setEditRow({ ...editRow!, maxRate: Number(e.target.value) || 0 }); }}
+                      className={cn("h-7 text-xs tabular-nums text-right", invalidFields.includes("maxRate") && "border-destructive ring-1 ring-destructive/30")}
+                    />
+                  </div>
                 ) : (
                   formatPercent(it.maxRate)
                 )}
@@ -1840,32 +2075,12 @@ const RateTable = ({
                   it.remark || "-"
                 )}
               </TableCell>
-              <TableCell className="p-2">
-                {isEditing ? (
-                  <div className="flex items-center gap-1.5">
-                    <Button size="sm" className="h-7 text-xs" onClick={submitEdit} disabled={busy}>
-                      保存
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 text-xs"
-                      onClick={cancelEdit}
-                      disabled={busy}
-                    >
-                      取消
-                    </Button>
-                  </div>
-                ) : (
-                  <span className="text-xs text-muted-foreground">右击操作</span>
-                )}
-              </TableCell>
             </TableRow>
           );
         })}
         {category.items.length === 0 && (
           <TableRow>
-            <TableCell colSpan={7} className="h-24 text-center text-xs text-muted-foreground">
+            <TableCell colSpan={6} className="h-24 text-center text-xs text-muted-foreground">
               暂无档位条目
             </TableCell>
           </TableRow>

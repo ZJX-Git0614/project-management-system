@@ -63,7 +63,10 @@ export async function GET(
   const items = await prisma.projectBudgetItem.findMany({
     where: { projectId: id },
     orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
-    include: { category: true },
+    include: {
+      category: true,
+      ganttTasks: { select: { id: true, taskCode: true, taskName: true } },
+    },
   });
 
   return ok(
@@ -76,6 +79,7 @@ export async function GET(
             kind: i.category.kind,
           }
         : null,
+      linkedTasks: i.ganttTasks,
     })),
   );
 }

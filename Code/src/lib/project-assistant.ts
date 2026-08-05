@@ -2,6 +2,11 @@ import { prisma } from "@/lib/prisma"
 import type { JwtPayload } from "@/lib/auth"
 import { buildAssistantScheduleContextV1 } from "@/lib/assistant-schedule-adapter"
 import { itemStatusFromProgress } from "@/lib/item-progress"
+import {
+  resourceScheduleAnalysis,
+  serializeResourceCandidate,
+  serializeResourceConflict,
+} from "@/lib/gantt-resource-service"
 
 export type AssistantMessageInput = {
   role: "user" | "assistant"
@@ -65,8 +70,9 @@ const markdownTable = (headers: string[], rows: unknown[][]) => {
 }
 
 export const buildProjectAssistantContext = async (params: {
-  user: JwtPayload
+  user: JwtPayload & { assignedRoleNames?: string[] }
   projectId?: string | null
+  includeResourceOptimization?: boolean
 }) => {
   const projectId = params.projectId?.trim() || ""
   const [projects, project, globalTodos] = await Promise.all([
@@ -102,7 +108,18 @@ export const buildProjectAssistantContext = async (params: {
                 },
               },
             },
-            weeklyItems: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }], take: 160 },
+            weeklyItems: {
+              orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+              include: {
+                ganttTask: { select: { id: true, taskCode: true, taskName: true, parentId: true, sortOrder: true } },
+                ganttTaskLinks: {
+                  include: {
+                    ganttTask: { select: { id: true, taskCode: true, taskName: true, parentId: true, sortOrder: true } },
+                  },
+                },
+              },
+              take: 160,
+            },
             budgetCategories: {
               orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
               include: { items: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] } },
@@ -112,7 +129,30 @@ export const buildProjectAssistantContext = async (params: {
               orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
               include: {
                 ganttTask: { select: { id: true, taskCode: true, taskName: true } },
-                weeklyItem: { select: { id: true, matterCode: true, title: true } },
+                weeklyItem: {
+                  include: {
+                    ganttTask: { select: { id: true, taskCode: true, taskName: true, parentId: true, sortOrder: true } },
+                    ganttTaskLinks: {
+                      include: {
+                        ganttTask: { select: { id: true, taskCode: true, taskName: true, parentId: true, sortOrder: true } },
+                      },
+                    },
+                  },
+                },
+                weeklyItemLinks: {
+                  include: {
+                    weeklyItem: {
+                      include: {
+                        ganttTask: { select: { id: true, taskCode: true, taskName: true, parentId: true, sortOrder: true } },
+                        ganttTaskLinks: {
+                          include: {
+                            ganttTask: { select: { id: true, taskCode: true, taskName: true, parentId: true, sortOrder: true } },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
               },
               take: 120,
             },
@@ -138,7 +178,7 @@ export const buildProjectAssistantContext = async (params: {
 
   // Optional schedule-analysis tables may be created after the core project tables
   // during an offline Docker update. Keep the assistant usable throughout that window.
-  const [scheduleMetadata, scheduleAnalyses] = projectId
+  const [scheduleMetadata, scheduleAnalyses, rawResourceOptimization] = projectId
     ? await Promise.all([
         prisma.projectScheduleImportMetadata.findUnique({ where: { projectId } }).catch(() => null),
         prisma.scheduleAnalysisRun.findMany({
@@ -146,8 +186,24 @@ export const buildProjectAssistantContext = async (params: {
           orderBy: { createdAt: "desc" },
           take: 5,
         }).catch(() => []),
+        params.includeResourceOptimization ? resourceScheduleAnalysis(projectId).catch(() => null) : Promise.resolve(null),
       ])
-    : [null, []]
+    : [null, [], null]
+
+  const isAdmin = params.user.assignedRoleNames?.includes("管理员") ?? false
+  const resourceOptimization = rawResourceOptimization
+    ? {
+        revision: rawResourceOptimization.context.currentProject.ganttRevision,
+        snapshotHash: rawResourceOptimization.result.snapshotHash,
+        expectedEndDate: rawResourceOptimization.context.currentProject.expectedEndDate,
+        conflicts: rawResourceOptimization.result.conflicts.map((conflict) => (
+          serializeResourceConflict(conflict, rawResourceOptimization.context.summaries, isAdmin)
+        )),
+        candidates: rawResourceOptimization.result.candidates.map((candidate) => (
+          serializeResourceCandidate(candidate, rawResourceOptimization.context.summaries, isAdmin)
+        )),
+      }
+    : null
 
   const contractAmount = project?.budgetSetting?.contractAmount ?? (project?.amountWan ?? 0) * 10_000
   const budgetCategories = (project?.budgetCategories ?? []).map((category) => {
@@ -277,25 +333,34 @@ export const buildProjectAssistantContext = async (params: {
       tasks,
     },
     schedule,
+    resourceOptimization,
     scheduleComparisons,
-    weeklyItems: (project?.weeklyItems ?? []).map((item) => ({
-      id: item.id,
-      code: item.matterCode,
-      title: item.title,
-      ganttTaskId: item.ganttTaskId,
-      taskName: item.taskName,
-      owner: item.owner,
-      priority: PRIORITY_LABEL[item.priority] || item.priority,
-      status: ITEM_STATUS_LABEL[itemStatusFromProgress(item.progress)],
-      plannedStart: item.plannedStartDate,
-      plannedEnd: item.plannedEndDate,
-      actualStart: item.actualStartDate,
-      actualEnd: item.actualEndDate,
-      progress: item.progress,
-      health: item.health,
-      issueAndAction: item.issueAndAction,
-      risk: item.risk,
-    })),
+    weeklyItems: (project?.weeklyItems ?? []).map((item) => {
+      const linkedTasks = item.ganttTaskLinks.length > 0
+        ? item.ganttTaskLinks.map((link) => link.ganttTask)
+        : item.ganttTask ? [item.ganttTask] : [];
+      linkedTasks.sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id));
+      return {
+        id: item.id,
+        code: item.matterCode,
+        title: item.title,
+        ganttTaskId: linkedTasks[0]?.id ?? null,
+        ganttTaskIds: linkedTasks.map((task) => task.id),
+        taskName: linkedTasks.map((task) => task.taskName).join("、"),
+        linkedTasks: linkedTasks.map((task) => ({ id: task.id, code: task.taskCode, name: task.taskName })),
+        owner: item.owner,
+        priority: PRIORITY_LABEL[item.priority] || item.priority,
+        status: ITEM_STATUS_LABEL[itemStatusFromProgress(item.progress)],
+        plannedStart: item.plannedStartDate,
+        plannedEnd: item.plannedEndDate,
+        actualStart: item.actualStartDate,
+        actualEnd: item.actualEndDate,
+        progress: item.progress,
+        health: item.health,
+        issueAndAction: item.issueAndAction,
+        risk: item.risk,
+      };
+    }),
     budget: {
       contractAmount,
       profitTargetRate: project?.budgetSetting?.profitTargetRate ?? 0,
@@ -303,33 +368,45 @@ export const buildProjectAssistantContext = async (params: {
       remaining: contractAmount - totalBudget,
       categories: budgetCategories,
     },
-    risks: (project?.riskRegisterItems ?? []).map((risk) => ({
-      id: risk.id,
-      code: risk.riskCode,
-      name: risk.riskName,
-      ganttTaskId: risk.ganttTaskId,
-      weeklyItemId: risk.weeklyItemId,
-      linkedTask: risk.ganttTask
-        ? [risk.ganttTask.taskCode, risk.ganttTask.taskName].filter(Boolean).join(" · ")
-        : "",
-      ganttTask: risk.ganttTask
-        ? { id: risk.ganttTask.id, code: risk.ganttTask.taskCode, name: risk.ganttTask.taskName }
-        : null,
-      linkedItem: risk.weeklyItem
-        ? [risk.weeklyItem.matterCode, risk.weeklyItem.title].filter(Boolean).join(" · ")
-        : risk.linkedItemName,
-      weeklyItem: risk.weeklyItem
-        ? { id: risk.weeklyItem.id, code: risk.weeklyItem.matterCode, title: risk.weeklyItem.title }
-        : null,
-      category: risk.category,
-      probability: risk.probability,
-      impact: risk.impact,
-      level: risk.level,
-      response: risk.response,
-      owner: risk.owner,
-      status: risk.status,
-      targetDate: risk.targetDate,
-    })),
+    risks: (project?.riskRegisterItems ?? []).map((risk) => {
+      const linkedItems = risk.weeklyItemLinks.length > 0
+        ? risk.weeklyItemLinks.map((link) => link.weeklyItem)
+        : risk.weeklyItem ? [risk.weeklyItem] : [];
+      const affectedTaskById = new Map<string, {
+        id: string;
+        taskCode: string;
+        taskName: string;
+        sortOrder: number;
+      }>();
+      linkedItems.forEach((item) => {
+        const linkedTasks = item.ganttTaskLinks.length > 0
+          ? item.ganttTaskLinks.map((link) => link.ganttTask)
+          : item.ganttTask ? [item.ganttTask] : [];
+        linkedTasks.forEach((task) => affectedTaskById.set(task.id, task));
+      });
+      const affectedTasks = [...affectedTaskById.values()]
+        .sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id));
+      return {
+        id: risk.id,
+        code: risk.riskCode,
+        name: risk.riskName,
+        ganttTaskId: null,
+        weeklyItemId: linkedItems[0]?.id ?? null,
+        weeklyItemIds: linkedItems.map((item) => item.id),
+        linkedItem: linkedItems.map((item) => `${item.matterCode} · ${item.title}`).join("、"),
+        linkedTask: affectedTasks.map((task) => `${task.taskCode} · ${task.taskName}`).join("、"),
+        linkedItems: linkedItems.map((item) => ({ id: item.id, code: item.matterCode, title: item.title })),
+        affectedTasks: affectedTasks.map((task) => ({ id: task.id, code: task.taskCode, name: task.taskName })),
+        category: risk.category,
+        probability: risk.probability,
+        impact: risk.impact,
+        level: risk.level,
+        response: risk.response,
+        owner: risk.owner,
+        status: risk.status,
+        targetDate: risk.targetDate,
+      };
+    }),
     documents: (project?.documentFiles ?? []).map((document) => ({
       id: document.id,
       directoryKey: document.directoryKey,
@@ -418,8 +495,12 @@ const READ_ONLY_REFUSAL = [
 
 export const buildDatabaseAssistantAnswer = (query: string, context: ProjectAssistantContext) => {
   const text = query.toLowerCase()
+  const compactText = text.replace(/\s+/g, "")
   const project = context.project
-  const asks = (keywords: string[]) => keywords.some((keyword) => text.includes(keyword))
+  const asks = (keywords: string[]) => keywords.some((keyword) => {
+    const normalizedKeyword = keyword.toLowerCase()
+    return text.includes(normalizedKeyword) || compactText.includes(normalizedKeyword.replace(/\s+/g, ""))
+  })
 
   if (isWriteIntent(query)) return READ_ONLY_REFUSAL
 
@@ -444,6 +525,30 @@ export const buildDatabaseAssistantAnswer = (query: string, context: ProjectAssi
         ["项目编号", "项目名称", "客户", "状态"],
         context.portfolio.projects.slice(0, 12).map((item) => [item.code || "-", item.name, item.clientName || "-", item.statusLabel]),
       ),
+    ].join("\n\n")
+  }
+
+  if (asks(["资源冲突", "人员冲突", "资源优化", "资源排期", "排期优化", "wbs优化", "优化wbs"])) {
+    const optimization = context.resourceOptimization
+    if (!optimization) return "当前未生成资源优化分析，请刷新后重试。"
+    if (optimization.conflicts.length === 0) {
+      return "## 资源优化\n\n当前负责人任务时间范围内未检测到资源冲突，不需要调整排期。"
+    }
+    return [
+      "## 资源冲突与优化建议",
+      `当前检测到 **${optimization.conflicts.length}** 组负责人时间冲突。系统只调整当前项目未开始的可排程叶子任务；手工排程、进行中或已完成任务以及其他项目任务保持不变。`,
+      markdownTable(
+        ["候选方案", "调整任务", "累计移动", "预计完成", "剩余冲突", "可应用"],
+        optimization.candidates.map((candidate) => [
+          candidate.title,
+          candidate.metrics.movedTaskCount,
+          `${candidate.metrics.totalShiftDays} 天`,
+          candidate.metrics.completionDate || "未确定",
+          candidate.remainingConflicts.length,
+          candidate.applicable ? "是" : "否",
+        ]),
+      ),
+      "你可以继续说“采用最少改动方案”“采用最早完成方案”或“采用按期优先方案”。我会先展示确认卡片，只有你确认后才写入 WBS；如果期间 WBS 已变化，旧方案会自动失效。",
     ].join("\n\n")
   }
 

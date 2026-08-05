@@ -12,6 +12,7 @@ import {
   type AssistantRuntimeConfig,
 } from "@/lib/assistant-settings";
 import { prisma } from "@/lib/prisma";
+import { findProjectMatters, replaceRiskMatterLinks } from "@/lib/project-associations";
 import { buildAssistantStoredName, getAssistantArtifactPath, getAssistantAttachmentPath } from "@/lib/assistant-artifact-storage";
 import { nextRiskCode, renumberRiskCodes } from "@/lib/risk-register-codes";
 import { nextWeeklyMatterCode, renumberWeeklyMatterCodes } from "@/lib/weekly-matter-codes";
@@ -19,7 +20,9 @@ import {
   convertScheduleFile,
   mergeScheduleFiles,
   SCHEDULE_CONVERT_EXTENSIONS,
+  SCHEDULE_IMPORT_EXTENSIONS,
   SCHEDULE_MERGE_EXTENSIONS,
+  parseScheduleImportSource,
 } from "@/lib/schedule-file-merge";
 import {
   changeProjectGanttTaskHierarchy,
@@ -31,12 +34,15 @@ import {
   renumberProjectGanttTaskCodes,
 } from "@/lib/gantt-task-service";
 import {
+  resolveEffectiveGanttOwnerMemberId,
+  synchronizeGanttOwnerHierarchy,
+} from "@/lib/gantt-owner-service";
+import {
   calculateTaskFinishDate,
   estimatedHoursForDuration,
   isValidGanttDurationDays,
   normalizeTaskStartDate,
 } from "@/lib/gantt-calendar";
-import { parseGanttImportFile } from "@/lib/gantt-file-transfer";
 import { analyzeSchedule } from "@/lib/schedule-analysis";
 import { buildImportedScheduleSnapshot, getCurrentScheduleSnapshot } from "@/lib/schedule-snapshot";
 import { isDocumentRevisionRequest, reviseDocumentsWithSmallModel } from "@/lib/assistant-document-revision";
@@ -62,6 +68,12 @@ import {
   synchronizeGanttTaskCategories,
   synchronizeGanttTaskCategoriesAfterNameChange,
 } from "@/lib/gantt-hierarchy";
+import {
+  applyProjectResourceScheduleCandidate,
+  RESOURCE_SCHEDULE_CANDIDATE_KINDS,
+  resourceScheduleAnalysis,
+} from "@/lib/gantt-resource-service";
+import type { ResourceScheduleCandidateKind } from "@/lib/gantt-resource-schedule";
 import {
   extractAssistantRiskDrafts,
   isContextualRiskRegistrationRequest,
@@ -117,6 +129,21 @@ const parseProgressIntent = (message: string) => {
   if (!code || progress === undefined) return null;
   const value = Number(progress);
   return Number.isFinite(value) && value >= 0 && value <= 100 ? { taskCode: code, progress: value } : null;
+};
+
+const normalizeResourceScheduleCandidateKind = (value: unknown): ResourceScheduleCandidateKind | null => {
+  const kind = String(value || "").trim().toUpperCase() as ResourceScheduleCandidateKind;
+  return RESOURCE_SCHEDULE_CANDIDATE_KINDS.includes(kind) ? kind : null;
+};
+
+export const parseResourceOptimizationIntent = (message: string) => {
+  const asksToApply = /(应用|采用|执行|确认|选用|使用|按).{0,18}(方案|优化|排期)|(直接|现在).{0,8}(优化|调整).{0,8}(资源|排期)/u.test(message);
+  const mentionsResource = /(资源冲突|人员冲突|资源优化|资源排期|排期优化|候选方案|最少改动|最早完成|按期优先)/u.test(message);
+  if (!asksToApply || !mentionsResource) return null;
+  if (/最少改动|最小改动|少改/u.test(message)) return { candidateKind: "MINIMAL_CHANGE" as const };
+  if (/最早完成|尽早完成|最快完成/u.test(message)) return { candidateKind: "EARLIEST_FINISH" as const };
+  if (/按期优先|按时优先|结项优先|期限优先/u.test(message)) return { candidateKind: "ON_TIME" as const };
+  return null;
 };
 
 const parseCommandField = (message: string, labels: readonly string[]) => {
@@ -302,6 +329,11 @@ export const isScheduleComparisonRequest = (message: string) => (
   && /(附件|文件|mpp|xml|xlsx|excel|进度|计划)/iu.test(message)
 );
 
+export const isScheduleImportRequest = (message: string) => (
+  /(导入|写入|加入|同步|录入|应用).{0,24}(wbs|甘特|任务|进度|计划|排期)|(wbs|甘特|任务|进度|计划|排期).{0,24}(导入|写入|加入|同步|录入|应用)/iu.test(message)
+  && /(附件|文件|mpp|xml|xls|xlsx|excel|csv|docx|pdf|排期|计划)/iu.test(message)
+);
+
 const ensureProjectAccess = async (user: AuthenticatedUser, projectId: string) => {
   if (user.assignedRoleNames.includes("管理员")) return true;
   return Boolean(await prisma.projectMember.findFirst({
@@ -391,6 +423,28 @@ export const proposeAssistantAction = async (params: {
   })))).filter((item) => item.allowed).map((item) => item.toolId));
   const canUse = (toolId: string) => allowed.has(toolId) && (!params.expectedToolId || params.expectedToolId === toolId);
 
+  if (canUse("schedule.import.preview") && isScheduleImportRequest(params.message)) {
+    const requestedIds = Array.from(new Set((params.attachmentIds ?? []).map((id) => id.trim()).filter(Boolean)));
+    if (requestedIds.length === 1) {
+      const attachment = await prisma.assistantAttachment.findFirst({
+        where: { id: requestedIds[0], projectId: params.projectId, userId: params.user.userId, status: "READY" },
+        select: { id: true, originalName: true },
+      });
+      const extension = extname(attachment?.originalName || "").toLocaleLowerCase("en-US");
+      if (attachment && SCHEDULE_IMPORT_EXTENSIONS.includes(extension as typeof SCHEDULE_IMPORT_EXTENSIONS[number])) {
+        const hierarchyMode = /扁平|不要(?:生成|创建).{0,8}(?:层级|父任务|分类节点)/u.test(params.message) ? "FLAT" : "AUTO";
+        return createProposal({
+          ...params,
+          toolId: "schedule.import.preview",
+          riskLevel: "LOW",
+          args: { attachmentId: attachment.id, statusDate: new Date().toISOString().slice(0, 10), hierarchyMode },
+          title: "生成 WBS 导入预览",
+          description: `解析「${attachment.originalName}」，生成层级、日期、工期、依赖、任务匹配和冲突预览；本步骤不会修改当前 WBS`,
+        });
+      }
+    }
+  }
+
   if (canUse("schedule.compare.file") && isScheduleComparisonRequest(params.message)) {
     const requestedIds = Array.from(new Set((params.attachmentIds ?? []).map((id) => id.trim()).filter(Boolean)));
     if (requestedIds.length === 1) {
@@ -399,7 +453,7 @@ export const proposeAssistantAction = async (params: {
         select: { id: true, originalName: true },
       });
       const extension = extname(attachment?.originalName || "").toLocaleLowerCase("en-US");
-      if (attachment && SCHEDULE_CONVERT_EXTENSIONS.includes(extension as typeof SCHEDULE_CONVERT_EXTENSIONS[number])) {
+      if (attachment && SCHEDULE_IMPORT_EXTENSIONS.includes(extension as typeof SCHEDULE_IMPORT_EXTENSIONS[number])) {
         const statusDate = new Date().toISOString().slice(0, 10);
         return createProposal({
           ...params,
@@ -609,6 +663,33 @@ export const proposeAssistantAction = async (params: {
         args: { todoId: matches[0].id },
         title: "删除项目待办",
         description: `删除待办「${matches[0].title}」`,
+      });
+    }
+  }
+
+  const requestedResourceOptimization = parseResourceOptimizationIntent(params.message);
+  const plannedResourceCandidate = params.expectedToolId === "gantt.resource.optimize"
+    ? normalizeResourceScheduleCandidateKind(params.plannedArgs?.candidateKind)
+    : null;
+  const resourceCandidateKind = plannedResourceCandidate ?? requestedResourceOptimization?.candidateKind ?? null;
+  if (canUse("gantt.resource.optimize") && resourceCandidateKind) {
+    const { context, result } = await resourceScheduleAnalysis(params.projectId);
+    const candidate = result.candidates.find((item) => item.kind === resourceCandidateKind);
+    if (candidate) {
+      const remainingText = candidate.remainingConflicts.length > 0
+        ? `，应用后仍有 ${candidate.remainingConflicts.length} 组受固定日期、进行中任务或跨项目占用限制的冲突`
+        : "，应用后当前检测范围内不再存在资源时间冲突";
+      return createProposal({
+        ...params,
+        toolId: "gantt.resource.optimize",
+        riskLevel: "MEDIUM",
+        args: {
+          candidateKind: resourceCandidateKind,
+          revision: context.currentProject.ganttRevision,
+          snapshotHash: result.snapshotHash,
+        },
+        title: `应用“${candidate.title}”资源优化方案`,
+        description: `将调整 ${candidate.changes.length} 个未开始且可自动排程的任务，累计移动 ${candidate.metrics.totalShiftDays} 天，预计完成日期 ${candidate.metrics.completionDate || "未确定"}${remainingText}；确认时会再次校验 WBS 版本，过期方案不会写入`,
       });
     }
   }
@@ -1092,6 +1173,35 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     });
   }
 
+  if (action.toolId === "gantt.resource.optimize") {
+    const candidateKind = normalizeResourceScheduleCandidateKind(args.candidateKind);
+    const revision = Number(args.revision);
+    const snapshotHash = String(args.snapshotHash || "");
+    if (!candidateKind || !Number.isInteger(revision) || revision < 0 || !snapshotHash) {
+      throw new Error("资源优化方案参数无效，请重新生成建议");
+    }
+    const result = await applyProjectResourceScheduleCandidate({
+      projectId: action.projectId,
+      candidateKind,
+      expectedRevision: revision,
+      expectedSnapshotHash: snapshotHash,
+      operator: user.displayName,
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: {
+        status: "SUCCEEDED",
+        confirmedAt: new Date(),
+        executedAt: new Date(),
+        resultJson: JSON.stringify({
+          ...result,
+          navigateUrl: `/projects/${action.projectId}?nav=gantt`,
+          navigateLabel: "查看优化后的 WBS",
+        }),
+      },
+    });
+  }
+
   if (action.toolId === "gantt.task.create") {
     const taskName = String(args.taskName || "").trim();
     const requestedStartDate = String(args.startDate || "").trim();
@@ -1119,6 +1229,9 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     const categorySiblings = siblings.filter((task) => task.taskCategory === taskCategory);
     const sortOrder = (categorySiblings.at(-1)?.sortOrder ?? siblings.at(-1)?.sortOrder ?? 0) + 1;
     const created = await prisma.$transaction(async (tx) => {
+      const ownerMemberId = parentTaskId
+        ? await resolveEffectiveGanttOwnerMemberId({ tx, projectId: action.projectId, taskId: parentTaskId })
+        : null;
       await tx.projectGanttTask.updateMany({
         where: { projectId: action.projectId, parentId: parentTaskId, sortOrder: { gte: sortOrder } },
         data: { sortOrder: { increment: 1 } },
@@ -1127,6 +1240,7 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
         data: {
           projectId: action.projectId,
           parentId: parentTaskId,
+          ownerMemberId,
           taskCode: "",
           taskCategory,
           taskName,
@@ -1139,6 +1253,7 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
           sortOrder,
         },
       });
+      await synchronizeGanttOwnerHierarchy({ tx, projectId: action.projectId });
       await tx.operationHistory.create({
         data: {
           projectId: action.projectId,
@@ -1334,6 +1449,7 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
           where: { id: item.id },
           data: { taskCategory: item.taskCategory },
         })));
+      await synchronizeGanttOwnerHierarchy({ tx, projectId: action.projectId });
       await tx.operationHistory.create({
         data: {
           projectId: action.projectId,
@@ -1561,7 +1677,11 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     if (!title || !instructions || !intent) throw new Error("报告主题、要求或数据范围不完整");
     const runtime = await loadAssistantRuntimeConfig();
     if (!runtime.llmProvider) throw new Error("当前未配置可用的报告生成模型");
-    const context = await buildProjectAssistantContext({ user, projectId: action.projectId });
+    const context = await buildProjectAssistantContext({
+      user,
+      projectId: action.projectId,
+      includeResourceOptimization: intent.domains.includes("RESOURCE"),
+    });
     if (!context.project) throw new Error("当前项目不存在或无权访问");
     const visibleContext = buildProjectAssistantVisibleContext(context, intent);
     const report = await callAssistantProviderModel({
@@ -1665,6 +1785,96 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     });
   }
 
+  if (action.toolId === "schedule.import.preview") {
+    const attachmentId = String(args.attachmentId || "").trim();
+    const requestedStatusDate = String(args.statusDate || "");
+    const statusDate = /^\d{4}-\d{2}-\d{2}$/.test(requestedStatusDate)
+      ? requestedStatusDate
+      : new Date().toISOString().slice(0, 10);
+    const hierarchyMode = String(args.hierarchyMode || "AUTO") === "FLAT" ? "FLAT" : "AUTO";
+    const [project, attachment] = await Promise.all([
+      prisma.project.findUnique({ where: { id: action.projectId }, select: { startDate: true } }),
+      prisma.assistantAttachment.findFirst({
+        where: { id: attachmentId, projectId: action.projectId, userId: user.userId, status: "READY" },
+        select: { id: true, originalName: true, storedName: true, extraction: { select: { content: true, diagnosticsJson: true } } },
+      }),
+    ]);
+    if (!project) throw new Error("当前项目不存在");
+    if (!attachment) throw new Error("源附件不存在、尚未解析完成或不属于当前项目");
+    const extension = extname(attachment.originalName).toLocaleLowerCase("en-US");
+    if (!SCHEDULE_IMPORT_EXTENSIONS.includes(extension as typeof SCHEDULE_IMPORT_EXTENSIONS[number])) {
+      throw new Error("WBS 导入预览不支持该附件格式");
+    }
+    const diagnostics = (() => {
+      try {
+        const parsed = JSON.parse(attachment.extraction?.diagnosticsJson || "[]");
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    })();
+    const blockingDiagnostic = diagnostics.find((diagnostic) => diagnostic?.severity === "ERROR" && typeof diagnostic?.message === "string");
+    if (blockingDiagnostic) throw new Error(blockingDiagnostic.message);
+    const bundle = await parseScheduleImportSource({
+      fileName: attachment.originalName,
+      buffer: await readFile(getAssistantAttachmentPath(action.projectId, attachment.storedName)),
+      extractedText: attachment.extraction?.content ?? "",
+    }, project.startDate, { hierarchyMode });
+    const [currentSnapshot, incomingSnapshot] = await Promise.all([
+      getCurrentScheduleSnapshot(action.projectId, statusDate),
+      Promise.resolve(buildImportedScheduleSnapshot(attachment.originalName, bundle, statusDate)),
+    ]);
+    const analysis = analyzeSchedule(currentSnapshot, incomingSnapshot);
+    const persisted = await prisma.$transaction(async (tx) => {
+      const snapshot = await tx.projectScheduleSnapshot.create({
+        data: {
+          projectId: action.projectId,
+          sourceFileName: attachment.originalName,
+          schemaVersion: incomingSnapshot.schemaVersion,
+          normalizedJson: JSON.stringify(incomingSnapshot),
+          createdBy: user.displayName,
+        },
+      });
+      const run = await tx.scheduleAnalysisRun.create({
+        data: {
+          projectId: action.projectId,
+          snapshotId: snapshot.id,
+          sourceFileName: attachment.originalName,
+          statusDate,
+          resultJson: JSON.stringify(analysis),
+          createdBy: user.displayName,
+        },
+      });
+      await tx.operationHistory.create({
+        data: {
+          projectId: action.projectId,
+          entityType: "SCHEDULE_IMPORT_PREVIEW",
+          entityId: run.id,
+          actionType: "CREATE",
+          operator: user.displayName,
+          detail: `通过智能助手预览「${attachment.originalName}」导入 WBS，识别 ${analysis.summary.errors} 个阻断错误和 ${analysis.summary.warnings} 个警告，未修改当前计划`,
+        },
+      });
+      return { snapshotId: snapshot.id, analysisRunId: run.id };
+    }, { maxWait: 10_000, timeout: 60_000 });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: {
+        status: "SUCCEEDED",
+        confirmedAt: new Date(),
+        executedAt: new Date(),
+        resultJson: JSON.stringify({
+          message: `WBS 导入预览已生成：${analysis.summary.incomingTasks} 条任务，${analysis.summary.errors} 个阻断错误，${analysis.summary.warnings} 个警告`,
+          ...persisted,
+          summary: analysis.summary,
+          navigateUrl: `/projects/${action.projectId}?nav=gantt&scheduleImportAttachmentId=${encodeURIComponent(attachment.id)}&scheduleImportHierarchyMode=${hierarchyMode}`,
+          navigateLabel: "打开导入预览",
+          verification: { kind: "DATABASE_STATE", passed: true, analysisRunId: persisted.analysisRunId },
+        }),
+      },
+    });
+  }
+
   if (action.toolId === "schedule.compare.file") {
     const attachmentId = String(args.attachmentId || "").trim();
     const requestedStatusDate = String(args.statusDate || "");
@@ -1675,20 +1885,30 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
       prisma.project.findUnique({ where: { id: action.projectId }, select: { startDate: true } }),
       prisma.assistantAttachment.findFirst({
         where: { id: attachmentId, projectId: action.projectId, userId: user.userId, status: "READY" },
-        select: { id: true, originalName: true, storedName: true },
+        select: { id: true, originalName: true, storedName: true, extraction: { select: { content: true, diagnosticsJson: true } } },
       }),
     ]);
     if (!project) throw new Error("当前项目不存在");
     if (!attachment) throw new Error("源附件不存在、尚未解析完成或不属于当前项目");
     const extension = extname(attachment.originalName).toLocaleLowerCase("en-US");
-    if (!SCHEDULE_CONVERT_EXTENSIONS.includes(extension as typeof SCHEDULE_CONVERT_EXTENSIONS[number])) {
-      throw new Error("计划对比仅支持 MPP、Project XML 和系统 Excel");
+    if (!SCHEDULE_IMPORT_EXTENSIONS.includes(extension as typeof SCHEDULE_IMPORT_EXTENSIONS[number])) {
+      throw new Error("计划对比不支持该附件格式");
     }
-    const bundle = await parseGanttImportFile(
-      attachment.originalName,
-      await readFile(getAssistantAttachmentPath(action.projectId, attachment.storedName)),
-      { fallbackStartDate: project.startDate },
-    );
+    const diagnostics = (() => {
+      try {
+        const parsed = JSON.parse(attachment.extraction?.diagnosticsJson || "[]");
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    })();
+    const blockingDiagnostic = diagnostics.find((diagnostic) => diagnostic?.severity === "ERROR" && typeof diagnostic?.message === "string");
+    if (blockingDiagnostic) throw new Error(blockingDiagnostic.message);
+    const bundle = await parseScheduleImportSource({
+      fileName: attachment.originalName,
+      buffer: await readFile(getAssistantAttachmentPath(action.projectId, attachment.storedName)),
+      extractedText: attachment.extraction?.content ?? "",
+    }, project.startDate);
     const [currentSnapshot, incomingSnapshot] = await Promise.all([
       getCurrentScheduleSnapshot(action.projectId, statusDate),
       Promise.resolve(buildImportedScheduleSnapshot(attachment.originalName, bundle, statusDate)),
@@ -1938,20 +2158,36 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
   if (action.toolId === "risk.create.from-analysis") {
     const issue = args.issue && typeof args.issue === "object" ? args.issue as Record<string, unknown> : {};
     const taskIds = Array.isArray(issue.taskIds) ? issue.taskIds.map(String) : [];
-    const linkedTask = taskIds.length > 0
-      ? await prisma.projectGanttTask.findFirst({ where: { id: { in: taskIds }, projectId: action.projectId }, select: { id: true, taskCode: true, taskName: true } })
-      : null;
+    const linkedMatterRows = taskIds.length > 0
+      ? await prisma.weeklyItem.findMany({
+          where: {
+            projectId: action.projectId,
+            OR: [
+              { ganttTaskId: { in: taskIds } },
+              { ganttTaskLinks: { some: { ganttTaskId: { in: taskIds } } } },
+            ],
+          },
+          orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+          select: { id: true },
+        })
+      : [];
     const existing = await prisma.riskRegisterItem.findMany({ where: { projectId: action.projectId }, select: { id: true, riskCode: true, sortOrder: true, createdAt: true } });
     const lastSortOrder = existing.reduce((max, item) => Math.max(max, item.sortOrder), 0);
     const created = await prisma.$transaction(async (tx) => {
+      const linkedMatters = await findProjectMatters(
+        tx,
+        action.projectId,
+        linkedMatterRows.map((item) => item.id),
+      );
       const risk = await tx.riskRegisterItem.create({
         data: {
           projectId: action.projectId,
           sortOrder: lastSortOrder + 1,
           riskCode: nextRiskCode(existing),
-          ganttTaskId: linkedTask?.id ?? null,
+          ganttTaskId: null,
+          weeklyItemId: null,
           riskName: String(issue.message || "计划分析冲突").slice(0, 200),
-          linkedItemName: linkedTask ? `${linkedTask.taskCode} ${linkedTask.taskName}` : "",
+          linkedItemName: "",
           category: "进度",
           trigger: JSON.stringify(issue.facts ?? {}).slice(0, 500),
           probability: "中",
@@ -1961,6 +2197,7 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
           owner: user.displayName,
         },
       });
+      await replaceRiskMatterLinks(tx, risk.id, linkedMatters);
       await tx.operationHistory.create({ data: { projectId: action.projectId, entityType: "RISK_REGISTER_ITEM", entityId: risk.id, actionType: "CREATE", operator: user.displayName, detail: `通过智能助手从计划分析创建风险「${risk.riskName}」` } });
       return risk;
     });

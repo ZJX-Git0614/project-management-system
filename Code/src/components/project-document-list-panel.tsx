@@ -393,13 +393,10 @@ export function ProjectDocumentListPanel({ projectId, projectStatus }: ProjectDo
 
                               {isFolderExpanded && folderDocuments.length > 0 && (
                                 <div className="divide-y divide-border/40 border-t border-border/50">
-                                  {folderDocuments.map((document, fileIndex) => (
+                                  {folderDocuments.map((document) => (
                                     <div
                                       key={document.id}
-                                      className={cn(
-                                        "grid h-[34px] grid-cols-[minmax(320px,1fr)_110px_160px_44px] items-center px-3 text-sm transition-colors hover:bg-primary/5",
-                                        fileIndex % 2 === 0 ? "bg-background/70" : "bg-muted/25",
-                                      )}
+                                      className="grid h-[34px] grid-cols-[minmax(320px,1fr)_110px_160px_44px] items-center bg-transparent px-3 text-sm transition-colors hover:bg-primary/5"
                                     >
                                       <button
                                         type="button"

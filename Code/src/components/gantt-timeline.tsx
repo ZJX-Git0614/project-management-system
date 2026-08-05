@@ -2,13 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronRight as MenuChevronRight, ClipboardPaste, Columns3, Copy, GripVertical, IndentDecrease, IndentIncrease, ListTree, Plus, Scissors, Trash2, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronRight as MenuChevronRight, ClipboardPaste, Columns3, Copy, Filter, GripVertical, IndentDecrease, IndentIncrease, ListTree, Plus, Scissors, Star, Trash2, TriangleAlert, UserRoundCog, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { GanttDateField } from "@/components/gantt-date-field";
 import { HierarchicalMultiSelect, type HierarchicalSelectOption } from "@/components/hierarchical-multi-select";
 import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   DropdownMenu,
@@ -43,6 +42,13 @@ import {
   parseGanttDate,
 } from "@/lib/gantt";
 import { ganttFloatDays, GANTT_MINUTES_PER_DAY, type GanttScheduleStatus } from "@/lib/gantt-cpm";
+import { buildGanttUnassignedLeafTasksByParentId } from "@/lib/gantt-owner-hierarchy";
+import {
+  filterGanttRowsWithAncestors,
+  ganttFilterOptions,
+  type GanttFilterKey,
+  type GanttFilterState,
+} from "@/lib/gantt-filters";
 import {
   calculateTaskDurationDays,
   calculateTaskFinishDate,
@@ -71,11 +77,13 @@ interface GanttTimelineProps {
   reordering?: boolean;
   fullScreen?: boolean;
   portalContainer?: HTMLElement | null;
+  resourceConflictMessagesByTaskId?: Record<string, string[]>;
   onCreateTask?: (parentTask?: ProjectGanttTask) => void;
   historyFocusRequest?: GanttHistoryFocusRequest | null;
   onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft, columnKey?: string) => void | Promise<void>;
   onDeleteSelected?: (taskIds: string[]) => void | Promise<void>;
   onChangeHierarchy?: (taskIds: string[], direction: GanttHierarchyDirection) => void | Promise<void>;
+  onReassignBranch?: (taskId: string, ownerMemberId: string | null) => void | Promise<void>;
   onInsertTasks?: (
     anchorTaskId: string,
     placement: GanttInsertPlacement,
@@ -111,6 +119,7 @@ interface GanttClipboardState {
 export type GanttTaskDraft = {
   parentId?: string | null;
   ownerMemberId?: string | null;
+  ownerMemberIds?: string[];
   taskCategory: string;
   taskName: string;
   taskDescription: string;
@@ -122,6 +131,7 @@ export type GanttTaskDraft = {
   estimatedWorkHours: number;
   actualWorkHours: number;
   progress: number;
+  isMilestone: boolean;
   predecessorTaskIds: string[];
   remark: string;
 };
@@ -131,6 +141,15 @@ const HEADER_HEIGHT = 32;
 const BAR_HEIGHT = 10;
 const MIN_TIMELINE_WIDTH = 860;
 const ZOOM_LEVELS = [1, 3, 8, 20, 60];
+const GANTT_FILTER_KEYS: GanttFilterKey[] = [
+  "taskName",
+  "taskDescription",
+  "owner",
+  "durationDays",
+  "startDate",
+  "endDate",
+  "predecessor",
+];
 const ZOOM_LABELS = ["60天", "30天", "15天", "5天", "1天"];
 const DEFAULT_ZOOM_INDEX = 2;
 const SCHEDULE_STATUS_LABELS: Record<GanttScheduleStatus, string> = {
@@ -229,6 +248,79 @@ const ColumnVisibilityMenu = ({
   </DropdownMenu>
 );
 
+const GanttColumnFilterMenu = ({
+  columnKey,
+  options,
+  selectedValues,
+  onChange,
+  portalContainer,
+}: {
+  columnKey: GanttFilterKey;
+  options: string[];
+  selectedValues?: string[];
+  onChange: (values?: string[]) => void;
+  portalContainer?: HTMLElement | null;
+}) => {
+  const [search, setSearch] = useState("");
+  const active = Array.isArray(selectedValues);
+  const checkedValues = active ? selectedValues : options;
+  const normalizedSearch = search.trim().toLocaleLowerCase("zh-CN");
+  const visibleOptions = options.filter((option) => option.toLocaleLowerCase("zh-CN").includes(normalizedSearch));
+  const toggleValue = (value: string) => {
+    const nextValues = checkedValues.includes(value)
+      ? checkedValues.filter((item) => item !== value)
+      : [...checkedValues, value];
+    onChange(nextValues.length === options.length ? undefined : nextValues);
+  };
+
+  return (
+    <DropdownMenu onOpenChange={(open) => !open && setSearch("")}>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            "ml-auto flex size-5 shrink-0 items-center justify-center border-0 bg-transparent p-0 text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:text-primary",
+            active && "text-primary",
+          )}
+          aria-label={`筛选${GANTT_COLUMN_LABELS[columnKey]}`}
+          title={`筛选${GANTT_COLUMN_LABELS[columnKey]}`}
+        >
+          <Filter className={cn("size-3", active && "fill-current")} />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent container={portalContainer} align="start" className="w-60 p-2">
+        <Input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          onKeyDown={(event) => event.stopPropagation()}
+          className="mb-2 h-7 text-xs"
+          placeholder="搜索筛选项"
+          aria-label={`搜索${GANTT_COLUMN_LABELS[columnKey]}筛选项`}
+        />
+        <div className="mb-1 flex items-center justify-between px-1 text-[11px]">
+          <button type="button" className="text-primary hover:underline" onClick={() => onChange(undefined)}>全选</button>
+          <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => onChange([])}>清空</button>
+        </div>
+        <div className="max-h-64 overflow-y-auto">
+          {visibleOptions.length === 0 ? (
+            <div className="px-2 py-3 text-center text-xs text-muted-foreground">无匹配项</div>
+          ) : visibleOptions.map((option) => (
+            <DropdownMenuCheckboxItem
+              key={option}
+              checked={checkedValues.includes(option)}
+              onCheckedChange={() => toggleValue(option)}
+              onSelect={(event) => event.preventDefault()}
+              className="text-xs"
+            >
+              <span className="truncate" title={option}>{option}</span>
+            </DropdownMenuCheckboxItem>
+          ))}
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+};
+
 const getTickEvery = (dayWidth: number) => {
   if (dayWidth >= 60) return 1;
   if (dayWidth >= 20) return 5;
@@ -279,6 +371,11 @@ const durationFieldClass = cn(
 const toTaskDraft = (task: ProjectGanttTask, calendarMode: GanttCalendarMode): GanttTaskDraft => ({
   parentId: task.parentId ?? null,
   ownerMemberId: task.ownerMemberId ?? null,
+  ownerMemberIds: task.ownerMemberIds?.length
+    ? [...task.ownerMemberIds]
+    : task.ownerMembers?.length
+      ? task.ownerMembers.map((owner) => owner.id)
+      : task.ownerMemberId ? [task.ownerMemberId] : [],
   taskCategory: task.taskCategory,
   taskName: task.taskName,
   taskDescription: task.taskDescription?.trim() || "无",
@@ -290,6 +387,7 @@ const toTaskDraft = (task: ProjectGanttTask, calendarMode: GanttCalendarMode): G
   estimatedWorkHours: estimatedHoursForDuration(task.durationDays),
   actualWorkHours: roundGanttHours(task.actualWorkHours ?? 0),
   progress: Math.min(100, Math.max(0, task.progress ?? 0)),
+  isMilestone: Boolean(task.isMilestone),
   predecessorTaskIds: task.predecessorTaskIds ?? [],
   remark: task.remark ?? "",
 });
@@ -306,10 +404,16 @@ const taskDraftEquals = (task: ProjectGanttTask, draft: GanttTaskDraft, calendar
     && estimatedHoursForDuration(task.durationDays) === draft.estimatedWorkHours
     && roundGanttHours(task.actualWorkHours ?? 0) === draft.actualWorkHours
     && (task.progress ?? 0) === draft.progress
+    && Boolean(task.isMilestone) === draft.isMilestone
     && JSON.stringify(task.predecessorTaskIds ?? []) === JSON.stringify(draft.predecessorTaskIds)
     && (task.remark ?? "") === draft.remark
     && (task.parentId ?? null) === (draft.parentId ?? null)
-    && (task.ownerMemberId ?? null) === (draft.ownerMemberId ?? null)
+    && JSON.stringify([...(task.ownerMemberIds?.length
+      ? task.ownerMemberIds
+      : task.ownerMembers?.length
+        ? task.ownerMembers.map((owner) => owner.id)
+        : task.ownerMemberId ? [task.ownerMemberId] : [])].sort())
+      === JSON.stringify([...(draft.ownerMemberIds ?? (draft.ownerMemberId ? [draft.ownerMemberId] : []))].sort())
 );
 
 const GanttTimelineContent = ({
@@ -328,11 +432,13 @@ const GanttTimelineContent = ({
   reordering = false,
   fullScreen = false,
   portalContainer,
+  resourceConflictMessagesByTaskId = {},
   historyFocusRequest,
   onCreateTask,
   onUpdateTask,
   onDeleteSelected,
   onChangeHierarchy,
+  onReassignBranch,
   onInsertTasks,
   onPasteTasks,
   onActionError,
@@ -354,8 +460,9 @@ const GanttTimelineContent = ({
   const [hiddenColumnKeys, setHiddenColumnKeys] = useState<Set<GanttColumnKey>>(
     () => new Set(GANTT_DEFAULT_HIDDEN_COLUMN_KEYS),
   );
+  const [columnFilters, setColumnFilters] = useState<GanttFilterState>({});
   const [contextMenu, setContextMenu] = useState<{ taskId: string; x: number; y: number } | null>(null);
-  const [contextSubmenu, setContextSubmenu] = useState<"paste" | "insert" | null>(null);
+  const [contextSubmenu, setContextSubmenu] = useState<"paste" | "insert" | "owner" | null>(null);
   const [insertCount, setInsertCount] = useState(1);
   const visibleColumnKeys = useMemo(
     () => ganttVisibleColumnKeys(detailsCollapsed, hiddenColumnKeys),
@@ -371,6 +478,13 @@ const GanttTimelineContent = ({
   const [embeddedViewportHeight, setEmbeddedViewportHeight] = useState<number | null>(null);
   const range = getGanttDateRange(tasks);
   const rows = useMemo(() => buildGanttRows(tasks), [tasks]);
+  const filteredRows = useMemo(
+    () => filterGanttRowsWithAncestors(rows, columnFilters),
+    [columnFilters, rows],
+  );
+  const filterOptionsByKey = useMemo(() => Object.fromEntries(
+    GANTT_FILTER_KEYS.map((key) => [key, ganttFilterOptions(rows, key)]),
+  ) as Record<GanttFilterKey, string[]>, [rows]);
   const dependencyLinks = useMemo(() => buildGanttDependencyLinks(tasks), [tasks]);
   const rowByTaskId = useMemo(() => new Map(rows.map((row) => [row.id, row])), [rows]);
   const childIdsByParentId = useMemo(() => {
@@ -383,15 +497,19 @@ const GanttTimelineContent = ({
     });
     return map;
   }, [rows]);
+  const unassignedLeafTasksByParentId = useMemo(
+    () => buildGanttUnassignedLeafTasksByParentId(rows),
+    [rows],
+  );
   const taskDepthById = useMemo(() => ganttTaskDepths(rows), [rows]);
-  const visibleRows = useMemo(() => rows.filter((row) => {
+  const visibleRows = useMemo(() => filteredRows.filter((row) => {
     let parentId = row.parentId ?? null;
     while (parentId) {
       if (collapsedTaskIds.has(parentId)) return false;
       parentId = rowByTaskId.get(parentId)?.parentId ?? null;
     }
     return true;
-  }), [collapsedTaskIds, rowByTaskId, rows]);
+  }), [collapsedTaskIds, filteredRows, rowByTaskId]);
   const virtualRows = useMemo(() => visibleRows
     .slice(virtualRange.start, virtualRange.end)
     .map((row, offset) => ({ row, index: virtualRange.start + offset })), [virtualRange, visibleRows]);
@@ -439,6 +557,7 @@ const GanttTimelineContent = ({
     return index > 0 && !selectedRootSet.has(siblings[index - 1].id);
   });
   const contextTask = contextMenu ? rowByTaskId.get(contextMenu.taskId) : null;
+  const contextTaskHasChildren = Boolean(contextTask && (childIdsByParentId.get(contextTask.id)?.length ?? 0) > 0);
   const movedClipboardTaskIds = useMemo(() => {
     if (!clipboard || clipboard.mode !== "MOVE" || clipboard.projectId !== projectId) return new Set<string>();
     const moved = new Set<string>();
@@ -457,6 +576,7 @@ const GanttTimelineContent = ({
     setClipboard(null);
     setExplicitSelectedTaskIds([]);
     setSelectionAnchorTaskId(null);
+    setColumnFilters({});
   }, [projectId]);
 
   useEffect(() => {
@@ -730,6 +850,23 @@ const GanttTimelineContent = ({
     });
   };
 
+  const reassignContextBranch = async (ownerMemberId: string | null) => {
+    if (!contextTask || !onReassignBranch) return;
+    closeContextMenu();
+    try {
+      await onReassignBranch(contextTask.id, ownerMemberId);
+    } catch (error) {
+      onActionError?.(error instanceof Error ? error.message : "分支批量改派失败");
+    }
+  };
+
+  const toggleContextMilestone = async () => {
+    if (!contextTask || !canEdit || !onUpdateTask) return;
+    const nextDraft = { ...toTaskDraft(contextTask, calendarMode), isMilestone: !contextTask.isMilestone };
+    closeContextMenu();
+    await onUpdateTask(contextTask, nextDraft, "isMilestone");
+  };
+
   const selectTaskRange = useCallback((fromTaskId: string, toTaskId: string) => {
     const fromIndex = rows.findIndex((row) => row.id === fromTaskId);
     const toIndex = rows.findIndex((row) => row.id === toTaskId);
@@ -954,6 +1091,15 @@ const GanttTimelineContent = ({
   );
   const categoryCount = new Set(rows.map((row) => row.taskCategory)).size;
   const criticalCount = rows.filter((row) => row.isCritical).length;
+  const activeFilterCount = Object.values(columnFilters).filter((values) => Array.isArray(values)).length;
+  const updateColumnFilter = (key: GanttFilterKey, values?: string[]) => {
+    setColumnFilters((current) => {
+      const next = { ...current };
+      if (values === undefined) delete next[key];
+      else next[key] = values;
+      return next;
+    });
+  };
 
   return (
     <div className={cn("flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-card", fullScreen && "h-full rounded-none")}>
@@ -964,6 +1110,11 @@ const GanttTimelineContent = ({
           <span>总工期 {range.totalDays} 天</span>
           <span>{rows.length} 个任务</span>
           <span>{categoryCount} 个类别</span>
+          {activeFilterCount > 0 && (
+            <button type="button" className="text-primary hover:underline" onClick={() => setColumnFilters({})}>
+              已筛选 {visibleRows.length} 行 · 清除筛选
+            </button>
+          )}
         </div>
           <div className="flex flex-wrap items-center gap-3 text-xs">
             <div className="flex items-center gap-1 text-muted-foreground">
@@ -1074,9 +1225,13 @@ const GanttTimelineContent = ({
           <TaskGridHeader
             allSelected={rows.length > 0 && explicitSelectedTaskIds.length === rows.length}
             columnWidths={columnWidths}
+            filterOptionsByKey={filterOptionsByKey}
+            filters={columnFilters}
             onAutoFitColumn={autoFitColumn}
+            onFilterChange={updateColumnFilter}
             onResizeColumn={resizeColumn}
             onToggleAllSelection={toggleAllTaskSelection}
+            portalContainer={portalContainer}
             visibleColumnKeys={visibleColumnKeys}
           />
           <TimelineHeader
@@ -1142,6 +1297,8 @@ const GanttTimelineContent = ({
                   calendarMode={calendarMode}
                   predecessorOptions={tasks}
                   row={row}
+                  resourceConflictMessages={resourceConflictMessagesByTaskId[row.id] ?? []}
+                  unassignedLeafTasks={unassignedLeafTasksByParentId.get(row.id) ?? []}
                   taskDepth={taskDepthById.get(row.id) ?? 0}
                   explicitSelected={explicitSelectedTaskIds.includes(row.id)}
                   linkedSelected={linkedSelectedTaskIds.includes(row.id)}
@@ -1406,6 +1563,43 @@ const GanttTimelineContent = ({
             {canEdit && (
               <>
                 <div className="gantt-context-menu-separator" />
+                {contextTaskHasChildren && (
+                  <div
+                    className="gantt-context-menu-submenu-anchor"
+                    onMouseEnter={() => setContextSubmenu("owner")}
+                    onMouseLeave={() => setContextSubmenu((current) => current === "owner" ? null : current)}
+                  >
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="gantt-context-menu-item"
+                      onClick={() => setContextSubmenu("owner")}
+                    >
+                      <UserRoundCog className="size-4 shrink-0" />
+                      <span>批量改派负责人</span>
+                      <MenuChevronRight className="ml-auto size-3.5" />
+                    </button>
+                    {contextSubmenu === "owner" && (
+                      <div className="gantt-context-submenu max-h-72 overflow-y-auto" role="menu" aria-label="批量改派负责人">
+                        <button type="button" role="menuitem" className="gantt-context-menu-item" onClick={() => void reassignContextBranch(null)}>未分配</button>
+                        {projectMembers.map((member) => (
+                          <button key={member.id} type="button" role="menuitem" className="gantt-context-menu-item" onClick={() => void reassignContextBranch(member.id)}>
+                            {member.personName}（{member.roleName}）
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="gantt-context-menu-item"
+                  onClick={() => void toggleContextMilestone()}
+                >
+                  <Star className={cn("size-4 shrink-0", contextTask.isMilestone && "fill-current text-amber-400")} />
+                  <span>{contextTask.isMilestone ? "取消里程碑标记" : "标记为里程碑"}</span>
+                </button>
                 <button
                   type="button"
                   role="menuitem"
@@ -1675,16 +1869,24 @@ const ColumnResizeHandle = ({
 const TaskGridHeader = ({
   allSelected,
   columnWidths,
+  filterOptionsByKey,
+  filters = {},
   onAutoFitColumn,
+  onFilterChange,
   onResizeColumn,
   onToggleAllSelection,
+  portalContainer,
   visibleColumnKeys,
 }: {
   allSelected: boolean;
   columnWidths: GanttColumnWidths;
+  filterOptionsByKey?: Record<GanttFilterKey, string[]>;
+  filters?: GanttFilterState;
   onAutoFitColumn: (key: GanttColumnKey) => void;
+  onFilterChange?: (key: GanttFilterKey, values?: string[]) => void;
   onResizeColumn: (key: GanttColumnKey, width: number) => void;
   onToggleAllSelection: () => void;
+  portalContainer?: HTMLElement | null;
   visibleColumnKeys: GanttColumnKey[];
 }) => {
   return (
@@ -1716,7 +1918,18 @@ const TaskGridHeader = ({
               {GANTT_COLUMN_LABELS[key]}
             </button>
           ) : (
-            <span className="whitespace-nowrap">{GANTT_COLUMN_LABELS[key]}</span>
+            <>
+              <span className="min-w-0 truncate whitespace-nowrap">{GANTT_COLUMN_LABELS[key]}</span>
+              {filterOptionsByKey && onFilterChange && GANTT_FILTER_KEYS.includes(key as GanttFilterKey) && (
+                <GanttColumnFilterMenu
+                  columnKey={key as GanttFilterKey}
+                  options={filterOptionsByKey[key as GanttFilterKey]}
+                  selectedValues={filters[key as GanttFilterKey]}
+                  onChange={(values) => onFilterChange(key as GanttFilterKey, values)}
+                  portalContainer={portalContainer}
+                />
+              )}
+            </>
           )}
           {key !== "drag" && key !== "sequence" && (
             <ColumnResizeHandle
@@ -1883,6 +2096,8 @@ const EditableTaskRow = ({
   predecessorOptions,
   projectMembers,
   row,
+  resourceConflictMessages,
+  unassignedLeafTasks,
   taskDepth,
   visualTop,
   explicitSelected,
@@ -1914,6 +2129,8 @@ const EditableTaskRow = ({
   predecessorOptions: ProjectGanttTask[];
   projectMembers: ProjectMember[];
   row: ReturnType<typeof buildGanttRows>[number];
+  resourceConflictMessages: string[];
+  unassignedLeafTasks: Array<ReturnType<typeof buildGanttRows>[number]>;
   taskDepth: number;
   visualTop: number;
   explicitSelected: boolean;
@@ -1927,12 +2144,28 @@ const EditableTaskRow = ({
   const [draft, setDraft] = useState<GanttTaskDraft>(() => toTaskDraft(row, calendarMode));
   const isColumnVisible = (key: GanttColumnKey) => visibleColumnKeys.includes(key);
   const isChildTask = taskDepth > 0;
+  const ownerMembers = row.ownerMembers ?? (row.ownerMember ? [row.ownerMember] : []);
+  const ownerNames = ownerMembers.map((owner) => owner.personName);
+  const ownerSelectValue = draft.ownerMemberIds?.length
+    ? draft.ownerMemberIds
+    : ownerMembers.length > 0
+      ? ownerMembers.map((owner) => owner.id)
+      : draft.ownerMemberId ? [draft.ownerMemberId] : [];
+  const ownerSelectOptions = projectMembers.map((member) => ({
+    id: member.id,
+    label: member.personName,
+    secondaryLabel: member.roleNames?.length ? member.roleNames.join("、") : member.roleName,
+    searchText: [member.personName, ...(member.roleNames ?? [member.roleName])].filter(Boolean).join(" "),
+  }));
+  const ownerReadOnly = Boolean(row.ownerReadOnly);
+  const hasUnassignedLeafTasks = unassignedLeafTasks.length > 0;
+  const hasResourceConflict = resourceConflictMessages.length > 0;
   const levelColor = GANTT_DEPTH_COLORS[taskDepth % GANTT_DEPTH_COLORS.length];
   const levelCycle = Math.floor(taskDepth / GANTT_DEPTH_COLORS.length);
   const levelLightness = Math.max(42, levelColor.lightness - levelCycle * 6);
   const levelRowStyle = {
-    "--gantt-level-row": `hsl(${levelColor.hue} ${levelColor.saturation}% ${levelLightness}% / 0.024)`,
-    "--gantt-level-hover": `hsl(${levelColor.hue} ${levelColor.saturation}% ${levelLightness}% / 0.08)`,
+    "--gantt-level-row": `hsl(${levelColor.hue} ${levelColor.saturation}% ${levelLightness}% / ${hasChildren ? 0.11 : 0.06})`,
+    "--gantt-level-hover": `hsl(${levelColor.hue} ${levelColor.saturation}% ${levelLightness}% / ${hasChildren ? 0.17 : 0.12})`,
     "--gantt-level-accent": `hsl(${levelColor.hue} ${levelColor.saturation}% ${levelLightness}% / 0.68)`,
   } as CSSProperties & Record<"--gantt-level-row" | "--gantt-level-hover" | "--gantt-level-accent", string>;
 
@@ -2021,7 +2254,8 @@ const EditableTaskRow = ({
         explicitSelected && "!bg-sky-500/12 hover:!bg-sky-500/16",
         linkedSelected && "!bg-sky-500/8 hover:!bg-sky-500/12",
         dragged && "scale-[0.995] opacity-45 shadow-lg",
-        dropPosition && "!bg-primary/10"
+        dropPosition && "!bg-primary/10",
+        hasChildren && "font-semibold",
       )}
       onDragEnd={onDragEnd}
       onDragOver={onDragOver}
@@ -2114,6 +2348,34 @@ const EditableTaskRow = ({
         <span className="sr-only">拖拽排序</span>
       </span>
       <div data-gantt-column-key="taskCode" className="relative flex min-w-0 items-center gap-1 px-2" style={{ paddingLeft: `${8 + taskDepth * 10}px` }}>
+        {hasUnassignedLeafTasks && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className="flex size-4 shrink-0 items-center justify-center border-0 bg-transparent p-0 text-amber-500 outline-none transition-colors hover:text-amber-400 focus-visible:text-amber-300"
+                aria-label={`${draft.taskName || row.taskCode || "父任务"}存在 ${unassignedLeafTasks.length} 个未分配负责人任务`}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <TriangleAlert className="size-3.5" aria-hidden="true" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent
+              side="top"
+              align="start"
+              className="max-h-64 max-w-[min(420px,calc(100vw-2rem))] overflow-y-auto px-3 py-2 leading-5"
+            >
+              <div className="font-medium text-amber-500">以下任务未安排负责人</div>
+              <ul className="mt-1 space-y-0.5 text-card-foreground">
+                {unassignedLeafTasks.map((task) => (
+                  <li key={task.id} className="break-words">
+                    {task.taskCode || "未编号"} · {task.taskName || "未命名任务"}
+                  </li>
+                ))}
+              </ul>
+            </TooltipContent>
+          </Tooltip>
+        )}
         {hasChildren ? (
           <button
             type="button"
@@ -2129,6 +2391,9 @@ const EditableTaskRow = ({
           </button>
         ) : <span className="size-4 shrink-0" aria-hidden="true" />}
         {isChildTask && <span className="h-px w-2 shrink-0 bg-[var(--gantt-level-accent)]" />}
+        {row.isMilestone && (
+          <Star className="size-3.5 shrink-0 fill-amber-400 text-amber-400" aria-label="里程碑" />
+        )}
         <span
           className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap pr-12 font-mono text-[11px] font-semibold text-[var(--gantt-level-accent)]"
           title={row.taskCode || row.id}
@@ -2152,7 +2417,13 @@ const EditableTaskRow = ({
           onBlur={() => commitDraft("taskName")}
           onChange={(event) => updateTaskName(event.target.value)}
           onKeyDown={handleKeyDown}
-          className={cn(inlineFieldClass, "font-medium", row.isCritical && "pr-[76px] text-destructive")}
+          className={cn(
+            inlineFieldClass,
+            hasChildren ? "font-semibold" : "font-medium",
+            draft.progress >= 100 && "line-through decoration-1 text-muted-foreground",
+            row.isCritical && "text-destructive",
+            row.isCritical && "pr-[76px]",
+          )}
           disabled={!canEdit || isSaving}
           style={{ paddingLeft: `${8 + taskDepth * 18}px` }}
           placeholder="任务名称"
@@ -2198,29 +2469,54 @@ const EditableTaskRow = ({
         />
       ))}
       {isColumnVisible("owner") && (
-          <Select
-            data-gantt-column-key="owner"
-            value={draft.ownerMemberId ?? ""}
-            aria-label="负责人"
-            onChange={(event) => {
-              const nextDraft = { ...draft, ownerMemberId: event.target.value || null };
+        <div data-gantt-column-key="owner" className="relative min-w-0">
+          <HierarchicalMultiSelect
+            options={ownerSelectOptions}
+            value={ownerSelectValue}
+            ariaLabel="负责人"
+            searchPlaceholder="搜索项目成员或角色"
+            emptyText="没有可选择的项目成员"
+            placeholder="未分配"
+            title={ownerReadOnly ? `已汇总 ${ownerNames.length} 名子任务负责人，请先调整子任务` : ownerNames.join("、") || "未分配"}
+            onChange={(ownerMemberIds) => {
+              const normalizedOwnerMemberIds = [...new Set(ownerMemberIds)];
+              const nextDraft = {
+                ...draft,
+                ownerMemberIds: normalizedOwnerMemberIds,
+                ownerMemberId: normalizedOwnerMemberIds.length === 1 ? normalizedOwnerMemberIds[0] : null,
+              };
               setDraft(nextDraft);
               if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
                 void onUpdateTask?.(row, nextDraft, "owner");
               }
             }}
-            className={inlineSelectClass}
+            applyOnClose
+            className={cn(inlineSelectClass, "text-left", hasResourceConflict && "pr-6")}
+            contentClassName="w-[360px]"
             portalContainer={portalContainer}
-            variant="ghost"
-            disabled={!canEdit || isSaving}
-          >
-            <option value="">未分配</option>
-            {projectMembers.map((member) => (
-              <option key={member.id} value={member.id}>
-                {member.personName}（{member.roleName}）
-              </option>
-            ))}
-          </Select>
+            disabled={!canEdit || isSaving || ownerReadOnly}
+          />
+          {hasResourceConflict && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="absolute right-1 top-1/2 flex size-4 -translate-y-1/2 items-center justify-center border-0 bg-transparent p-0 text-destructive outline-none transition-colors hover:text-red-400 focus-visible:text-red-300"
+                  aria-label={`${draft.taskName || row.taskCode || "任务"}存在资源冲突`}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <TriangleAlert className="size-3.5" aria-hidden="true" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="top" align="end" className="max-h-64 max-w-[min(480px,calc(100vw-2rem))] overflow-y-auto px-3 py-2 leading-5">
+                <div className="font-medium text-destructive">资源冲突</div>
+                <ul className="mt-1 space-y-1 text-card-foreground">
+                  {resourceConflictMessages.map((message) => <li key={message} className="break-words">{message}</li>)}
+                </ul>
+              </TooltipContent>
+            </Tooltip>
+          )}
+        </div>
       )}
       {isColumnVisible("durationDays") && (
         <div data-gantt-column-key="durationDays">

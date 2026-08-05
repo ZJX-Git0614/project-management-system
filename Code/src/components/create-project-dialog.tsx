@@ -19,6 +19,7 @@ interface CreateProjectForm {
   deviceCount: number;
   repairCycleDays: number;
   startDate: string;
+  expectedEndDate: string;
   initialMember?: {
     roleName: string;
     personName: string;
@@ -41,6 +42,7 @@ const INITIAL_FORM: CreateProjectForm = {
   deviceCount: 0,
   repairCycleDays: 0,
   startDate: "",
+  expectedEndDate: "",
 };
 
 export const CreateProjectDialog = ({ open, onClose, onSubmit, disabled, roleConfigs }: CreateProjectDialogProps) => {
@@ -70,7 +72,9 @@ export const CreateProjectDialog = ({ open, onClose, onSubmit, disabled, roleCon
   const step1Valid =
     form.name.trim() &&
     form.clientName.trim() &&
-    form.startDate;
+    form.startDate &&
+    form.expectedEndDate &&
+    form.expectedEndDate >= form.startDate;
 
   // Step 2: 项目组成员
   const roleConfig = roleConfigs.find((r) => r.roleName === selectedRole);
@@ -212,16 +216,33 @@ export const CreateProjectDialog = ({ open, onClose, onSubmit, disabled, roleCon
                 className={inputClass}
               />
             </div>
-            <div>
-              <label className="mb-1 block text-xs text-muted-foreground">开始时间 *</label>
-              <input
-                type="date"
-                value={form.startDate}
-                onChange={(e) => setForm((prev) => ({ ...prev, startDate: e.target.value }))}
-                required
-                disabled={disabled}
-                className={inputClass}
-              />
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="mb-1 block text-xs text-muted-foreground">开始时间 *</label>
+                <input
+                  type="date"
+                  value={form.startDate}
+                  onChange={(e) => setForm((prev) => ({ ...prev, startDate: e.target.value }))}
+                  required
+                  disabled={disabled}
+                  className={inputClass}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-muted-foreground">预计结项时间 *</label>
+                <input
+                  type="date"
+                  value={form.expectedEndDate}
+                  min={form.startDate || undefined}
+                  onChange={(e) => setForm((prev) => ({ ...prev, expectedEndDate: e.target.value }))}
+                  required
+                  disabled={disabled}
+                  className={inputClass}
+                />
+                {form.startDate && form.expectedEndDate && form.expectedEndDate < form.startDate && (
+                  <div className="mt-1 text-[11px] text-destructive">预计结项时间不能早于开始时间</div>
+                )}
+              </div>
             </div>
           </>
         )}
@@ -286,6 +307,7 @@ export const CreateProjectDialog = ({ open, onClose, onSubmit, disabled, roleCon
                 <div>项目编号：<span className="font-medium text-foreground">{form.code || "-"}</span></div>
                 <div>甲方单位：<span className="font-medium text-foreground">{form.clientName}</span></div>
                 <div>开始时间：<span className="font-medium text-foreground">{form.startDate}</span></div>
+                <div>预计结项：<span className="font-medium text-foreground">{form.expectedEndDate}</span></div>
               </div>
             </div>
             <div className="rounded-lg border border-border p-3 text-xs">

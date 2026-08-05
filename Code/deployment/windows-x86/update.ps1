@@ -9,6 +9,13 @@ $OutputEncoding = [Console]::OutputEncoding
 
 $script:CurrentStep = "初始化更新"
 $script:PreUpdateBackupDirectory = ""
+$script:CandidateContainer = ""
+$script:CandidateDatabase = ""
+$script:ComposeImage = ""
+$script:RollbackImage = ""
+$script:DeploymentDirectory = ""
+$script:TagSwitched = $false
+$script:CutoverStarted = $false
 
 function Write-Step([int]$Number, [int]$Total, [string]$Message) {
   $script:CurrentStep = $Message
@@ -20,12 +27,87 @@ function Write-Success([string]$Message) {
   Write-Host "  [成功] $Message" -ForegroundColor Green
 }
 
+function Invoke-DockerCommand([string[]]$Arguments, [string]$FailureMessage) {
+  $previousErrorActionPreference = $ErrorActionPreference
+  $output = @()
+  $exitCode = -1
+  try {
+    # Windows PowerShell 5.1 exposes normal Docker Compose progress on stderr as ErrorRecord objects.
+    $ErrorActionPreference = "Continue"
+    $output = @(& docker @Arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+
+  if ($exitCode -ne 0) {
+    $details = (($output | Select-Object -Last 20 | ForEach-Object { $_.ToString() }) -join "`n").Trim()
+    if ($details) {
+      throw "$FailureMessage`nDocker 退出码：$exitCode`n$details"
+    }
+    throw "$FailureMessage Docker 退出码：$exitCode"
+  }
+}
+
+function Remove-CandidateContainer {
+  if (-not $script:CandidateContainer) {
+    return
+  }
+  $candidateId = docker ps -aq --filter "name=^/$($script:CandidateContainer)$" | Select-Object -First 1
+  if ($candidateId) {
+    docker rm -f $script:CandidateContainer *> $null
+  }
+  $script:CandidateContainer = ""
+}
+
+function Remove-CandidateDatabase {
+  if (-not $script:CandidateDatabase) {
+    return
+  }
+  & docker exec pms-postgres dropdb -U pms --if-exists --force $script:CandidateDatabase *> $null
+  $script:CandidateDatabase = ""
+}
+
+function Restore-BlueApplication {
+  if (-not $script:TagSwitched -or -not $script:ComposeImage -or -not $script:RollbackImage) {
+    return
+  }
+
+  Set-Location $script:DeploymentDirectory
+  docker tag $script:RollbackImage $script:ComposeImage
+  Assert-LastExitCode "无法恢复更新前镜像标签。"
+  if ($script:CutoverStarted) {
+    Invoke-DockerCommand -Arguments @("compose", "up", "-d", "--no-deps", "--force-recreate", "pms") -FailureMessage "无法自动恢复更新前应用容器。"
+    Wait-ForApplication "http://localhost:3000/login"
+  }
+  $script:TagSwitched = $false
+}
+
 trap {
+  $originalError = $_.Exception.Message
+  Remove-CandidateContainer
+  Remove-CandidateDatabase
+  $recoveryMessage = ""
+  if ($script:TagSwitched) {
+    try {
+      Restore-BlueApplication
+      $recoveryMessage = if ($script:CutoverStarted) {
+        "已自动恢复蓝色旧版本并重新通过健康检查。"
+      } else {
+        "绿色候选环境未通过，正式应用容器未切换。"
+      }
+    } catch {
+      $recoveryMessage = "自动恢复失败：$($_.Exception.Message)。请运行 rollback.bat 或联系管理员。"
+    }
+  }
   Write-Host ""
   Write-Host "[更新失败] 当前步骤：$script:CurrentStep" -ForegroundColor Red
-  Write-Host "错误详情：$($_.Exception.Message)" -ForegroundColor Red
+  Write-Host "错误详情：$originalError" -ForegroundColor Red
   if ($script:PreUpdateBackupDirectory) {
     Write-Host "更新前备份已保留：$script:PreUpdateBackupDirectory" -ForegroundColor Yellow
+  }
+  if ($recoveryMessage) {
+    Write-Host $recoveryMessage -ForegroundColor Yellow
   }
   Write-Host "更新已停止，未继续执行后续步骤。请根据上方错误修复后重新运行 update.bat。" -ForegroundColor Yellow
   exit 1
@@ -53,12 +135,12 @@ function Find-DeploymentDirectory {
   throw "未找到 Ceastar PMS 部署目录。请将整个更新包文件夹直接放入已安装的 Ceastar PMS 目录后再运行。"
 }
 
-function Wait-ForApplication {
-  Write-Host "  正在等待 Ceastar PMS 健康检查通过..." -ForegroundColor DarkCyan
+function Wait-ForApplication([string]$Url = "http://localhost:3000/login") {
+  Write-Host "  正在等待 Ceastar PMS 健康检查通过：$Url" -ForegroundColor DarkCyan
   for ($attempt = 1; $attempt -le 90; $attempt++) {
     try {
-      $response = Invoke-WebRequest -Uri "http://localhost:3000/login" -UseBasicParsing -TimeoutSec 5
-      if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) {
+      $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 5
+      if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
         return
       }
     } catch {
@@ -66,6 +148,65 @@ function Wait-ForApplication {
     }
   }
   throw "Ceastar PMS 在 180 秒内未就绪，请检查 Docker 容器日志。"
+}
+
+function Get-AvailableCandidatePort {
+  foreach ($port in 3101..3110) {
+    $listener = $null
+    try {
+      $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port)
+      $listener.Start()
+      return $port
+    } catch {
+      continue
+    } finally {
+      if ($listener) {
+        $listener.Stop()
+      }
+    }
+  }
+  throw "本机 3101-3110 端口均被占用，无法启动绿色候选环境。"
+}
+
+function New-CandidateDatabase([string]$ReleaseId, [string]$BackupDirectory) {
+  $safeReleaseId = ($ReleaseId -replace '[^0-9A-Za-z]', '_').ToLowerInvariant()
+  $databaseName = "pms_candidate_$safeReleaseId"
+  $dumpPath = Join-Path $BackupDirectory "database.dump"
+  if (-not (Test-Path -LiteralPath $dumpPath)) {
+    throw "候选数据库缺少已校验的更新前备份：$dumpPath"
+  }
+  $containerDumpPath = "/tmp/$databaseName.dump"
+  Invoke-DockerCommand -Arguments @("cp", $dumpPath, "pms-postgres:$containerDumpPath") -FailureMessage "无法复制候选数据库备份。"
+  Invoke-DockerCommand -Arguments @("exec", "pms-postgres", "dropdb", "-U", "pms", "--if-exists", "--force", $databaseName) -FailureMessage "无法清理旧候选数据库。"
+  Invoke-DockerCommand -Arguments @("exec", "pms-postgres", "createdb", "-U", "pms", "-O", "pms", $databaseName) -FailureMessage "无法创建候选数据库。"
+  Invoke-DockerCommand -Arguments @("exec", "pms-postgres", "pg_restore", "-U", "pms", "-d", $databaseName, "--exit-on-error", "--no-owner", "--no-privileges", $containerDumpPath) -FailureMessage "无法恢复候选数据库。"
+  & docker exec pms-postgres rm -f $containerDumpPath *> $null
+  $script:CandidateDatabase = $databaseName
+
+  $databaseEnvironment = @(& docker inspect pms --format '{{range .Config.Env}}{{println .}}{{end}}') |
+    Where-Object { $_ -like "DATABASE_URL=*" } |
+    Select-Object -First 1
+  if (-not $databaseEnvironment) {
+    throw "无法从当前 PMS 容器读取数据库连接配置。"
+  }
+  $databaseUrl = $databaseEnvironment.Substring("DATABASE_URL=".Length).Trim()
+  if ($databaseUrl -notmatch '^(postgres(?:ql)?://[^/]+/)([^?]+)(.*)$') {
+    throw "当前 PMS 数据库连接格式无法用于候选库。"
+  }
+  return $matches[1] + $databaseName + $matches[3]
+}
+
+function Start-GreenCandidate([string]$ReleaseId, [int]$Port, [string]$CandidateDatabaseUrl) {
+  $safeReleaseId = $ReleaseId -replace '[^0-9A-Za-z_.-]', '-'
+  $candidateName = "ceastar-pms-green-$safeReleaseId"
+  $existingCandidate = docker ps -aq --filter "name=^/$candidateName$" | Select-Object -First 1
+  if ($existingCandidate) {
+    docker rm -f $candidateName *> $null
+    Assert-LastExitCode "无法清理同名的旧绿色候选容器。"
+  }
+  $publish = "127.0.0.1:${Port}:3000"
+  $script:CandidateContainer = $candidateName
+  Invoke-DockerCommand -Arguments @("compose", "run", "--detach", "--no-deps", "--name", $candidateName, "--publish", $publish, "--env", "PMS_WEB_WORKERS=1", "--env", "DATABASE_URL=$CandidateDatabaseUrl", "pms") -FailureMessage "绿色候选容器启动失败。"
 }
 
 function Assert-VerifiedBackup([string]$BackupDirectory) {
@@ -121,7 +262,7 @@ function Show-StorageProtectionStatus([string]$Directory) {
   }
 }
 
-function Ensure-CompatibleSystemBackupConfiguration([string]$Directory) {
+function Ensure-CompatibleSystemBackupConfiguration([string]$Directory, [string]$ReleaseId = "compatibility-test") {
   $composePath = Join-Path $Directory "docker-compose.yml"
   $content = [System.IO.File]::ReadAllText($composePath)
   $lineBreak = if ($content.Contains("`r`n")) { "`r`n" } else { "`n" }
@@ -181,7 +322,8 @@ function Ensure-CompatibleSystemBackupConfiguration([string]$Directory) {
     return
   }
 
-  $backupPath = "$composePath.before-update-20260803-3a"
+  $safeReleaseId = $ReleaseId -replace '[^0-9A-Za-z_.-]', '-'
+  $backupPath = "$composePath.before-update-$safeReleaseId"
   if (-not (Test-Path $backupPath)) {
     [System.IO.File]::Copy($composePath, $backupPath, $false)
   }
@@ -198,12 +340,14 @@ if ($ComposeCompatibilityTestDirectory) {
 }
 
 $deploymentDirectory = Find-DeploymentDirectory
-Write-Step 1 8 "检查部署目录与磁盘保护"
+$script:DeploymentDirectory = $deploymentDirectory
+Write-Step 1 10 "检查部署目录与磁盘保护"
 Write-Host "  部署目录：$deploymentDirectory"
 Show-StorageProtectionStatus $deploymentDirectory
 Write-Success "已找到有效的 Ceastar PMS 部署目录"
 $imageNameFile = Join-Path $PSScriptRoot "image-name.txt"
 $imageHashFile = Join-Path $PSScriptRoot "image.sha256"
+$releaseIdFile = Join-Path $PSScriptRoot "release-id.txt"
 $imageDirectory = Join-Path $PSScriptRoot "images"
 $packagedBackupScript = Join-Path $PSScriptRoot "backup.ps1"
 
@@ -213,14 +357,21 @@ if (-not (Test-Path $imageNameFile)) {
 if (-not (Test-Path $imageHashFile)) {
   throw "更新包中缺少 image.sha256。"
 }
+if (-not (Test-Path $releaseIdFile)) {
+  throw "更新包中缺少 release-id.txt。"
+}
 
 $imageFiles = @(Get-ChildItem -Path $imageDirectory -Filter "*.tar" -File -ErrorAction SilentlyContinue)
-Write-Step 2 8 "校验更新包与 Docker 镜像"
+Write-Step 2 10 "校验更新包与 Docker 镜像"
 if ($imageFiles.Count -ne 1) { throw "更新包必须且只能包含一个 Docker 镜像 tar 文件。" }
 
 $newImage = (Get-Content -Path $imageNameFile -Raw).Trim()
 if (-not $newImage) {
   throw "image-name.txt 为空。"
+}
+$releaseId = (Get-Content -Path $releaseIdFile -Raw).Trim()
+if ($releaseId -notmatch '^[0-9]{8}-[0-9A-Za-z.-]+$') {
+  throw "release-id.txt 格式无效，应类似 20260804-1。"
 }
 
 $hashContent = (Get-Content -LiteralPath $imageHashFile -Raw).Trim()
@@ -237,29 +388,35 @@ Write-Success "更新包完整，镜像 SHA256 校验通过"
 
 Set-Location $deploymentDirectory
 
-Write-Step 3 8 "检查 Docker 并保留回滚镜像"
+Write-Step 3 10 "检查 Docker 并保留蓝色回滚镜像"
 docker info *> $null
 Assert-LastExitCode "Docker Desktop 未运行，请先启动 Docker Desktop。"
 
 $composeImage = ""
+$currentImageReference = ""
 $containerId = docker ps -a --filter "name=^/pms$" --format "{{.ID}}" | Select-Object -First 1
 if ($containerId) {
   $composeImage = (docker inspect pms --format "{{.Config.Image}}").Trim()
   Assert-LastExitCode "无法读取当前 PMS 容器信息。"
+  $currentImageReference = (docker inspect pms --format "{{.Image}}").Trim()
+  Assert-LastExitCode "无法读取当前 PMS 容器镜像。"
 } else {
   $composeImage = docker compose config --images |
     Where-Object { $_ -like "ceastar-project-management:*" } |
     Select-Object -First 1
+  $currentImageReference = $composeImage
 }
 
 if (-not $composeImage) {
   throw "无法确定当前 Ceastar PMS 镜像名称。"
 }
 
-$rollbackImage = "ceastar-project-management:rollback-20260803-3a-amd64"
-docker image inspect $composeImage *> $null
+$rollbackImage = "ceastar-project-management:rollback-$releaseId-amd64"
+$script:ComposeImage = $composeImage
+$script:RollbackImage = $rollbackImage
+docker image inspect $currentImageReference *> $null
 Assert-LastExitCode "当前 Ceastar PMS 镜像不存在。"
-docker tag $composeImage $rollbackImage
+docker tag $currentImageReference $rollbackImage
 Assert-LastExitCode "保留回滚镜像失败。"
 Write-Success "已保留回滚镜像：$rollbackImage"
 
@@ -267,7 +424,7 @@ if (Test-Path $packagedBackupScript) {
   Copy-Item -LiteralPath $packagedBackupScript -Destination (Join-Path $deploymentDirectory "backup.ps1") -Force
 }
 
-Write-Step 4 8 "备份数据库与项目文档"
+Write-Step 4 10 "备份数据库与项目文档"
 $backupOutput = @(& (Join-Path $deploymentDirectory "backup.ps1") 2>&1 | ForEach-Object { $_.ToString() })
 $backupOutput | ForEach-Object { Write-Host $_ }
 $backupDirectoryLine = $backupOutput |
@@ -281,45 +438,73 @@ $script:PreUpdateBackupDirectory = $preUpdateBackupDirectory
 Assert-VerifiedBackup $preUpdateBackupDirectory
 Write-Success "更新前备份完成并通过校验：$preUpdateBackupDirectory"
 
-Write-Step 5 8 "升级部署配置"
-Ensure-CompatibleSystemBackupConfiguration $deploymentDirectory
+Write-Step 5 10 "升级部署配置"
+Ensure-CompatibleSystemBackupConfiguration $deploymentDirectory $releaseId
+$assistantBridgeInstaller = Join-Path $PSScriptRoot "install-assistant-service-bridge.ps1"
+if (-not (Test-Path $assistantBridgeInstaller)) {
+  throw "更新包中缺少 install-assistant-service-bridge.ps1。"
+}
+& $assistantBridgeInstaller -DeploymentDirectory $deploymentDirectory -SourceDirectory $PSScriptRoot
 Write-Success "docker-compose.yml 兼容性检查通过"
+Write-Success "Ollama/RAGLite 主机服务管理桥接已安装"
 
 Write-Host "  [说明] 本次更新不自动修复 MPP 导出服务。如需二进制 MPP 导出，更新完成后以管理员身份运行 repair-mpp-export-service.bat。" -ForegroundColor DarkYellow
 
-Write-Step 6 8 "加载离线 Docker 更新镜像"
+Write-Step 6 10 "加载绿色离线 Docker 更新镜像"
 docker load --input $imageFiles[0].FullName
 Assert-LastExitCode "加载更新镜像失败。"
 docker image inspect $newImage *> $null
 Assert-LastExitCode "镜像加载完成后未找到预期的更新镜像。"
+$newImageArchitecture = (docker image inspect $newImage --format "{{.Architecture}}").Trim()
+Assert-LastExitCode "无法读取更新镜像架构。"
+if ($newImageArchitecture -ne "amd64") {
+  throw "更新镜像架构为 $newImageArchitecture，Windows x86-64 部署要求 linux/amd64 镜像。"
+}
 
 if ($newImage -ne $composeImage) {
   docker tag $newImage $composeImage
   Assert-LastExitCode "激活更新镜像标签失败。"
 }
+$script:TagSwitched = $true
 Write-Success "离线更新镜像已加载"
 
-Write-Step 7 8 "重建 Ceastar PMS 应用容器"
-docker compose up -d --no-deps --force-recreate pms
-Assert-LastExitCode "重建 Ceastar PMS 应用容器失败。"
-Write-Success "Ceastar PMS 应用容器已重建"
+Write-Step 7 10 "启动绿色候选环境"
+$candidatePort = Get-AvailableCandidatePort
+$candidateDatabaseUrl = New-CandidateDatabase $releaseId $preUpdateBackupDirectory
+Start-GreenCandidate $releaseId $candidatePort $candidateDatabaseUrl
+Write-Success "绿色候选环境已启动，蓝色旧版本继续在 3000 端口提供服务"
 
-Write-Step 8 8 "执行应用健康检查"
-Wait-ForApplication
+Write-Step 8 10 "验证绿色候选环境"
+Wait-ForApplication "http://127.0.0.1:$candidatePort/api/health/ready"
+Write-Success "绿色候选环境健康检查通过"
+Remove-CandidateContainer
+Remove-CandidateDatabase
+
+Write-Step 9 10 "切换 3000 端口到绿色版本"
+$script:CutoverStarted = $true
+Invoke-DockerCommand -Arguments @("compose", "up", "-d", "--no-deps", "--force-recreate", "pms") -FailureMessage "重建 Ceastar PMS 应用容器失败。"
+Write-Success "绿色版本已接管 3000 端口"
+
+Write-Step 10 10 "执行切换后健康检查并保存状态"
+Wait-ForApplication "http://localhost:3000/api/health/ready"
 Write-Success "Ceastar PMS 已正常响应"
 
 $state = @(
+  "releaseId=$releaseId",
+  "strategy=blue-green-staged",
   "composeImage=$composeImage",
   "newImage=$newImage",
   "rollbackImage=$rollbackImage",
   "updatedAt=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 )
-Set-Content -Path (Join-Path $deploymentDirectory ".ceastar-update-20260803-3a.state") -Value $state -Encoding ASCII
+Set-Content -Path (Join-Path $deploymentDirectory ".ceastar-update-$releaseId.state") -Value $state -Encoding ASCII
+$script:TagSwitched = $false
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Green
 Write-Host "Ceastar PMS 更新成功" -ForegroundColor Green
 Write-Host "访问地址：http://localhost:3000"
+Write-Host "发布策略：蓝绿候选预检 + 健康切换 + 失败自动回退"
 Write-Host "更新前备份：$preUpdateBackupDirectory"
 Write-Host "回滚镜像：$rollbackImage"
 Write-Host "========================================" -ForegroundColor Green

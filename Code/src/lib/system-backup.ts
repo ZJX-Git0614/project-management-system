@@ -3,11 +3,12 @@ import { constants as fsConstants } from "node:fs";
 import { access, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { SystemBackupSettings } from "@prisma/client";
+import { PrismaClient, type SystemBackupSettings } from "@prisma/client";
 
 import { decryptAssistantSecret } from "@/lib/assistant-secrets";
 import { prisma } from "@/lib/prisma";
 import { PROJECT_DOCUMENT_STORAGE_ROOT } from "@/lib/project-document-storage";
+import { ASSISTANT_ARTIFACT_STORAGE_ROOT } from "@/lib/assistant-artifact-storage";
 import {
   ensureWebDavDirectory,
   pruneWebDavBackups,
@@ -24,6 +25,25 @@ export const DEFAULT_SYSTEM_BACKUP_ROOT = path.resolve(
 const MANUAL_MIGRATION_DIRECTORY = path.join(process.cwd(), "prisma", "manual-migrations");
 
 let backupInProgress = false;
+const SYSTEM_DATA_ADVISORY_LOCK_KEY = 1_886_275_401;
+
+export const withSystemDataOperationLock = async <T>(work: () => Promise<T>): Promise<T> => {
+  const lockClient = new PrismaClient();
+  await lockClient.$connect();
+  try {
+    const rows = await lockClient.$queryRawUnsafe<Array<{ locked: boolean }>>(
+      `SELECT pg_try_advisory_lock(${SYSTEM_DATA_ADVISORY_LOCK_KEY}) AS locked`,
+    );
+    if (!rows[0]?.locked) throw new Error("已有备份、恢复或云盘同步任务正在执行");
+    try {
+      return await work();
+    } finally {
+      await lockClient.$queryRawUnsafe(`SELECT pg_advisory_unlock(${SYSTEM_DATA_ADVISORY_LOCK_KEY})`).catch(() => undefined);
+    }
+  } finally {
+    await lockClient.$disconnect();
+  }
+};
 
 export const postgresToolConnectionUrl = (databaseUrl: string) => {
   const url = new URL(databaseUrl);
@@ -64,14 +84,14 @@ export const databaseRestoreCommandPlan = (
   },
 });
 
-const getManualMigrationPaths = async () => (await readdir(MANUAL_MIGRATION_DIRECTORY, { withFileTypes: true }))
+export const getManualMigrationPaths = async () => (await readdir(MANUAL_MIGRATION_DIRECTORY, { withFileTypes: true }))
   .filter((entry) => entry.isFile() && entry.name.endsWith(".sql"))
   .map((entry) => path.join(MANUAL_MIGRATION_DIRECTORY, entry.name))
   .sort((left, right) => left.localeCompare(right));
 
 const timestamp = (date = new Date()) => date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 
-const runCommand = (command: string, args: string[]) => new Promise<void>((resolve, reject) => {
+export const runSystemCommand = (command: string, args: string[]) => new Promise<void>((resolve, reject) => {
   const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
   let stderr = "";
   child.stderr.on("data", (chunk) => {
@@ -84,7 +104,7 @@ const runCommand = (command: string, args: string[]) => new Promise<void>((resol
   });
 });
 
-const runCommandOutput = (command: string, args: string[]) => new Promise<string>((resolve, reject) => {
+export const runSystemCommandOutput = (command: string, args: string[]) => new Promise<string>((resolve, reject) => {
   const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
@@ -339,7 +359,7 @@ const uploadBackupFilesToCloud = async ({
   return cloudPath;
 };
 
-export const createSystemBackup = async ({
+const createSystemBackupUnlocked = async ({
   triggerMode,
   operator,
 }: {
@@ -371,7 +391,7 @@ export const createSystemBackup = async ({
 
     if (!process.env.DATABASE_URL) throw new Error("服务器未配置 DATABASE_URL");
     await mkdir(directory, { recursive: true });
-    await runCommand("pg_dump", [
+    await runSystemCommand("pg_dump", [
       "--format=custom",
       "--no-owner",
       "--no-privileges",
@@ -380,12 +400,16 @@ export const createSystemBackup = async ({
     ]);
 
     await mkdir(PROJECT_DOCUMENT_STORAGE_ROOT, { recursive: true });
-    await runCommand("tar", [
+    await mkdir(ASSISTANT_ARTIFACT_STORAGE_ROOT, { recursive: true });
+    await runSystemCommand("tar", [
       "-czf",
       documentArchivePath,
       "-C",
       path.dirname(PROJECT_DOCUMENT_STORAGE_ROOT),
       path.basename(PROJECT_DOCUMENT_STORAGE_ROOT),
+      "-C",
+      path.dirname(ASSISTANT_ARTIFACT_STORAGE_ROOT),
+      path.basename(ASSISTANT_ARTIFACT_STORAGE_ROOT),
     ]);
 
     await writeFile(path.join(directory, "manifest.json"), JSON.stringify({
@@ -394,6 +418,7 @@ export const createSystemBackup = async ({
       triggerMode,
       databaseFile: databaseFileName,
       documentArchiveFile: documentArchiveFileName,
+      documentArchiveContents: ["project-documents", "assistant-artifacts"],
     }, null, 2));
 
     let cloudStatus = "SKIPPED";
@@ -455,7 +480,12 @@ export const createSystemBackup = async ({
   }
 };
 
-export const syncLatestSystemBackupToCloud = async ({ operator }: { operator: string }) => {
+export const createSystemBackup = (params: {
+  triggerMode: "MANUAL" | "AUTOMATIC";
+  operator: string;
+}) => withSystemDataOperationLock(() => createSystemBackupUnlocked(params));
+
+const syncLatestSystemBackupToCloudUnlocked = async ({ operator }: { operator: string }) => {
   if (backupInProgress) throw new Error("已有备份或云盘同步任务正在执行");
   backupInProgress = true;
   try {
@@ -504,22 +534,30 @@ export const syncLatestSystemBackupToCloud = async ({ operator }: { operator: st
   }
 };
 
-export const restoreDatabaseDump = async (dumpPath: string) => {
+export const syncLatestSystemBackupToCloud = (params: { operator: string }) => (
+  withSystemDataOperationLock(() => syncLatestSystemBackupToCloudUnlocked(params))
+);
+
+const restoreDatabaseDumpUnlocked = async (dumpPath: string) => {
   if (!process.env.DATABASE_URL) throw new Error("服务器未配置 DATABASE_URL");
   const sqlPath = `${dumpPath}.${process.pid}.${Date.now()}.restore.sql`;
   const migrationPaths = await getManualMigrationPaths();
   const plan = databaseRestoreCommandPlan(process.env.DATABASE_URL, dumpPath, sqlPath, migrationPaths);
   await prisma.$disconnect();
   try {
-    await runCommand(plan.render.command, plan.render.args);
-    await runCommand(plan.apply.command, plan.apply.args);
+    await runSystemCommand(plan.render.command, plan.render.args);
+    await runSystemCommand(plan.apply.command, plan.apply.args);
   } finally {
     await rm(sqlPath, { force: true }).catch(() => undefined);
   }
 };
 
+export const restoreDatabaseDump = (dumpPath: string) => (
+  withSystemDataOperationLock(() => restoreDatabaseDumpUnlocked(dumpPath))
+);
+
 export const validateDatabaseDump = async (dumpPath: string) => {
-  const contents = await runCommandOutput("pg_restore", ["--list", dumpPath]);
+  const contents = await runSystemCommandOutput("pg_restore", ["--list", dumpPath]);
   const requiredTables = ["Project", "UserAccount", "ProjectGanttTask"];
   const missing = requiredTables.filter((table) => !contents.includes(`TABLE DATA public ${table} `));
   if (missing.length > 0) {

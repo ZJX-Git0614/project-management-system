@@ -8,11 +8,14 @@ import {
   Clock3,
   Database,
   LoaderCircle,
+  Play,
   Plus,
   RefreshCw,
   Save,
+  ServerCog,
   Settings2,
   Sparkles,
+  Square,
   Trash2,
   Wrench,
 } from "lucide-react";
@@ -29,9 +32,14 @@ import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api-client";
 import { emitAssistantSettingsChanged } from "@/lib/assistant-events";
+import type {
+  AssistantHostServiceAction,
+  AssistantHostServiceName,
+  AssistantServiceManagerStatus,
+} from "@/lib/assistant-service-manager";
 import { cn } from "@/lib/utils";
 
-type SettingsTab = "BASIC" | "PROVIDERS" | "KNOWLEDGE" | "AGENT" | "HISTORY";
+type SettingsTab = "BASIC" | "PROVIDERS" | "SERVICES" | "KNOWLEDGE" | "AGENT" | "HISTORY";
 
 type ProviderItem = {
   id: string;
@@ -124,6 +132,7 @@ const emptyProvider = (providerKind: ProviderDraft["providerKind"]): ProviderDra
 const TAB_ITEMS: Array<{ id: SettingsTab; label: string; icon: typeof Bot }> = [
   { id: "BASIC", label: "基础与人设", icon: Sparkles },
   { id: "PROVIDERS", label: "模型供应商", icon: BrainCircuit },
+  { id: "SERVICES", label: "本地服务", icon: ServerCog },
   { id: "KNOWLEDGE", label: "知识库", icon: Database },
   { id: "AGENT", label: "Agent 工具", icon: Wrench },
   { id: "HISTORY", label: "历史记录", icon: Clock3 },
@@ -136,13 +145,14 @@ const Field = ({ label, children }: { label: string; children: React.ReactNode }
   </div>
 );
 
-const SettingToggle = ({ checked, onChange, label }: { checked: boolean; onChange: (value: boolean) => void; label: string }) => (
+const SettingToggle = ({ checked, disabled = false, onChange, label }: { checked: boolean; disabled?: boolean; onChange: (value: boolean) => void; label: string }) => (
   <button
     type="button"
     role="switch"
     aria-checked={checked}
+    disabled={disabled}
     onClick={() => onChange(!checked)}
-    className="group flex w-full items-center justify-between gap-4 rounded-md border border-border bg-background/35 px-3 py-2.5 text-left transition-[border-color,background-color,transform] hover:border-primary/30 hover:bg-primary/[0.05] active:scale-[0.995]"
+    className="group flex w-full items-center justify-between gap-4 rounded-md border border-border bg-background/35 px-3 py-2.5 text-left transition-[border-color,background-color,transform] hover:border-primary/30 hover:bg-primary/[0.05] active:scale-[0.995] disabled:cursor-not-allowed disabled:opacity-50"
   >
     <span className="text-sm font-medium">{label}</span>
     <span className={cn("relative h-5 w-9 shrink-0 rounded-full border transition-colors", checked ? "border-primary bg-primary" : "border-border bg-muted")}>
@@ -168,6 +178,12 @@ export default function AssistantSettingsPage() {
   const [providerDraftModelsLoading, setProviderDraftModelsLoading] = useState(false);
   const [providerDraftModelsError, setProviderDraftModelsError] = useState("");
   const [ragToken, setRagToken] = useState("");
+  const [serviceStatus, setServiceStatus] = useState<AssistantServiceManagerStatus | null>(null);
+  const [serviceLoading, setServiceLoading] = useState(false);
+  const [serviceBusy, setServiceBusy] = useState<string | null>(null);
+  const [ragLiteDirectory, setRagLiteDirectory] = useState("");
+  const [ragLiteExecutable, setRagLiteExecutable] = useState("");
+  const [ragLiteArguments, setRagLiteArguments] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -183,6 +199,61 @@ export default function AssistantSettingsPage() {
   }, [notify]);
 
   useEffect(() => { void load(); }, [load]);
+
+  const loadServiceStatus = useCallback(async (announce = false) => {
+    setServiceLoading(true);
+    try {
+      const status = await api.get<AssistantServiceManagerStatus>("/api/admin/assistant-services");
+      setServiceStatus(status);
+      if (status.ragLiteConfiguration) {
+        setRagLiteDirectory(status.ragLiteConfiguration.directory || "");
+        setRagLiteExecutable(status.ragLiteConfiguration.executable || "");
+        setRagLiteArguments(status.ragLiteConfiguration.arguments || "");
+      }
+      if (announce) notify(status.message, status.available ? "success" : "warning");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "读取本地服务状态失败", "error");
+    } finally {
+      setServiceLoading(false);
+    }
+  }, [notify]);
+
+  useEffect(() => {
+    if (tab === "SERVICES") void loadServiceStatus();
+  }, [loadServiceStatus, tab]);
+
+  const runServiceAction = async (service: AssistantHostServiceName, action: AssistantHostServiceAction) => {
+    const busyKey = `${service}:${action}`;
+    setServiceBusy(busyKey);
+    try {
+      const result = await api.post<{ message: string; status: AssistantServiceManagerStatus }>("/api/admin/assistant-services", { service, action });
+      setServiceStatus(result.status);
+      notify(result.message, "success");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "本地服务操作失败", "error");
+      await loadServiceStatus();
+    } finally {
+      setServiceBusy(null);
+    }
+  };
+
+  const configureRagLite = async () => {
+    setServiceBusy("RagLite:Configure");
+    try {
+      const result = await api.post<{ message: string; status: AssistantServiceManagerStatus }>("/api/admin/assistant-services", {
+        operation: "ConfigureRagLite",
+        directory: ragLiteDirectory,
+        executable: ragLiteExecutable,
+        arguments: ragLiteArguments,
+      });
+      setServiceStatus(result.status);
+      notify(result.message, "success");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "RAGLite 配置失败", "error");
+    } finally {
+      setServiceBusy(null);
+    }
+  };
 
   const dirty = useMemo(() => Boolean(data && draft && JSON.stringify(data.settings) !== JSON.stringify(draft)) || Boolean(ragToken), [data, draft, ragToken]);
 
@@ -482,7 +553,65 @@ export default function AssistantSettingsPage() {
       )}
 
       {tab === "KNOWLEDGE" && (
-        <div className="grid gap-4 lg:grid-cols-2"><Card><CardHeader><CardTitle className="text-sm">知识增强</CardTitle></CardHeader><CardContent className="space-y-3"><SettingToggle checked={draft.retrievalEnabled} onChange={(retrievalEnabled) => setDraft({ ...draft, retrievalEnabled })} label="启用 RAG 知识检索" /><Field label="RAGLite 服务地址"><Input value={draft.ragliteBaseUrl} onChange={(event) => setDraft({ ...draft, ragliteBaseUrl: event.target.value })} placeholder="http://127.0.0.1:8001" /></Field><Field label={draft.ragliteTokenConfigured ? "访问令牌（已配置）" : "访问令牌"}><Input type="password" value={ragToken} onChange={(event) => setRagToken(event.target.value)} placeholder={draft.ragliteTokenConfigured ? "留空保持不变" : "可选"} /></Field><Button variant="outline" size="sm" onClick={() => void testRag()}>测试连接</Button></CardContent></Card><Card><CardHeader><CardTitle className="text-sm">检索参数</CardTitle></CardHeader><CardContent className="space-y-3"><div className="grid grid-cols-2 gap-3"><Field label="召回数量"><Input type="number" value={draft.retrievalTopK} onChange={(event) => setDraft({ ...draft, retrievalTopK: Number(event.target.value) })} /></Field><Field label="分块大小"><Input type="number" value={draft.chunkMaxSize} onChange={(event) => setDraft({ ...draft, chunkMaxSize: Number(event.target.value) })} /></Field></div><Field label="向量距离"><Select value={draft.vectorDistanceMetric} onChange={(event) => setDraft({ ...draft, vectorDistanceMetric: event.target.value })}><option value="cosine">Cosine</option><option value="dot">Dot Product</option><option value="l2">L2</option></Select></Field><SettingToggle checked={draft.rerankerEnabled} onChange={(rerankerEnabled) => setDraft({ ...draft, rerankerEnabled })} label="启用重排序" /><SettingToggle checked={draft.vectorSearchQueryAdapter} onChange={(vectorSearchQueryAdapter) => setDraft({ ...draft, vectorSearchQueryAdapter })} label="启用查询适配" /><SettingToggle checked={draft.vectorSearchMultivector} onChange={(vectorSearchMultivector) => setDraft({ ...draft, vectorSearchMultivector })} label="启用多向量检索" /></CardContent></Card></div>
+        <div className="grid gap-4 lg:grid-cols-2"><Card><CardHeader><CardTitle className="text-sm">知识增强</CardTitle></CardHeader><CardContent className="space-y-3"><SettingToggle checked={draft.retrievalEnabled} onChange={(retrievalEnabled) => setDraft({ ...draft, retrievalEnabled })} label="启用 RAG 知识检索" /><Field label="RAGLite 服务地址"><Input value={draft.ragliteBaseUrl} onChange={(event) => setDraft({ ...draft, ragliteBaseUrl: event.target.value })} placeholder="http://host.docker.internal:8001" /></Field><Field label={draft.ragliteTokenConfigured ? "访问令牌（已配置）" : "访问令牌"}><Input type="password" value={ragToken} onChange={(event) => setRagToken(event.target.value)} placeholder={draft.ragliteTokenConfigured ? "留空保持不变" : "可选"} /></Field><Button variant="outline" size="sm" onClick={() => void testRag()}>测试连接</Button></CardContent></Card><Card><CardHeader><CardTitle className="text-sm">检索参数</CardTitle></CardHeader><CardContent className="space-y-3"><div className="grid grid-cols-2 gap-3"><Field label="召回数量"><Input type="number" value={draft.retrievalTopK} onChange={(event) => setDraft({ ...draft, retrievalTopK: Number(event.target.value) })} /></Field><Field label="分块大小"><Input type="number" value={draft.chunkMaxSize} onChange={(event) => setDraft({ ...draft, chunkMaxSize: Number(event.target.value) })} /></Field></div><Field label="向量距离"><Select value={draft.vectorDistanceMetric} onChange={(event) => setDraft({ ...draft, vectorDistanceMetric: event.target.value })}><option value="cosine">Cosine</option><option value="dot">Dot Product</option><option value="l2">L2</option></Select></Field><SettingToggle checked={draft.rerankerEnabled} onChange={(rerankerEnabled) => setDraft({ ...draft, rerankerEnabled })} label="启用重排序" /><SettingToggle checked={draft.vectorSearchQueryAdapter} onChange={(vectorSearchQueryAdapter) => setDraft({ ...draft, vectorSearchQueryAdapter })} label="启用查询适配" /><SettingToggle checked={draft.vectorSearchMultivector} onChange={(vectorSearchMultivector) => setDraft({ ...draft, vectorSearchMultivector })} label="启用多向量检索" /></CardContent></Card></div>
+      )}
+
+      {tab === "SERVICES" && (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/70 pb-3">
+            <div>
+              <div className="text-sm font-medium">Windows 本地推理服务</div>
+              <div className="mt-1 text-xs text-muted-foreground">{serviceStatus?.message || "正在读取主机服务状态..."}</div>
+            </div>
+            <Button variant="ghost" size="sm" disabled={serviceLoading || Boolean(serviceBusy)} onClick={() => void loadServiceStatus(true)}>
+              <RefreshCw className={cn("size-3.5", serviceLoading && "animate-spin")} />刷新状态
+            </Button>
+          </div>
+          <div className="grid gap-4 lg:grid-cols-2">
+            {(serviceStatus?.services ?? []).map((service) => {
+              const disabled = !serviceStatus?.available || Boolean(serviceBusy);
+              return (
+                <Card key={service.name} className="min-w-0">
+                  <CardHeader className="flex-row items-start justify-between gap-3">
+                    <div>
+                      <CardTitle className="flex items-center gap-2 text-sm">
+                        <span className={cn("size-2 rounded-full", service.healthy ? "bg-emerald-500" : "bg-muted-foreground/45")} />
+                        {service.label}
+                      </CardTitle>
+                      <CardDescription className="mt-1 text-xs">{service.message}</CardDescription>
+                    </div>
+                    <Badge variant={service.healthy ? "success" : service.configured ? "secondary" : "outline"}>
+                      {service.healthy ? "运行中" : service.configured ? "已停止" : "未配置"}
+                    </Badge>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="grid grid-cols-3 gap-2">
+                      <Button variant="ghost" size="sm" disabled={disabled || service.healthy || !service.configured} onClick={() => void runServiceAction(service.name, "Start")}><Play className="size-3.5" />启动</Button>
+                      <Button variant="ghost" size="sm" disabled={disabled || !service.healthy} onClick={() => void runServiceAction(service.name, "Stop")}><Square className="size-3.5" />停止</Button>
+                      <Button variant="ghost" size="sm" disabled={disabled || !service.configured} onClick={() => void runServiceAction(service.name, "Restart")}><RefreshCw className="size-3.5" />重启</Button>
+                    </div>
+                    <SettingToggle
+                      checked={service.autoStartEnabled}
+                      disabled={disabled || !service.configured}
+                      label="随 Windows 自动启动"
+                      onChange={(enabled) => void runServiceAction(service.name, enabled ? "EnableAutoStart" : "DisableAutoStart")}
+                    />
+                    {service.healthUrl && <div className="truncate text-[11px] text-muted-foreground" title={service.healthUrl}>健康检查：{service.healthUrl}</div>}
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+          <Card>
+            <CardHeader><CardTitle className="text-sm">RAGLite 启动配置</CardTitle><CardDescription className="text-xs">首次部署或移动 RAGLite 后填写，保存后由 Windows 守护任务管理启动与自启。</CardDescription></CardHeader>
+            <CardContent className="grid gap-3 lg:grid-cols-3">
+              <Field label="安装目录"><Input value={ragLiteDirectory} onChange={(event) => setRagLiteDirectory(event.target.value)} placeholder="D:\\PMS\\RAGLite" /></Field>
+              <Field label="启动程序（可选）"><Input value={ragLiteExecutable} onChange={(event) => setRagLiteExecutable(event.target.value)} placeholder="raglite.exe 或 python.exe" /></Field>
+              <Field label="启动参数（可选）"><Input value={ragLiteArguments} onChange={(event) => setRagLiteArguments(event.target.value)} placeholder="-m raglite --host 0.0.0.0 --port 8001" /></Field>
+              <div className="lg:col-span-3"><Button size="sm" disabled={!serviceStatus?.available || Boolean(serviceBusy) || (!ragLiteDirectory.trim() && !ragLiteExecutable.trim())} onClick={() => void configureRagLite()}>{serviceBusy === "RagLite:Configure" ? <LoaderCircle className="animate-spin" /> : <Save />}保存 RAGLite 启动配置</Button></div>
+            </CardContent>
+          </Card>
+        </div>
       )}
 
       {tab === "AGENT" && (

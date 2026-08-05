@@ -115,6 +115,20 @@ const context = {
       },
     },
   },
+  resourceOptimization: {
+    revision: 7,
+    snapshotHash: "snapshot-7",
+    expectedEndDate: "2026-08-20",
+    conflicts: [{ id: "conflict-1", taskIds: ["task-1", "task-2"], tasks: [] }],
+    candidates: [{
+      kind: "MINIMAL_CHANGE",
+      title: "最少改动",
+      applicable: true,
+      changes: [{ taskId: "task-2", startDate: "2026-07-27", finishDate: "2026-07-28", task: null }],
+      remainingConflicts: [],
+      metrics: { movedTaskCount: 1, totalShiftDays: 2, completionDate: "2026-08-01", delayedDays: 0 },
+    }],
+  },
   weeklyItems: [{ id: "matter-1", code: "Matter001", title: "设计评审" }],
   budget: { contractAmount: 1_000_000, total: 300_000, remaining: 700_000, profitTargetRate: 20, categories: [] },
   risks: [{
@@ -180,6 +194,8 @@ describe("project assistant query routing", () => {
       .toEqual(["EARNED_VALUE"])
     expect(detectProjectAssistantQueryIntent("查看资源负荷").domains)
       .toEqual(["RESOURCE"])
+    expect(detectProjectAssistantQueryIntent("给我 WBS 优化建议").domains)
+      .toEqual(["RESOURCE"])
     expect(detectProjectAssistantQueryIntent("对比当前计划与上传进度").domains)
       .toEqual(["SCHEDULE_COMPARE"])
   })
@@ -198,8 +214,23 @@ describe("project assistant query routing", () => {
     expect(earnedValue).not.toHaveProperty("resources")
     expect(JSON.stringify(earnedValue)).not.toContain("baselines")
     expect(resources).toHaveProperty("resources")
+    expect(resources).toHaveProperty("resources.optimization")
     expect(resources).not.toHaveProperty("earnedValue")
     expect(JSON.stringify(resources)).not.toContain("actualCost")
+  })
+
+  it("returns actionable resource candidates even when the language model is unavailable", () => {
+    const intent = detectProjectAssistantQueryIntent("给我 WBS 优化建议")
+    const fallback = buildProjectAssistantFallbackAnswer({
+      message: "给我 WBS 优化建议",
+      intent,
+      context,
+      assistantName: "佳佳",
+    })
+
+    expect(fallback.answer).toContain("资源冲突与优化建议")
+    expect(fallback.answer).toContain("最少改动")
+    expect(fallback.answer).toContain("只有你确认后才写入 WBS")
   })
 
   it("keeps structured risk links to gantt tasks and project matters", () => {

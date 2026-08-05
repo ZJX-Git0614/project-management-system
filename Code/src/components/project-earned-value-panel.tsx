@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { GanttDateField } from "@/components/gantt-date-field";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { Table, TableBody, TableCell, TableEmptyState, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ProjectStatus } from "@/domain/enums";
 import { api } from "@/lib/api-client";
 import { calculateEarnedValue, type EarnedValueTaskInput, type EarnedValueTaskResult } from "@/lib/earned-value";
@@ -39,6 +40,20 @@ const money = (value: number | null) => value === null ? "--" : currencyFormatte
 const ratio = (value: number | null) => value === null ? "--" : numberFormatter.format(value);
 const percent = (value: number | null) => value === null ? "--" : `${numberFormatter.format(value * 100)}%`;
 const hours = (value: number | null) => value === null ? "--" : `${numberFormatter.format(value)} h`;
+const transparentRowInputClass = cn(
+  "h-7 w-full rounded px-2 text-right text-xs tabular-nums shadow-none transition-colors",
+  "!border-transparent !bg-transparent !ring-0 !ring-offset-0",
+  "hover:!border-border/50 hover:!bg-muted/10",
+  "focus-visible:!border-primary/50 focus-visible:!bg-background focus-visible:!ring-1 focus-visible:!ring-primary/20",
+  "disabled:cursor-default disabled:opacity-100",
+);
+const transparentRowSelectClass = cn(
+  "h-7 w-full rounded px-2 text-xs shadow-none transition-colors",
+  "!border-transparent !bg-transparent !ring-0 !ring-offset-0",
+  "hover:!border-border/50 hover:!bg-muted/10",
+  "focus-visible:!border-primary/50 focus-visible:!bg-background focus-visible:!ring-1 focus-visible:!ring-primary/20",
+  "disabled:cursor-default disabled:opacity-100",
+);
 const tone = (value: number | null, inverse = false) => {
   if (value === null || Math.abs(value) < 1e-9) return "text-foreground";
   const favorable = inverse ? value < 0 : value > 0;
@@ -91,10 +106,10 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
       : task));
   };
 
-  const updateTaskField = <K extends "budgetItemId" | "estimatedWorkHours" | "actualWorkHours">(
+  const updateTaskField = (
     taskId: string,
-    key: K,
-    value: EarnedValueTaskInput[K],
+    key: "budgetItemId",
+    value: EarnedValueTaskInput["budgetItemId"],
   ) => {
     setTasks((current) => current.map((task) => task.id === taskId ? { ...task, [key]: value } : task));
   };
@@ -108,8 +123,6 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
           budgetAtCompletion: task.budgetAtCompletion ?? 0,
           actualCost: task.actualCost ?? 0,
           budgetItemId: task.budgetItemId ?? null,
-          estimatedWorkHours: task.estimatedWorkHours ?? 0,
-          actualWorkHours: task.actualWorkHours ?? 0,
         })),
       });
       await fetchData(statusDate);
@@ -194,7 +207,7 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
       <section className="space-y-2">
         <div className="flex items-center justify-between gap-3">
           <h3 className="text-xs font-semibold">时间与工时进度绩效</h3>
-          <span className="text-[11px] text-muted-foreground">预计工时未填写时，按计划工期 × 8 小时计算</span>
+          <span className="text-[11px] text-muted-foreground">预计工时和实际工时来自项目 WBS 管理</span>
         </div>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
           {scheduleMetrics.map((metric) => (
@@ -249,69 +262,73 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
         </div>
       </section>
 
-      <section className="overflow-hidden rounded-md border border-border">
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[1660px] table-fixed text-xs">
-            <thead className="bg-muted text-muted-foreground">
-              <tr className="h-9 border-b border-border">
-                <th className="w-24 px-3 text-left font-medium">任务ID</th>
-                <th className="w-60 px-3 text-left font-medium">任务名称</th>
-                <th className="w-28 px-3 text-right font-medium">计划进度</th>
-                <th className="w-24 px-3 text-right font-medium">当前进度</th>
-                <th className="w-64 px-3 text-left font-medium">预算条目</th>
-                <th className="w-28 px-3 text-right font-medium">预计工时</th>
-                <th className="w-28 px-3 text-right font-medium">实际工时</th>
-                <th className="w-36 px-3 text-right font-medium">完工预算 BAC</th>
-                <th className="w-36 px-3 text-right font-medium">实际成本 AC</th>
-                <th className="w-32 px-3 text-right font-medium">PV</th>
-                <th className="w-32 px-3 text-right font-medium">EV</th>
-                <th className="w-32 px-3 text-right font-medium">工时偏差</th>
-                <th className="w-32 px-3 text-right font-medium">成本偏差 CV</th>
-              </tr>
-            </thead>
-            <tbody>
-              {analysis.rows.map((row, index) => (
-                <tr key={row.id} className={cn("h-10 border-b border-border last:border-b-0", index % 2 === 1 && "bg-muted/25")}>
-                  <td className="px-3 font-mono text-[11px] text-muted-foreground">{row.taskCode}</td>
-                  <td className="truncate px-3 font-medium" title={row.taskName}>{row.taskName || "未命名任务"}</td>
-                  <td className="px-3 text-right tabular-nums">{numberFormatter.format(row.plannedProgress * 100)}%</td>
-                  <td className="px-3 text-right tabular-nums">{row.progress}%</td>
-                  <td className="px-2">
+      <section>
+          <Table className="min-w-[1660px] table-fixed">
+            <TableHeader>
+              <TableRow className="h-9">
+                <TableHead className="w-24">任务ID</TableHead>
+                <TableHead className="w-60">任务名称</TableHead>
+                <TableHead className="w-28 text-right">计划进度</TableHead>
+                <TableHead className="w-24 text-right">当前进度</TableHead>
+                <TableHead className="w-64">预算条目</TableHead>
+                <TableHead className="w-28 text-right">预计工时</TableHead>
+                <TableHead className="w-28 text-right">实际工时</TableHead>
+                <TableHead className="w-36 text-right">完工预算 BAC</TableHead>
+                <TableHead className="w-36 text-right">实际成本 AC</TableHead>
+                <TableHead className="w-32 text-right">PV</TableHead>
+                <TableHead className="w-32 text-right">EV</TableHead>
+                <TableHead className="w-32 text-right">工时偏差</TableHead>
+                <TableHead className="w-32 text-right">成本偏差 CV</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {analysis.rows.map((row) => (
+                <TableRow key={row.id} className="h-10">
+                  <TableCell className="font-mono text-[11px] text-muted-foreground">{row.taskCode}</TableCell>
+                  <TableCell className="truncate font-medium" title={row.taskName}>{row.taskName || "未命名任务"}</TableCell>
+                  <TableCell className="text-right tabular-nums">{numberFormatter.format(row.plannedProgress * 100)}%</TableCell>
+                  <TableCell className="text-right tabular-nums">{row.progress}%</TableCell>
+                  <TableCell className="px-2">
                     <Select
                       value={row.budgetItemId ?? ""}
                       disabled={!canEdit || saving || row.includeInTotals === false}
                       onChange={(event) => updateTaskField(row.id, "budgetItemId", event.target.value || null)}
-                      className="h-7 w-full border-transparent bg-transparent text-xs shadow-none hover:border-border focus:bg-background"
+                      className={transparentRowSelectClass}
+                      variant="ghost"
                     >
                       <option value="">按项目预算自动分摊</option>
                       {budgetItems.map((item) => (
                         <option key={item.id} value={item.id}>{item.categoryName} / {item.title} · {money(item.plannedCost)}</option>
                       ))}
                     </Select>
-                  </td>
-                  <td className="px-2">
+                  </TableCell>
+                  <TableCell className="px-2">
                     <Input
-                      type="number"
-                      min={0}
-                      step="0.5"
-                      value={row.estimatedWorkHours ?? 0}
-                      disabled={!canEdit || saving}
-                      onChange={(event) => updateTaskField(row.id, "estimatedWorkHours", Math.max(0, Number(event.target.value) || 0))}
-                      className="h-7 border-transparent bg-transparent px-2 text-right text-xs tabular-nums shadow-none hover:border-border focus-visible:bg-background"
+                      type="text"
+                      value={row.estimatedWorkHours && row.estimatedWorkHours > 0
+                        ? numberFormatter.format(row.estimatedWorkHours)
+                        : "--"}
+                      readOnly
+                      aria-readonly="true"
+                      tabIndex={-1}
+                      title="来自项目 WBS 管理"
+                      className={cn(transparentRowInputClass, "cursor-default")}
                     />
-                  </td>
-                  <td className="px-2">
+                  </TableCell>
+                  <TableCell className="px-2">
                     <Input
-                      type="number"
-                      min={0}
-                      step="0.5"
-                      value={row.actualWorkHours ?? 0}
-                      disabled={!canEdit || saving}
-                      onChange={(event) => updateTaskField(row.id, "actualWorkHours", Math.max(0, Number(event.target.value) || 0))}
-                      className="h-7 border-transparent bg-transparent px-2 text-right text-xs tabular-nums shadow-none hover:border-border focus-visible:bg-background"
+                      type="text"
+                      value={row.actualWorkHours && row.actualWorkHours > 0
+                        ? numberFormatter.format(row.actualWorkHours)
+                        : "--"}
+                      readOnly
+                      aria-readonly="true"
+                      tabIndex={-1}
+                      title="来自项目 WBS 管理"
+                      className={cn(transparentRowInputClass, "cursor-default")}
                     />
-                  </td>
-                  <td className="px-2">
+                  </TableCell>
+                  <TableCell className="px-2">
                     <Input
                       type="number"
                       min={0}
@@ -319,11 +336,11 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
                       value={row.budgetAtCompletion ?? 0}
                       disabled={!canEdit || saving}
                       onChange={(event) => updateCost(row.id, "budgetAtCompletion", event.target.value)}
-                      className="h-7 border-transparent bg-transparent px-2 text-right text-xs tabular-nums shadow-none hover:border-border focus-visible:bg-background"
+                      className={transparentRowInputClass}
                       aria-label={`${row.taskName} 完工预算`}
                     />
-                  </td>
-                  <td className="px-2">
+                  </TableCell>
+                  <TableCell className="px-2">
                     <Input
                       type="number"
                       min={0}
@@ -331,22 +348,19 @@ export const ProjectEarnedValuePanel = ({ projectId, projectStatus }: ProjectEar
                       value={row.actualCost ?? 0}
                       disabled={!canEdit || saving}
                       onChange={(event) => updateCost(row.id, "actualCost", event.target.value)}
-                      className="h-7 border-transparent bg-transparent px-2 text-right text-xs tabular-nums shadow-none hover:border-border focus-visible:bg-background"
+                      className={transparentRowInputClass}
                       aria-label={`${row.taskName} 实际成本`}
                     />
-                  </td>
-                  <td className="px-3 text-right tabular-nums">{money(row.pv)}</td>
-                  <td className="px-3 text-right tabular-nums">{money(row.ev)}</td>
-                  <td className={cn("px-3 text-right tabular-nums", tone(row.workVarianceHours))}>{hours(row.workVarianceHours)}</td>
-                  <td className={cn("px-3 text-right tabular-nums", tone(row.cv))}>{money(row.cv)}</td>
-                </tr>
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">{money(row.pv)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{money(row.ev)}</TableCell>
+                  <TableCell className={cn("text-right tabular-nums", tone(row.workVarianceHours))}>{hours(row.workVarianceHours)}</TableCell>
+                  <TableCell className={cn("text-right tabular-nums", tone(row.cv))}>{money(row.cv)}</TableCell>
+                </TableRow>
               ))}
-              {analysis.rows.length === 0 && (
-                <tr><td colSpan={13} className="h-24 text-center text-muted-foreground">暂无项目任务</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+              {analysis.rows.length === 0 && <TableEmptyState colSpan={13} className="h-24">暂无项目任务</TableEmptyState>}
+            </TableBody>
+          </Table>
       </section>
     </div>
   );

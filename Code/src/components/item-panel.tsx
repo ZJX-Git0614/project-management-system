@@ -1,8 +1,8 @@
 "use client";
 
-import { KeyboardEvent, type DragEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { KeyboardEvent, type DragEvent, type FocusEvent, type MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
-import { Pencil, Plus, Save, Search, Trash2, Upload } from "lucide-react";
+import { ClipboardPaste, Copy, Pencil, Plus, Redo2, Save, Scissors, Search, Trash2, Undo2, Upload } from "lucide-react";
 import { ItemHealth, ItemRiskStatus, ItemStatus, ItemPriority } from "@/domain/enums";
 import {
   ITEM_STATUS_LABEL,
@@ -31,7 +31,7 @@ import { api } from "@/lib/api-client";
 import { useAuth } from "@/contexts/auth-context";
 import { useCurrentProject } from "@/contexts/current-project-context";
 import { useDraftedState } from "@/lib/use-drafted-state";
-import { TableContextMenu, useTableContextMenu } from "@/components/table-context-menu";
+import { TableContextMenu, type TableContextMenuAction, useTableContextMenu } from "@/components/table-context-menu";
 import { HierarchicalMultiSelect, type HierarchicalSelectOption } from "@/components/hierarchical-multi-select";
 import {
   ITEM_STATUS_VALUES,
@@ -39,6 +39,8 @@ import {
   itemProgressInputValue,
   itemStatusFromProgress,
 } from "@/lib/item-progress";
+import { useModuleHistory } from "@/lib/use-module-history";
+import { useCommitOnOutsidePointer } from "@/lib/use-commit-on-outside-pointer";
 
 export type ItemKind = "monthly" | "weekly";
 
@@ -71,7 +73,9 @@ interface ItemRecord {
   sortOrder?: number;
   title: string;
   ganttTaskId?: string | null;
+  ganttTaskIds: string[];
   taskName?: string;
+  linkedTasks: ProjectGanttTaskOption[];
   description: string;
   dueDate: string;
   status: ItemStatus;
@@ -101,6 +105,10 @@ interface ItemRecord {
 
 const normalizeItemRecord = (item: ItemRecord): ItemRecord => ({
   ...item,
+  ganttTaskIds: item.ganttTaskIds?.length > 0
+    ? item.ganttTaskIds
+    : item.ganttTaskId ? [item.ganttTaskId] : [],
+  linkedTasks: item.linkedTasks ?? [],
   status: itemStatusFromProgress(item.progress),
 });
 
@@ -148,7 +156,7 @@ const ItemStatusReadout = ({ progress, className }: { progress: number; classNam
 type EditableField =
   | "title"
   | "description"
-  | "ganttTaskId"
+  | "ganttTaskIds"
   | "owner"
   | "priority"
   | "plannedStartDate"
@@ -208,15 +216,21 @@ const FROZEN_HEADER_CLASS = "sticky z-40 !bg-muted";
 const FROZEN_CELL_CLASS = "sticky z-20";
 const FROZEN_EDGE_HEADER_CLASS = `${FROZEN_HEADER_CLASS} border-r border-border shadow-[5px_0_10px_-9px_hsl(var(--foreground))]`;
 const FROZEN_EDGE_CELL_CLASS = `${FROZEN_CELL_CLASS} border-r border-border shadow-[5px_0_10px_-9px_hsl(var(--foreground))]`;
-const ACTION_HEADER_CLASS = "sticky right-0 z-50 isolate w-[120px] min-w-[120px] max-w-[120px] overflow-hidden whitespace-nowrap border-l border-border !bg-muted shadow-[-5px_0_10px_-9px_hsl(var(--foreground))]";
-const ACTION_CELL_CLASS = "sticky right-0 z-40 isolate w-[120px] min-w-[120px] max-w-[120px] overflow-hidden border-l border-border shadow-[-5px_0_10px_-9px_hsl(var(--foreground))]";
-const FROZEN_ACTIVE_ROW_BACKGROUND = "!bg-[#0c101a]";
-const frozenDataRowBackground = (index: number) =>
-  index % 2 === 0
-    ? "!bg-background group-hover:!bg-[#0c101a]"
-    : "!bg-[#0e1014] group-hover:!bg-[#0c101a]";
+const FROZEN_ACTIVE_ROW_BACKGROUND = "!bg-transparent";
+const FROZEN_TRANSPARENT_ROW_BACKGROUND = "!bg-transparent group-hover:!bg-transparent";
+const frozenDataRowBackground = () => "!bg-transparent group-hover:!bg-transparent";
 const CURRENT_VIEW_ID = "__current__";
 type DropPosition = "before" | "after";
+type ItemClipboard = {
+  projectId: string;
+  mode: "COPY" | "MOVE";
+  itemIds: string[];
+};
+
+interface ItemStructureResult {
+  createdItemIds: string[];
+  movedItemIds: string[];
+}
 
 export const ItemPanel = ({
   kind,
@@ -251,13 +265,17 @@ export const ItemPanel = ({
   );
   const [saving, setSaving] = useState(false);
   const draftRef = useRef<ItemRecord | null>(null);
-  const [selectionMode, setSelectionMode] = useState(false);
+  const submittingRef = useRef(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
+  const [clipboard, setClipboard] = useState<ItemClipboard | null>(null);
+  const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [deletingSelected, setDeletingSelected] = useState(false);
   const [draggedItemId, setDraggedItemId] = useState<string | null>(null);
   const [itemDropTarget, setItemDropTarget] = useState<{ id: string; position: DropPosition } | null>(null);
   const [reordering, setReordering] = useState(false);
   const [selectedRisk, setSelectedRisk] = useState<LinkedRisk | null>(null);
+  const activeEditRowRef = useRef<HTMLTableRowElement>(null);
   const { menu, openContextMenu, closeContextMenu } = useTableContextMenu();
 
   const canView = can(`${kind}-items:view`);
@@ -266,8 +284,8 @@ export const ItemPanel = ({
   const canDelete = can(`${kind}-items:delete`);
   const canExport = can(`${kind}-items:export`);
   const isWeekly = kind === "weekly";
-  const tableColSpan = (isWeekly ? 18 : 17) + (selectionMode ? 1 : 0);
-  const sequenceColumnLeft = selectionMode ? 48 : 0;
+  const tableColSpan = isWeekly ? 17 : 16;
+  const sequenceColumnLeft = 0;
   const matterCodeColumnLeft = sequenceColumnLeft + 64;
   const titleColumnLeft = matterCodeColumnLeft + (isWeekly ? 120 : 0);
   const savedViewStorageKey = `pms.saved-views.item.${kind}`;
@@ -275,6 +293,10 @@ export const ItemPanel = ({
   useEffect(() => {
     draftRef.current = draft;
   }, [draft]);
+
+  useEffect(() => {
+    setClipboard(null);
+  }, [currentProjectId]);
 
   useEffect(() => {
     try {
@@ -356,7 +378,7 @@ export const ItemPanel = ({
   const fetchData = useCallback(async ({ showLoading = true }: { showLoading?: boolean } = {}) => {
     if (!canView) {
       setLoading(false);
-      return;
+      return [] as ItemRecord[];
     }
     if (showLoading) setLoading(true);
     try {
@@ -367,10 +389,12 @@ export const ItemPanel = ({
         api.get<ItemRecord[]>(`${apiPath}${dateQuery}`),
         api.get<Project[]>("/api/projects"),
       ]);
-      setItems(itemList.map(normalizeItemRecord));
+      const normalizedItems = itemList.map(normalizeItemRecord);
+      setItems(normalizedItems);
       setProjects(projectList);
+      return normalizedItems;
     } catch {
-      // handled
+      return [] as ItemRecord[];
     } finally {
       if (showLoading) setLoading(false);
     }
@@ -379,6 +403,36 @@ export const ItemPanel = ({
   useEffect(() => {
     void fetchData();
   }, [fetchData]);
+
+  const handleHistoryRestored = useCallback(async (targetIds: string[]) => {
+    setEditingId(null);
+    setEditingField(null);
+    setValidationErrors([]);
+    clearDraft();
+    setSelectedIds(targetIds);
+    setSelectionAnchorId(targetIds.at(-1) ?? null);
+    await fetchData({ showLoading: false });
+  }, [clearDraft, fetchData]);
+
+  const {
+    undo,
+    redo,
+    runWithHistory,
+    undoEntry,
+    redoEntry,
+    historyBusy,
+  } = useModuleHistory({
+    projectId: currentProjectId ?? "",
+    module: "WEEKLY_ITEMS",
+    enabled: isWeekly && Boolean(currentProjectId),
+    onRestored: handleHistoryRestored,
+    onError: (errorTitle, message) => alert(`${errorTitle}\n${message}`),
+    onWarning: (message) => alert(message),
+  });
+
+  const runItemAction = useCallback(<T,>(label: string, targetIds: string[], action: () => Promise<T>) => (
+    isWeekly && currentProjectId ? runWithHistory(label, targetIds, action) : action()
+  ), [currentProjectId, isWeekly, runWithHistory]);
 
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
@@ -409,17 +463,29 @@ export const ItemPanel = ({
 
   useEffect(() => {
     setSelectedIds((prev) => prev.filter((id) => sorted.some((item) => item.id === id)));
+    setSelectionAnchorId((prev) => prev && sorted.some((item) => item.id === prev) ? prev : null);
   }, [sorted]);
 
-  const toggleSelectionMode = () => {
-    setSelectionMode((prev) => !prev);
-    setSelectedIds([]);
-  };
+  const selectFromSequence = (itemId: string, event: MouseEvent<HTMLElement>) => {
+    const itemIndex = sorted.findIndex((item) => item.id === itemId);
+    if (itemIndex < 0) return;
 
-  const toggleSelected = (id: string) => {
-    setSelectedIds((prev) => (
-      prev.includes(id) ? prev.filter((itemId) => itemId !== id) : [...prev, id]
-    ));
+    if (event.shiftKey && selectionAnchorId) {
+      const anchorIndex = sorted.findIndex((item) => item.id === selectionAnchorId);
+      if (anchorIndex >= 0) {
+        const [start, end] = [anchorIndex, itemIndex].sort((a, b) => a - b);
+        const rangeIds = sorted.slice(start, end + 1).map((item) => item.id);
+        setSelectedIds((prev) => event.metaKey || event.ctrlKey ? [...new Set([...prev, ...rangeIds])] : rangeIds);
+        return;
+      }
+    }
+
+    if (event.metaKey || event.ctrlKey) {
+      setSelectedIds((prev) => prev.includes(itemId) ? prev.filter((id) => id !== itemId) : [...prev, itemId]);
+    } else {
+      setSelectedIds([itemId]);
+    }
+    setSelectionAnchorId(itemId);
   };
 
   const handleExport = () => {
@@ -478,13 +544,16 @@ export const ItemPanel = ({
       ?? "";
     setEditingId(null);
     setEditingField(null);
+    setValidationErrors([]);
     setDraft({
       id: "",
       projectId: currentProjectId ?? "",
       matterCode: "",
       ganttTaskId: null,
+      ganttTaskIds: [],
       title: "",
       taskName: "",
+      linkedTasks: [],
       description: "",
       dueDate: "",
       status: ItemStatus.PENDING,
@@ -522,20 +591,24 @@ export const ItemPanel = ({
     }
     setEditingId(item.id);
     setEditingField(field);
+    setValidationErrors([]);
     setDraft({ ...item, status: itemStatusFromProgress(item.progress) });
   };
 
   const cancelEdit = () => {
     setEditingId(null);
     setEditingField(null);
+    setValidationErrors([]);
     clearDraft();
   };
 
   const updateDraft = <K extends keyof ItemRecord>(key: K, value: ItemRecord[K]) => {
+    setValidationErrors((prev) => prev.filter((field) => field !== key));
     setDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
   };
 
   const updateDraftProgress = (progress: number) => {
+    setValidationErrors((prev) => prev.filter((field) => field !== "progress"));
     setDraft((prev) => (prev ? {
       ...prev,
       ...itemProgressFields(progress, prev.actualEndDate, undefined, prev.progress),
@@ -554,7 +627,7 @@ export const ItemPanel = ({
     }
     const updated = { ...base, [key]: value };
     if (Object.is(base[key], value)) return;
-    if (!updated.title.trim() || updated.progress < 0) {
+    if (!updated.title.trim() || !updated.owner.trim() || updated.progress < 0 || updated.progress > 100) {
       console.warn("commitSelectChange: validation failed", { title: updated.title, progress: updated.progress });
       return;
     }
@@ -565,14 +638,16 @@ export const ItemPanel = ({
       return prev.map((item) => (item.id === updated.id ? updated : item));
     });
     try {
-      const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, linkedRisks: _lr, ...payload } = updated;
-      void _id; void _ca; void _ua; void _p; void _mc; void _lr;
-      const savedItem = normalizeItemRecord(
-        await api.put<ItemRecord>(`${apiPath}/${updated.id}`, payload),
-      );
-      setItems((prev) => prev.map((item) => (item.id === savedItem.id ? savedItem : item)));
-      flushSync(() => {
-        cancelEdit();
+      await runItemAction(`修改事项「${updated.title}」`, [updated.id], async () => {
+        const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, linkedRisks: _lr, linkedTasks: _lt, ...payload } = updated;
+        void _id; void _ca; void _ua; void _p; void _mc; void _lr; void _lt;
+        const savedItem = normalizeItemRecord(
+          await api.put<ItemRecord>(`${apiPath}/${updated.id}`, payload),
+        );
+        setItems((prev) => prev.map((item) => (item.id === savedItem.id ? savedItem : item)));
+        flushSync(() => {
+          cancelEdit();
+        });
       });
     } catch (error) {
       if (previousItems) {
@@ -677,48 +752,62 @@ export const ItemPanel = ({
     };
   }, [currentProjectId, draft?.projectId, isWeekly, items]);
 
+  const validateDraft = (item: ItemRecord) => {
+    const errors: string[] = [];
+    if (!item.title.trim()) errors.push("title");
+    if (!item.owner.trim()) errors.push("owner");
+    if (item.progress < 0 || item.progress > 100) errors.push("progress");
+    setValidationErrors(errors);
+    return errors.length === 0;
+  };
+
   const submitCreate = async () => {
-    if (!draft) return;
+    if (!draft || submittingRef.current) return;
     if (!currentProjectId) {
       alert("请先从项目列表中选择当前项目");
       return;
     }
-    if (!draft.title.trim() || draft.progress < 0) {
-      alert("请填写事项名称，且进度不能小于 0");
-      return;
-    }
+    if (!validateDraft(draft)) return;
+    submittingRef.current = true;
     setSaving(true);
     try {
-      const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, linkedRisks: _lr, ...payload } = draft;
-      void _id; void _ca; void _ua; void _p; void _mc; void _lr;
-      const savedItem = normalizeItemRecord(await api.post<ItemRecord>(apiPath, payload));
-      setItems((prev) => [...prev.filter((item) => item.id !== savedItem.id), savedItem]);
-      clearDraft();
+      const targetIds: string[] = [];
+      await runItemAction(`新增事项「${draft.title.trim()}」`, targetIds, async () => {
+        const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, linkedRisks: _lr, linkedTasks: _lt, ...payload } = draft;
+        void _id; void _ca; void _ua; void _p; void _mc; void _lr; void _lt;
+        const savedItem = normalizeItemRecord(await api.post<ItemRecord>(apiPath, payload));
+        targetIds.push(savedItem.id);
+        setItems((prev) => [...prev.filter((item) => item.id !== savedItem.id), savedItem]);
+        clearDraft();
+        setValidationErrors([]);
+      });
     } catch (error) {
       alert(error instanceof Error ? error.message : "保存失败");
     } finally {
+      submittingRef.current = false;
       setSaving(false);
     }
   };
 
   const submitEdit = async () => {
-    if (!draft) return;
-    if (!draft.title.trim() || draft.progress < 0) {
-      alert("请填写事项名称，且进度不能小于 0");
-      return;
-    }
+    if (!draft || submittingRef.current) return;
+    if (!validateDraft(draft)) return;
+    submittingRef.current = true;
     setSaving(true);
     try {
-      const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, linkedRisks: _lr, ...payload } = draft;
-      void _id; void _ca; void _ua; void _p; void _mc; void _lr;
-      const savedItem = normalizeItemRecord(
-        await api.put<ItemRecord>(`${apiPath}/${draft.id}`, payload),
-      );
-      setItems((prev) => prev.map((item) => (item.id === savedItem.id ? savedItem : item)));
-      cancelEdit();
+      await runItemAction(`编辑事项「${draft.title.trim()}」`, [draft.id], async () => {
+        const { id: _id, createdAt: _ca, updatedAt: _ua, project: _p, matterCode: _mc, linkedRisks: _lr, linkedTasks: _lt, ...payload } = draft;
+        void _id; void _ca; void _ua; void _p; void _mc; void _lr; void _lt;
+        const savedItem = normalizeItemRecord(
+          await api.put<ItemRecord>(`${apiPath}/${draft.id}`, payload),
+        );
+        setItems((prev) => prev.map((item) => (item.id === savedItem.id ? savedItem : item)));
+        cancelEdit();
+      });
     } catch (error) {
       alert(error instanceof Error ? error.message : "保存失败");
     } finally {
+      submittingRef.current = false;
       setSaving(false);
     }
   };
@@ -726,21 +815,31 @@ export const ItemPanel = ({
   const handleEditKeyDown = (
     event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>
   ) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelEdit();
+      return;
+    }
     if (event.key !== "Enter") return;
     if (event.currentTarget instanceof HTMLTextAreaElement && event.shiftKey) return;
     event.preventDefault();
     event.stopPropagation();
-    void submitEdit();
+    event.currentTarget.blur();
   };
 
   const handleCreateKeyDown = (
     event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>
   ) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelEdit();
+      return;
+    }
     if (event.key !== "Enter") return;
     if (event.currentTarget instanceof HTMLTextAreaElement && event.shiftKey) return;
     event.preventDefault();
     event.stopPropagation();
-    void submitCreate();
+    event.currentTarget.blur();
   };
 
   const editTriggerProps = (item: ItemRecord, field: EditableField) => {
@@ -758,15 +857,41 @@ export const ItemPanel = ({
     };
   };
 
-  const handleDeleteSelected = async () => {
-    const selectedItems = sorted.filter((item) => selectedIds.includes(item.id));
+  const handleDraftBlur = (event: FocusEvent<HTMLElement>, mode: "create" | "edit") => {
+    const nextElement = event.relatedTarget instanceof HTMLElement ? event.relatedTarget : null;
+    if (nextElement?.closest('[data-slot="dropdown-menu-content"]')) return;
+    const nextTarget = nextElement as Node | null;
+    if (nextTarget && event.currentTarget.contains(nextTarget)) return;
+    void (mode === "create" ? submitCreate() : submitEdit());
+  };
+
+  useCommitOnOutsidePointer(Boolean(draft), activeEditRowRef, () => (
+    editingId === null ? submitCreate() : submitEdit()
+  ));
+
+  const deleteConfirmation = (targetItems: ItemRecord[]) => {
+    const linkedRisks = [...new Map(
+      targetItems.flatMap((item) => item.linkedRisks ?? []).map((risk) => [risk.id, risk]),
+    ).values()];
+    const targetLabel = targetItems.length === 1
+      ? `事项「${targetItems[0].title}」`
+      : `选中的 ${targetItems.length} 个事项`;
+    if (linkedRisks.length === 0) return `确认删除${targetLabel}？`;
+    const relationships = linkedRisks.map((risk) => `${risk.riskCode} · ${risk.riskName}`).join("、");
+    return `确认删除${targetLabel}？\n当前与以下风险存在关联：${relationships}\n删除后将移除这些风险与被删事项的关联，其余事项关联保持不变；撤销删除可恢复原关联。`;
+  };
+
+  const handleDeleteSelected = async (ids: string[] = selectedIds) => {
+    const selectedItems = sorted.filter((item) => ids.includes(item.id));
     if (selectedItems.length === 0) return;
-    if (!(await confirm(`确认删除选中的 ${selectedItems.length} 个事项？`))) return;
+    if (!(await confirm(deleteConfirmation(selectedItems)))) return;
     setDeletingSelected(true);
     try {
-      await Promise.all(selectedItems.map((item) => api.delete(`${apiPath}/${item.id}`)));
+      await runItemAction(`删除 ${selectedItems.length} 个事项`, selectedItems.map((item) => item.id), async () => {
+        await Promise.all(selectedItems.map((item) => api.delete(`${apiPath}/${item.id}`)));
+      });
       setSelectedIds([]);
-      setSelectionMode(false);
+      setSelectionAnchorId(null);
       await fetchData({ showLoading: false });
     } catch (err) {
       alert(err instanceof Error ? err.message : "删除失败");
@@ -776,38 +901,152 @@ export const ItemPanel = ({
   };
 
   const handleDeleteItem = async (item: ItemRecord) => {
-    if (!(await confirm(`确认删除「${item.title}」？`))) return;
+    if (!(await confirm(deleteConfirmation([item])))) return;
     try {
-      await api.delete(`${apiPath}/${item.id}`);
+      await runItemAction(`删除事项「${item.title}」`, [item.id], () => api.delete(`${apiPath}/${item.id}`));
       await fetchData({ showLoading: false });
     } catch (error) {
       alert(error instanceof Error ? error.message : "删除失败");
     }
   };
 
-  const itemContextActions = (item?: ItemRecord) => [
-    ...(item && canEdit
-      ? [{ label: "编辑事项", icon: <Pencil className="size-3.5" />, onSelect: () => openEdit(item, "title") }]
-      : []),
-    ...(item && canDelete
-      ? [{
-          label: selectionMode && selectedIds.includes(item.id) ? "取消选择此事项" : "选择此事项",
-          onSelect: () => {
-            if (!selectionMode) setSelectionMode(true);
-            toggleSelected(item.id);
-          },
-        }]
-      : []),
-    ...(item && canDelete
-      ? [{ label: "删除此事项", icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: () => handleDeleteItem(item) }]
-      : []),
-    ...(!item && canCreate && currentProjectId
-      ? [{ label: "新增事项", icon: <Plus className="size-3.5" />, onSelect: openCreate }]
-      : []),
-    ...(!item && canDelete && selectedIds.length > 0
-      ? [{ label: `删除已选择 ${selectedIds.length} 个事项`, icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: handleDeleteSelected }]
-      : []),
-  ];
+  const copyOrCutItems = useCallback((mode: ItemClipboard["mode"], ids: string[]) => {
+    if (!currentProjectId || ids.length === 0) return;
+    const orderedIds = sorted.filter((item) => ids.includes(item.id)).map((item) => item.id);
+    setClipboard({ projectId: currentProjectId, mode, itemIds: orderedIds });
+  }, [currentProjectId, sorted]);
+
+  const performItemStructure = useCallback(async (
+    operation: "INSERT" | "COPY" | "MOVE",
+    anchorItemId: string,
+    position: "BEFORE" | "AFTER",
+  ) => {
+    if (!currentProjectId || !isWeekly) return;
+    const sourceItemIds = operation === "INSERT" ? [] : clipboard?.itemIds ?? [];
+    if (operation !== "INSERT" && (!clipboard || clipboard.projectId !== currentProjectId)) return;
+    if (operation === "MOVE" && sourceItemIds.includes(anchorItemId)) {
+      alert("剪切的事项不能粘贴到自身，请选择其他目标行");
+      return;
+    }
+
+    const label = operation === "INSERT" ? "插入事项" : operation === "COPY" ? "复制粘贴事项" : "剪切移动事项";
+    try {
+      const result = await runItemAction(label, sourceItemIds, () => (
+        api.post<ItemStructureResult>("/api/weekly-items/structure", {
+          projectId: currentProjectId,
+          operation,
+          anchorItemId,
+          position,
+          sourceItemIds,
+          count: 1,
+        })
+      ));
+      const targetIds = result.createdItemIds.length > 0 ? result.createdItemIds : result.movedItemIds;
+      const refreshedItems = await fetchData({ showLoading: false });
+      setSelectedIds(targetIds);
+      setSelectionAnchorId(targetIds.at(-1) ?? null);
+      if (operation === "MOVE") setClipboard(null);
+      if (operation === "INSERT" && targetIds[0]) {
+        const created = refreshedItems?.find((candidate) => candidate.id === targetIds[0]);
+        if (created) {
+          setEditingId(created.id);
+          setEditingField("title");
+          setValidationErrors([]);
+          setDraft({ ...created, status: itemStatusFromProgress(created.progress) });
+        }
+      }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : `${label}失败`);
+    }
+  }, [clipboard, currentProjectId, fetchData, isWeekly, runItemAction, setDraft]);
+
+  const itemContextActions = (item?: ItemRecord, targetIds: string[] = []): TableContextMenuAction[] => {
+    const clipboardReady = Boolean(clipboard && clipboard.projectId === currentProjectId);
+    const invalidMoveTarget = Boolean(item && clipboard?.mode === "MOVE" && clipboard.itemIds.includes(item.id));
+    return [
+      ...(item && canEdit && isWeekly
+        ? [
+            { label: "剪切", icon: <Scissors className="size-4" />, shortcut: "Ctrl/Cmd+X", onSelect: () => copyOrCutItems("MOVE", targetIds) },
+            { label: "复制", icon: <Copy className="size-4" />, shortcut: "Ctrl/Cmd+C", onSelect: () => copyOrCutItems("COPY", targetIds) },
+            {
+              label: "粘贴",
+              icon: <ClipboardPaste className="size-4" />,
+              disabled: !clipboardReady,
+              children: [
+                { label: "粘贴到行上方", disabled: invalidMoveTarget, onSelect: () => performItemStructure(clipboard?.mode ?? "COPY", item.id, "BEFORE") },
+                { label: "粘贴到行下方", disabled: invalidMoveTarget, onSelect: () => performItemStructure(clipboard?.mode ?? "COPY", item.id, "AFTER") },
+              ],
+            },
+          ]
+        : []),
+      ...(item && canCreate && isWeekly
+        ? [{
+            label: "插入",
+            icon: <Plus className="size-4" />,
+            separatorBefore: true,
+            children: [
+              { label: "在上方插入 1 条事项", onSelect: () => performItemStructure("INSERT", item.id, "BEFORE") },
+              { label: "在下方插入 1 条事项", onSelect: () => performItemStructure("INSERT", item.id, "AFTER") },
+            ],
+          }]
+        : []),
+      ...(item && targetIds.length === 1 && canEdit
+        ? [{ label: "编辑事项", icon: <Pencil className="size-3.5" />, separatorBefore: true, onSelect: () => openEdit(item, "title") }]
+        : []),
+      ...(item && canDelete
+        ? [{
+            label: targetIds.length > 1 ? `删除已选 ${targetIds.length} 个事项` : "删除此事项",
+            icon: <Trash2 className="size-3.5" />,
+            destructive: true,
+            separatorBefore: true,
+            onSelect: () => targetIds.length > 1 ? handleDeleteSelected(targetIds) : handleDeleteItem(item),
+          }]
+        : []),
+      ...(!item && canCreate && currentProjectId
+        ? [{ label: "新增事项", icon: <Plus className="size-3.5" />, onSelect: openCreate }]
+        : []),
+      ...(!item && canDelete && selectedIds.length > 0
+        ? [{ label: `删除已选 ${selectedIds.length} 个事项`, icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: () => handleDeleteSelected() }]
+        : []),
+    ];
+  };
+
+  const openItemContextMenu = (event: MouseEvent<HTMLElement>, item: ItemRecord) => {
+    const targetIds = selectedIds.includes(item.id) ? selectedIds : [item.id];
+    if (!selectedIds.includes(item.id)) {
+      setSelectedIds([item.id]);
+      setSelectionAnchorId(item.id);
+    }
+    openContextMenu(event, itemContextActions(item, targetIds), {
+      title: `${item.matterCode || "事项"} · ${item.title}`,
+      description: targetIds.length > 1 ? `已选择 ${targetIds.length} 个事项` : undefined,
+    });
+  };
+
+  useEffect(() => {
+    if (!isWeekly) return;
+    const handleClipboardShortcut = (event: globalThis.KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const editing = target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || target instanceof HTMLSelectElement
+        || Boolean(target?.isContentEditable);
+      if (editing || (!event.metaKey && !event.ctrlKey)) return;
+      const key = event.key.toLowerCase();
+      if (key === "c" && selectedIds.length > 0) {
+        event.preventDefault();
+        copyOrCutItems("COPY", selectedIds);
+      } else if (key === "x" && selectedIds.length > 0) {
+        event.preventDefault();
+        copyOrCutItems("MOVE", selectedIds);
+      } else if (key === "v" && selectedIds.length > 0 && clipboard?.projectId === currentProjectId) {
+        event.preventDefault();
+        void performItemStructure(clipboard.mode, selectedIds[0], "AFTER");
+      }
+    };
+    window.addEventListener("keydown", handleClipboardShortcut);
+    return () => window.removeEventListener("keydown", handleClipboardShortcut);
+  }, [clipboard, copyOrCutItems, currentProjectId, isWeekly, performItemStructure, selectedIds]);
 
   const getDropPosition = (event: DragEvent<HTMLElement>): DropPosition => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -835,7 +1074,9 @@ export const ItemPanel = ({
     });
 
     try {
-      await api.post("/api/weekly-items/reorder", { itemIds: nextItemIds });
+      await runItemAction("调整事项排序", [movedItemId], () => (
+        api.post("/api/weekly-items/reorder", { itemIds: nextItemIds })
+      ));
       await fetchData({ showLoading: false });
     } catch (error) {
       alert(error instanceof Error ? error.message : "排序保存失败");
@@ -867,6 +1108,34 @@ export const ItemPanel = ({
                 {dateRange.start && dateRange.end ? ` · 时间窗口 ${dateRange.start} ~ ${dateRange.end}` : ""}
               </CardDescription>
             </div>
+            {isWeekly && (canCreate || canEdit || canDelete) && (
+              <div className="flex items-center gap-2" role="group" aria-label="撤销与重做">
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="outline"
+                  className="size-8"
+                  disabled={!undoEntry || historyBusy || saving}
+                  onClick={() => void undo()}
+                  title={undoEntry ? `撤销：${undoEntry.label}` : "没有可撤销的操作"}
+                  aria-label="撤销"
+                >
+                  <Undo2 className="size-3.5" />
+                </Button>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="outline"
+                  className="size-8"
+                  disabled={!redoEntry || historyBusy || saving}
+                  onClick={() => void redo()}
+                  title={redoEntry ? `重做：${redoEntry.label}` : "没有可重做的操作"}
+                  aria-label="重做"
+                >
+                  <Redo2 className="size-3.5" />
+                </Button>
+              </div>
+            )}
           </div>
         </CardHeader>
         <CardContent className="flex flex-wrap items-end gap-3 p-3">
@@ -993,17 +1262,6 @@ export const ItemPanel = ({
               </Button>
             )}
             {reordering && <span className="self-center text-xs text-muted-foreground">排序保存中...</span>}
-            {canDelete && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-8 text-xs"
-                onClick={toggleSelectionMode}
-                disabled={deletingSelected}
-              >
-                {selectionMode ? "取消选择" : "选择"}
-              </Button>
-            )}
             {deletingSelected && <span className="self-center text-xs text-muted-foreground">删除中...</span>}
           </div>
         </CardContent>
@@ -1015,11 +1273,6 @@ export const ItemPanel = ({
             <Table onContextMenu={(event) => openContextMenu(event, itemContextActions())}>
               <TableHeader>
                 <TableRow>
-                  {selectionMode && (
-                    <TableHead className={`${FROZEN_HEADER_CLASS} left-0 w-[48px] min-w-[48px] max-w-[48px] whitespace-nowrap`}>
-                      选择
-                    </TableHead>
-                  )}
                   <TableHead
                     className={`${FROZEN_HEADER_CLASS} w-[64px] min-w-[64px] max-w-[64px] whitespace-nowrap`}
                     style={{ left: sequenceColumnLeft }}
@@ -1054,13 +1307,11 @@ export const ItemPanel = ({
                   <TableHead className={ITEM_LONG_TEXT_HEADER_CLASS}>当前问题/措施</TableHead>
                   <TableHead className={ITEM_LONG_TEXT_HEADER_CLASS}>依赖条件</TableHead>
                   <TableHead className="w-[220px] min-w-[220px] max-w-[220px] whitespace-nowrap">风险</TableHead>
-                  <TableHead className={ACTION_HEADER_CLASS}>操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {draft && editingId === null && (
-                  <TableRow className="group h-8 align-top bg-primary/5">
-                    {selectionMode && <TableCell className={`${FROZEN_CELL_CLASS} ${FROZEN_ACTIVE_ROW_BACKGROUND} left-0 w-[48px] min-w-[48px] max-w-[48px] text-xs`} />}
+                  <TableRow ref={activeEditRowRef} className="group h-8 align-top bg-primary/5" onBlurCapture={(event) => handleDraftBlur(event, "create")}>
                     <TableCell
                       className={`${FROZEN_CELL_CLASS} ${FROZEN_ACTIVE_ROW_BACKGROUND} w-[64px] min-w-[64px] max-w-[64px] text-xs text-muted-foreground`}
                       style={{ left: sequenceColumnLeft }}
@@ -1078,7 +1329,7 @@ export const ItemPanel = ({
                       </TableCell>
                     )}
                     <TableCell
-                      className={`${FROZEN_EDGE_CELL_CLASS} ${FROZEN_ACTIVE_ROW_BACKGROUND} w-[320px] min-w-[320px] max-w-[320px]`}
+                      className={`${FROZEN_EDGE_CELL_CLASS} ${FROZEN_TRANSPARENT_ROW_BACKGROUND} w-[320px] min-w-[320px] max-w-[320px]`}
                       style={{ left: titleColumnLeft }}
                     >
                       <div className="flex min-w-0 flex-col gap-1">
@@ -1086,10 +1337,11 @@ export const ItemPanel = ({
                           value={draft.title}
                           onChange={(e) => updateDraft("title", e.target.value)}
                           onKeyDown={handleCreateKeyDown}
-                          className={INLINE_INPUT_CLASS}
+                          className={cn(INLINE_INPUT_CLASS, validationErrors.includes("title") && "border-destructive ring-1 ring-destructive/30")}
                           placeholder="事项名称"
                           autoFocus
                         />
+                        {validationErrors.includes("title") && <span className="text-[10px] text-destructive">请填写事项名称</span>}
                         <Textarea
                           value={draft.description}
                           onChange={(e) => updateDraft("description", e.target.value)}
@@ -1103,9 +1355,10 @@ export const ItemPanel = ({
                       <TableCell className="text-xs">
                         <HierarchicalMultiSelect
                           options={taskSelectOptions}
-                          value={draft.ganttTaskId ? [draft.ganttTaskId] : []}
-                          onChange={(ids) => updateDraft("ganttTaskId", ids[0] ?? null)}
-                          multiple={false}
+                          value={draft.ganttTaskIds ?? []}
+                          onChange={(ids) => updateDraft("ganttTaskIds", ids)}
+                          multiple
+                          applyOnClose
                           placeholder="不关联"
                           searchPlaceholder="搜索任务 ID、名称或类别"
                           ariaLabel="关联任务"
@@ -1119,7 +1372,7 @@ export const ItemPanel = ({
                         value={draft.owner}
                         onChange={(e) => updateDraft("owner", e.target.value)}
                         onKeyDown={handleCreateKeyDown}
-                        className={`${INLINE_SELECT_CLASS} w-[150px]`}
+                        className={cn(`${INLINE_SELECT_CLASS} w-[150px]`, validationErrors.includes("owner") && "border-destructive ring-1 ring-destructive/30")}
                       >
                         <option value="">请选择责任人</option>
                         {getOwnerOptions(draft.projectId, draft.owner).map((ownerOption) => (
@@ -1128,6 +1381,7 @@ export const ItemPanel = ({
                           </option>
                         ))}
                       </Select>
+                      {validationErrors.includes("owner") && <span className="mt-1 block text-[10px] text-destructive">请选择责任人</span>}
                     </TableCell>
                     <TableCell>
                       <Select
@@ -1190,7 +1444,7 @@ export const ItemPanel = ({
                           value={itemProgressInputValue(draft.progress)}
                           onChange={(e) => updateDraftProgress(Math.min(100, Math.max(0, Number.parseInt(e.target.value, 10) || 0)))}
                           onKeyDown={handleCreateKeyDown}
-                          className={`${INLINE_INPUT_CLASS} w-[64px]`}
+                          className={cn(`${INLINE_INPUT_CLASS} w-[64px]`, validationErrors.includes("progress") && "border-destructive ring-1 ring-destructive/30")}
                         />
                         <span className="text-[10px] text-muted-foreground">%</span>
                       </div>
@@ -1229,33 +1483,6 @@ export const ItemPanel = ({
                     <TableCell className="w-[220px] min-w-[220px] max-w-[220px] overflow-hidden text-[11px] text-muted-foreground">
                       由风险登记册关联
                     </TableCell>
-                    <TableCell className={`${ACTION_CELL_CLASS} ${FROZEN_ACTIVE_ROW_BACKGROUND}`}>
-                      <div className="flex items-center gap-1">
-                        <Button
-                          size="sm"
-                          className="h-7 text-xs"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void submitCreate();
-                          }}
-                          disabled={saving}
-                        >
-                          {saving ? "保存中..." : "保存"}
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 text-xs"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            cancelEdit();
-                          }}
-                          disabled={saving}
-                        >
-                          取消
-                        </Button>
-                      </div>
-                    </TableCell>
                   </TableRow>
                 )}
                 {sorted.map((item, index) => {
@@ -1267,13 +1494,15 @@ export const ItemPanel = ({
                   const devText = (n: number | null) =>
                     n === null ? null : n === 0 ? "0" : n > 0 ? `+${n}天` : `${n}天`;
                   const isEditingField = (field: EditableField) => editing && editingField === field;
-                  const frozenRowBackground = editing ? FROZEN_ACTIVE_ROW_BACKGROUND : frozenDataRowBackground(index);
+                  const frozenRowBackground = editing ? FROZEN_ACTIVE_ROW_BACKGROUND : frozenDataRowBackground();
                   return (
                     <TableRow
                       key={item.id}
-                      draggable={canEdit && !selectionMode && !editing && !saving}
+                      ref={editing ? activeEditRowRef : undefined}
+                      data-table-row-id={item.id}
+                      draggable={canEdit && !editing && !saving}
                       onDragStart={(event) => {
-                        if (!canEdit || selectionMode || editing) return;
+                        if (!canEdit || editing) return;
                         setDraggedItemId(item.id);
                         event.dataTransfer.effectAllowed = "move";
                         event.dataTransfer.setData("text/plain", item.id);
@@ -1291,15 +1520,17 @@ export const ItemPanel = ({
                         setDraggedItemId(null);
                         setItemDropTarget(null);
                       }}
-                      onContextMenu={(event) => openContextMenu(event, itemContextActions(item))}
+                      onContextMenu={(event) => openItemContextMenu(event, item)}
+                      onBlurCapture={editing ? (event) => handleDraftBlur(event, "edit") : undefined}
                       className={
                         editing
                           ? "group h-8 align-top bg-primary/5"
                           : canEdit
                             ? [
                                 "group h-8 cursor-grab align-top transition-[background,box-shadow,transform] duration-150 active:cursor-grabbing",
-                                index % 2 === 0 ? "bg-background" : "bg-muted/20",
+                                "bg-transparent",
                                 "hover:bg-primary/5",
+                                selectedIds.includes(item.id) ? "bg-primary/10 ring-1 ring-inset ring-primary/35" : "",
                                 draggedItemId === item.id ? "scale-[0.995] opacity-45 shadow-lg" : "",
                                 itemDropTarget?.id === item.id && draggedItemId !== item.id && itemDropTarget.position === "before"
                                   ? "translate-y-1 bg-primary/10 shadow-[inset_0_6px_0_hsl(var(--primary)/0.16),inset_0_2px_0_hsl(var(--primary))]"
@@ -1310,24 +1541,23 @@ export const ItemPanel = ({
                               ].filter(Boolean).join(" ")
                             : [
                                 "group h-8 align-top",
-                                index % 2 === 0 ? "bg-background" : "bg-muted/20",
+                                "bg-transparent",
                               ].join(" ")
                       }
                     >
-                      {selectionMode && (
-                        <TableCell className={`${FROZEN_CELL_CLASS} ${frozenRowBackground} left-0 w-[48px] min-w-[48px] max-w-[48px] text-xs`}>
-                          <input
-                            type="checkbox"
-                            checked={selectedIds.includes(item.id)}
-                            onChange={() => toggleSelected(item.id)}
-                            onClick={(event) => event.stopPropagation()}
-                            className="h-3.5 w-3.5 rounded border-border bg-background"
-                          />
-                        </TableCell>
-                      )}
                       <TableCell
-                        className={`${FROZEN_CELL_CLASS} ${frozenRowBackground} w-[64px] min-w-[64px] max-w-[64px] text-xs tabular-nums text-muted-foreground`}
+                        className={cn(
+                          FROZEN_CELL_CLASS,
+                          frozenRowBackground,
+                          "w-[64px] min-w-[64px] max-w-[64px] cursor-pointer select-none text-xs tabular-nums text-muted-foreground",
+                          selectedIds.includes(item.id) && "!bg-primary/15 font-semibold text-primary",
+                        )}
                         style={{ left: sequenceColumnLeft }}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          selectFromSequence(item.id, event);
+                        }}
+                        title="单击选择；Ctrl/Cmd 多选；Shift 连选"
                       >
                         {index + 1}
                       </TableCell>
@@ -1342,7 +1572,7 @@ export const ItemPanel = ({
                         </TableCell>
                       )}
                       <TableCell
-                        className={`${FROZEN_EDGE_CELL_CLASS} ${frozenRowBackground} w-[320px] min-w-[320px] max-w-[320px]`}
+                        className={`${FROZEN_EDGE_CELL_CLASS} ${FROZEN_TRANSPARENT_ROW_BACKGROUND} w-[320px] min-w-[320px] max-w-[320px]`}
                         style={{ left: titleColumnLeft }}
                       >
                         {isEditingField("title") ? (
@@ -1351,10 +1581,11 @@ export const ItemPanel = ({
                               value={row.title}
                               onChange={(e) => updateDraft("title", e.target.value)}
                               onKeyDown={handleEditKeyDown}
-                              className={INLINE_INPUT_CLASS}
+                              className={cn(INLINE_INPUT_CLASS, validationErrors.includes("title") && "border-destructive ring-1 ring-destructive/30")}
                               placeholder="事项名称"
                               autoFocus
                             />
+                            {validationErrors.includes("title") && <span className="mt-1 block text-[10px] text-destructive">请填写事项名称</span>}
                           </div>
                         ) : isEditingField("description") ? (
                           <div className="min-w-[220px]">
@@ -1392,13 +1623,15 @@ export const ItemPanel = ({
                         <TableCell>
                           <HierarchicalMultiSelect
                             options={taskSelectOptions}
-                            value={item.ganttTaskId ? [item.ganttTaskId] : []}
-                            onChange={(ids) => void commitSelectChange("ganttTaskId", ids[0] ?? null, item)}
-                            multiple={false}
+                            value={item.ganttTaskIds ?? []}
+                            onChange={(ids) => void commitSelectChange("ganttTaskIds", ids, item)}
+                            multiple
+                            applyOnClose
+                            disabled={!canEdit}
                             placeholder="不关联"
                             searchPlaceholder="搜索任务 ID、名称或类别"
                             ariaLabel="关联任务"
-                            className={`${GHOST_SELECT_CLASS} min-w-[180px]`}
+                            className={`${GHOST_SELECT_CLASS} min-w-[180px] !border-transparent !bg-transparent hover:!border-transparent hover:!bg-transparent focus-visible:!border-transparent focus-visible:!bg-transparent`}
                             portalContainer={typeof document === "undefined" ? null : document.body}
                           />
                         </TableCell>
@@ -1501,7 +1734,7 @@ export const ItemPanel = ({
                               value={itemProgressInputValue(row.progress)}
                               onChange={(e) => updateDraftProgress(Math.min(100, Math.max(0, Number.parseInt(e.target.value, 10) || 0)))}
                               onKeyDown={handleEditKeyDown}
-                              className={`${INLINE_INPUT_CLASS} w-[64px]`}
+                              className={cn(`${INLINE_INPUT_CLASS} w-[64px]`, validationErrors.includes("progress") && "border-destructive ring-1 ring-destructive/30")}
                               autoFocus
                             />
                             <span className="text-[10px] text-muted-foreground">%</span>
@@ -1588,37 +1821,6 @@ export const ItemPanel = ({
                             ))}
                           </div>
                         ) : "-"}
-                      </TableCell>
-                      <TableCell className={`${ACTION_CELL_CLASS} ${frozenRowBackground}`}>
-                        <div className="flex items-center gap-1">
-                          {editing ? (
-                            <>
-                              <Button
-                                size="sm"
-                                className="h-7 text-xs"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  void submitEdit();
-                                }}
-                                disabled={saving}
-                              >
-                                {saving ? "保存中..." : "保存"}
-                              </Button>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="h-7 text-xs"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  cancelEdit();
-                                }}
-                                disabled={saving}
-                              >
-                                取消
-                              </Button>
-                            </>
-                          ) : null}
-                        </div>
                       </TableCell>
                     </TableRow>
                   );

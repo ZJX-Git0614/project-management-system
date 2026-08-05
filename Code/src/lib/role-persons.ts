@@ -1,15 +1,5 @@
 import { prisma } from "@/lib/prisma"
-
-const parseRoleNames = (value: string | string[] | null | undefined): string[] => {
-  if (Array.isArray(value)) return value
-  if (!value) return []
-  try {
-    const parsed = JSON.parse(value)
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : []
-  } catch {
-    return []
-  }
-}
+import { parseRoleNames } from "@/lib/role-assignments"
 
 const uniqueNames = (items: string[]) => Array.from(new Set(items.map((item) => item.trim()).filter(Boolean)))
 

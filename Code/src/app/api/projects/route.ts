@@ -54,13 +54,11 @@ export async function POST(req: NextRequest) {
 
   const body = await req.json()
   if (!body.name) return err("项目名称不能为空")
-
-  let expectedEndDate = ""
-  if (body.startDate && body.repairCycleDays) {
-    const start = new Date(body.startDate)
-    start.setDate(start.getDate() + Number(body.repairCycleDays))
-    expectedEndDate = start.toISOString().split("T")[0]
-  }
+  const startDate = String(body.startDate ?? "").trim()
+  const expectedEndDate = String(body.expectedEndDate ?? "").trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return err("开始时间格式应为 YYYY-MM-DD")
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(expectedEndDate)) return err("预计结项时间格式应为 YYYY-MM-DD")
+  if (expectedEndDate < startDate) return err("预计结项时间不能早于开始时间")
 
   const initialMember = body.initialMember
   if (initialMember?.roleName || initialMember?.personName) {
@@ -89,7 +87,7 @@ export async function POST(req: NextRequest) {
       amountWan: body.amountWan || 0,
       deviceCount: body.deviceCount || 0,
       repairCycleDays: body.repairCycleDays || 0,
-      startDate: body.startDate || "",
+      startDate,
       expectedEndDate,
       status: body.status || "DRAFT",
       projectMembers: initialMember

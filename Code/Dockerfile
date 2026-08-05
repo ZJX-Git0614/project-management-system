@@ -33,6 +33,7 @@ COPY . .
 RUN mkdir -p public
 RUN npx prisma generate
 RUN npm run build
+RUN npm prune --omit=dev
 
 # ============ Production Stage ============
 FROM node:20-bookworm-slim AS runner

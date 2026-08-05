@@ -81,7 +81,7 @@ const DOMAIN_RULES: Array<{
   { domain: "TASK", pattern: /任务|甘特|计划开始|计划完成|实际开始|实际完成|延期|逾期|Task\d+/iu },
   { domain: "SCHEDULE_ANALYSIS", pattern: /计划分析|关键路径|基线|里程碑|紧前|前置|依赖|时滞|\blag\b|约束(?:日期)?|计划冲突/iu },
   { domain: "EARNED_VALUE", pattern: /挣值|\bPV\b|\bEV\b|\bAC\b|\bSV\b|\bCV\b|\bSPI\b|\bCPI\b|\bEAC\b|\bETC\b|\bVAC\b|\bTCPI\b|\bBAC\b/iu },
-  { domain: "RESOURCE", pattern: /资源分配|资源冲突|资源负荷|人员冲突|任务分配/u },
+  { domain: "RESOURCE", pattern: /资源分配|资源冲突|资源负荷|人员冲突|任务分配|WBS.{0,12}优化|优化.{0,12}WBS/iu },
   { domain: "SCHEDULE_COMPARE", pattern: /进度表(?:差异|对比|比较)|计划(?:差异|对比|比较)|对比(?:当前|历史|快照)|上传计划|上传进度/u },
   { domain: "MATTER", pattern: /事项|Matter\d+|当前问题[\s/]*措施|依赖条件/iu },
   { domain: "BUDGET", pattern: /预算|成本|费用|合同金额|利润率|公摊|审价/u },
@@ -242,6 +242,7 @@ export const buildProjectAssistantVisibleContext = (
       ...scheduleHeader(context.schedule),
       resources: context.schedule.resources,
       assignments: context.schedule.assignments,
+      optimization: context.resourceOptimization,
       tasks: context.schedule.tasks.map((task) => ({
         ...scheduleTaskIdentity(task),
         startDate: task.startDate,

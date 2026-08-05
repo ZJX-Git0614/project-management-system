@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -39,6 +39,42 @@ describe("GanttTimeline performance", () => {
     expect(screen.getByRole("textbox", { name: "任务描述" })).toHaveValue("无");
   });
 
+  it("warns parent tasks about unassigned descendant leaves and lists them in a tooltip", async () => {
+    render(<GanttTimeline
+      tasks={[
+        task(1, { ownerMemberId: "member-1", taskName: "父任务" }),
+        task(2, {
+          parentId: "task-1",
+          ownerMemberId: "member-1",
+          taskCode: "Task001.001",
+          taskName: "已分配任务",
+        }),
+        task(3, {
+          parentId: "task-1",
+          ownerMemberId: null,
+          taskCode: "Task001.002",
+          taskName: "待分配任务",
+        }),
+      ]}
+      canEdit
+    />);
+
+    const warning = screen.getByRole("button", { name: "父任务存在 1 个未分配负责人任务" });
+    expect(warning).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /已分配任务存在/ })).not.toBeInTheDocument();
+    const parentNameInput = screen.getByDisplayValue("父任务");
+    expect(parentNameInput).toHaveClass("pr-[76px]");
+    expect(warning.closest("[data-gantt-column-key='taskCode']")).toBeInTheDocument();
+    expect(warning).toHaveClass("border-0", "bg-transparent");
+    expect(within(parentNameInput.parentElement!).getByText("【关键路径】")).toHaveClass("right-1.5");
+
+    await userEvent.hover(warning);
+
+    const tooltip = await screen.findByRole("tooltip");
+    expect(within(tooltip).getByText("以下任务未安排负责人")).toBeInTheDocument();
+    expect(within(tooltip).getByText("Task001.002 · 待分配任务")).toBeInTheDocument();
+  });
+
   it("renders only viewport rows and loads predecessor choices on demand", async () => {
     const tasks = Array.from({ length: 460 }, (_, index) => task(index + 1));
     render(<GanttTimeline tasks={tasks} canEdit />);
@@ -73,6 +109,30 @@ describe("GanttTimeline performance", () => {
       expect.objectContaining({ id: "task-1" }),
       expect.objectContaining({ predecessorTaskIds: ["task-2", "task-3"] }),
       "predecessor",
+    ));
+  });
+
+  it("edits leaf task owners as a searchable multi-selection", async () => {
+    const onUpdateTask = vi.fn();
+    render(<GanttTimeline
+      tasks={[task(1)]}
+      projectMembers={[
+        { id: "member-1", projectId: "project-1", accountId: "account-1", personName: "张三", roleName: "开发", roleNames: ["开发", "评审"], createdAt: "", updatedAt: "" },
+        { id: "member-2", projectId: "project-1", accountId: "account-2", personName: "李四", roleName: "测试", roleNames: ["测试"], createdAt: "", updatedAt: "" },
+      ]}
+      canEdit
+      onUpdateTask={onUpdateTask}
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: "负责人" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "选择 张三" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "选择 李四" }));
+    await userEvent.click(screen.getByRole("button", { name: "应用负责人" }));
+
+    await waitFor(() => expect(onUpdateTask).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "task-1" }),
+      expect.objectContaining({ ownerMemberId: null, ownerMemberIds: ["member-1", "member-2"] }),
+      "owner",
     ));
   });
 

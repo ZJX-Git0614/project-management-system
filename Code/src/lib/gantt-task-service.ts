@@ -15,10 +15,23 @@ import {
 import { normalizeGanttCalendarMode, type GanttCalendarMode } from "@/lib/gantt-calendar";
 import { calculateGanttCpm, type GanttCpmMetrics } from "@/lib/gantt-cpm";
 import { scheduleGanttTasks } from "@/lib/gantt-schedule";
+import { buildGanttOwnerIdentityIndex, buildGanttOwnerRollups } from "@/lib/gantt-owner-hierarchy";
+import {
+  resolveEffectiveGanttOwnerMemberId,
+  synchronizeGanttOwnerHierarchy,
+} from "@/lib/gantt-owner-service";
 
 const ganttTaskInclude = {
   ownerMember: {
-    select: { id: true, personName: true, roleName: true },
+    select: { id: true, accountId: true, personName: true, roleName: true },
+  },
+  ownerLinks: {
+    orderBy: { createdAt: "asc" },
+    include: {
+      projectMember: {
+        select: { id: true, accountId: true, personName: true, roleName: true },
+      },
+    },
   },
   predecessorDependencies: {
     orderBy: { createdAt: "asc" },
@@ -147,6 +160,9 @@ export const serializeGanttTask = (task: GanttTaskRecord) => {
 
   return {
     ...task,
+    ownerMemberIds: (task.ownerLinks ?? []).length > 0
+      ? (task.ownerLinks ?? []).map((link) => link.projectMemberId)
+      : task.ownerMemberId ? [task.ownerMemberId] : [],
     predecessorTaskIds,
     predecessorTask: predecessorNames.length > 0 ? predecessorNames.join(",") : task.predecessorTask,
     createdAt: task.createdAt.toISOString(),
@@ -158,6 +174,67 @@ export const serializeGanttTask = (task: GanttTaskRecord) => {
       updatedAt: dependency.updatedAt.toISOString(),
     })),
   };
+};
+
+export const serializeGanttTaskList = (tasks: GanttTaskRecord[]) => {
+  const ownerMembersInTasks = [...new Map(tasks.flatMap((task) => [
+    ...(task.ownerLinks ?? []).map((link) => link.projectMember),
+    ...(task.ownerMember ? [task.ownerMember] : []),
+  ]).map((member) => [member.id, member] as const)).values()];
+  const ownerIdentityIndex = buildGanttOwnerIdentityIndex(ownerMembersInTasks);
+  const ownerIdsByTaskId = buildGanttOwnerRollups(tasks.map((task) => ({
+    id: task.id,
+    parentId: task.parentId,
+    ownerMemberId: task.ownerMemberId,
+    ownerMemberIds: (task.ownerLinks ?? []).length > 0
+      ? (task.ownerLinks ?? []).map((link) => link.projectMemberId)
+      : task.ownerMemberId ? [task.ownerMemberId] : [],
+  })), ownerIdentityIndex);
+  const ownerMemberById = new Map(
+    ownerMembersInTasks.map((ownerMember) => [ownerMember.id, ownerMember] as const),
+  );
+  const ownerMembershipsByIdentity = new Map<string, typeof ownerMembersInTasks>();
+  ownerMembersInTasks.forEach((ownerMember) => {
+    const identityKey = ownerIdentityIndex.get(ownerMember.id)?.identityKey ?? `member:${ownerMember.id}`;
+    ownerMembershipsByIdentity.set(identityKey, [
+      ...(ownerMembershipsByIdentity.get(identityKey) ?? []),
+      ownerMember,
+    ]);
+  });
+  const parentTaskIds = new Set(tasks.map((task) => task.parentId).filter((id): id is string => Boolean(id)));
+
+  return tasks.map((task) => {
+    const ownersByIdentity = new Map<string, {
+      id: string;
+      accountId: string | null;
+      personName: string;
+      roleName: string;
+      roleNames: string[];
+    }>();
+    (ownerIdsByTaskId.get(task.id) ?? []).forEach((ownerMemberId) => {
+      const owner = ownerMemberById.get(ownerMemberId);
+      if (!owner) return;
+      const identity = ownerIdentityIndex.get(ownerMemberId)?.identityKey ?? (owner.accountId || owner.personName);
+      const roleNames = Array.from(new Set(
+        (ownerMembershipsByIdentity.get(identity) ?? [owner]).map((membership) => membership.roleName),
+      ));
+      const existing = ownersByIdentity.get(identity);
+      if (existing) {
+        roleNames.forEach((roleName) => {
+          if (!existing.roleNames.includes(roleName)) existing.roleNames.push(roleName);
+        });
+        existing.roleName = existing.roleNames.join("、");
+        return;
+      }
+      ownersByIdentity.set(identity, { ...owner, roleName: roleNames.join("、"), roleNames });
+    });
+    const ownerMembers = Array.from(ownersByIdentity.values());
+    return {
+      ...serializeGanttTask(task),
+      ownerMembers,
+      ownerReadOnly: parentTaskIds.has(task.id) && ownerMembers.length > 0,
+    };
+  });
 };
 
 export const getOrderedGanttTasks = async (projectId: string) => {
@@ -178,8 +255,11 @@ export const getOrderedGanttTasks = async (projectId: string) => {
   return orderGanttTasksByHierarchy(normalizedTasks);
 };
 
-export const getProjectGanttCalendarMode = async (projectId: string): Promise<GanttCalendarMode> => {
-  const project = await prisma.project.findUnique({
+export const getProjectGanttCalendarMode = async (
+  projectId: string,
+  client: GanttWriteClient = prisma,
+): Promise<GanttCalendarMode> => {
+  const project = await client.project.findUnique({
     where: { id: projectId },
     select: { ganttCalendarMode: true },
   });
@@ -189,11 +269,12 @@ export const getProjectGanttCalendarMode = async (projectId: string): Promise<Ga
 export const recalculateProjectGanttSchedule = async (
   projectId: string,
   requestedMode?: GanttCalendarMode,
+  client: GanttWriteClient = prisma,
 ) => {
-  const mode = requestedMode ?? await getProjectGanttCalendarMode(projectId);
-  const [project, tasks] = await Promise.all([
-    prisma.project.findUnique({ where: { id: projectId }, select: { expectedEndDate: true } }),
-    prisma.projectGanttTask.findMany({
+  const mode = requestedMode ?? await getProjectGanttCalendarMode(projectId, client);
+  const [project, currentTasks] = await Promise.all([
+    client.project.findUnique({ where: { id: projectId }, select: { expectedEndDate: true } }),
+    client.projectGanttTask.findMany({
     where: { projectId },
     orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
     include: {
@@ -203,9 +284,9 @@ export const recalculateProjectGanttSchedule = async (
     },
     }),
   ]);
-  const scheduled = scheduleGanttTasks(tasks, mode);
+  const scheduled = scheduleGanttTasks(currentTasks, mode);
   const cpm = calculateGanttCpm(scheduled, mode, project?.expectedEndDate ?? "");
-  const currentById = new Map(tasks.map((task) => [task.id, task]));
+  const currentById = new Map(currentTasks.map((task) => [task.id, task]));
   const updates = scheduled.flatMap((task) => {
     const current = currentById.get(task.id)!;
     const metrics = cpm.metricsByTaskId.get(task.id);
@@ -214,7 +295,7 @@ export const recalculateProjectGanttSchedule = async (
       || current.finishDate !== task.finishDate
       || current.durationDays !== task.durationDays
       || current.durationMinutes !== task.durationMinutes
-      || Math.abs(current.estimatedWorkHours - task.estimatedWorkHours) > 0.001
+      || Math.abs(current.estimatedWorkHours - (task.estimatedWorkHours ?? task.durationDays * 7.5)) > 0.001
       || current.earlyStartDate !== metrics.earlyStartDate
       || current.earlyFinishDate !== metrics.earlyFinishDate
       || current.lateStartDate !== metrics.lateStartDate
@@ -227,13 +308,13 @@ export const recalculateProjectGanttSchedule = async (
       startDate: task.startDate,
       finishDate: task.finishDate,
       durationDays: task.durationDays,
-      durationMinutes: task.durationMinutes,
-      estimatedWorkHours: task.estimatedWorkHours,
+      durationMinutes: task.durationMinutes ?? Math.round(task.durationDays * 450),
+      estimatedWorkHours: task.estimatedWorkHours ?? task.durationDays * 7.5,
       metrics,
     }] : [];
   });
 
-  await bulkUpdateGanttSchedule(prisma, updates, new Date());
+  await bulkUpdateGanttSchedule(client, updates, new Date());
   return mode;
 };
 
@@ -302,8 +383,11 @@ export const getNextGanttTaskCode = async (projectId: string, parentId: string |
   return nextGanttTaskCode(tasks, parentId);
 };
 
-export const renumberProjectGanttTaskCodes = async (projectId: string) => {
-  const tasks = await prisma.projectGanttTask.findMany({
+export const renumberProjectGanttTaskCodes = async (
+  projectId: string,
+  client: GanttWriteClient = prisma,
+) => {
+  const tasks = await client.projectGanttTask.findMany({
     where: { projectId },
     orderBy: [{ sortOrder: "asc" }, { startDate: "asc" }, { createdAt: "asc" }],
   });
@@ -314,7 +398,7 @@ export const renumberProjectGanttTaskCodes = async (projectId: string) => {
     return original && original.taskCode !== task.taskCode;
   });
 
-  await bulkUpdateGanttTaskCodes(prisma, updates);
+  await bulkUpdateGanttTaskCodes(client, updates);
 };
 
 type GanttTaskHierarchyRecord = {
@@ -417,6 +501,7 @@ type GanttDeletionSummary = {
   externalDependencyCount: number;
   detachedWeeklyItemCount: number;
   detachedRiskCount: number;
+  affectedRiskCount: number;
   clearedPredecessorCount: number;
   ganttRevision: number;
 };
@@ -426,7 +511,8 @@ type GanttDeletionSnapshot = {
   tasks: Array<Record<string, unknown>>;
   dependencies: Array<Record<string, unknown>>;
   weeklyLinks: Array<{ id: string; ganttTaskId: string | null; taskName: string }>;
-  riskLinks: Array<{ id: string; ganttTaskId: string | null; linkedItemName: string }>;
+  weeklyTaskLinks?: Array<{ weeklyItemId: string; ganttTaskId: string }>;
+  riskLinks?: Array<{ id: string; ganttTaskId: string | null; linkedItemName: string }>;
   summary: GanttDeletionSummary;
 };
 
@@ -436,12 +522,53 @@ type GanttPlanHistorySnapshot = {
   tasks: Array<Record<string, unknown>>;
   dependencies: Array<Record<string, unknown>>;
   weeklyLinks: Array<{ id: string; ganttTaskId: string | null; taskName: string }>;
-  riskLinks: Array<{ id: string; ganttTaskId: string | null; linkedItemName: string }>;
+  weeklyTaskLinks?: Array<{ weeklyItemId: string; ganttTaskId: string }>;
+  riskLinks?: Array<{ id: string; ganttTaskId: string | null; linkedItemName: string }>;
   scheduleMetadata: Record<string, unknown> | null;
 };
 
 const GANTT_HISTORY_SOURCE_PREFIX = "__gantt_history__";
 const GANTT_HISTORY_SNAPSHOT_LIMIT = 110;
+
+const synchronizeWeeklyItemLegacyTaskFields = async (
+  client: GanttWriteClient,
+  projectId: string,
+  weeklyItemIds: string[],
+) => {
+  const itemIds = uniqueNonEmptyIds(weeklyItemIds);
+  if (itemIds.length === 0) return;
+
+  const [items, links] = await Promise.all([
+    client.weeklyItem.findMany({
+      where: { projectId, id: { in: itemIds } },
+      select: { id: true },
+    }),
+    client.weeklyItemGanttTask.findMany({
+      where: { weeklyItemId: { in: itemIds }, weeklyItem: { projectId } },
+      select: {
+        weeklyItemId: true,
+        ganttTask: { select: { id: true, taskName: true, sortOrder: true } },
+      },
+    }),
+  ]);
+  const linksByItemId = new Map<string, typeof links>();
+  links.forEach((link) => {
+    linksByItemId.set(link.weeklyItemId, [...(linksByItemId.get(link.weeklyItemId) ?? []), link]);
+  });
+
+  await Promise.all(items.map((item) => {
+    const firstLink = (linksByItemId.get(item.id) ?? [])
+      .sort((left, right) => left.ganttTask.sortOrder - right.ganttTask.sortOrder
+        || left.ganttTask.id.localeCompare(right.ganttTask.id))[0];
+    return client.weeklyItem.update({
+      where: { id: item.id },
+      data: {
+        ganttTaskId: firstLink?.ganttTask.id ?? null,
+        taskName: firstLink?.ganttTask.taskName ?? "",
+      },
+    });
+  }));
+};
 
 const taskScalarSelect = {
   id: true,
@@ -450,6 +577,10 @@ const taskScalarSelect = {
   projectId: true,
   parentId: true,
   ownerMemberId: true,
+  ownerLinks: {
+    orderBy: { createdAt: "asc" },
+    select: { projectMemberId: true },
+  },
   taskCode: true,
   taskCategory: true,
   taskName: true,
@@ -473,6 +604,7 @@ const taskScalarSelect = {
   calendarUid: true,
   constraintType: true,
   constraintDate: true,
+  resourceNotBeforeDate: true,
   baselineStartDate: true,
   baselineFinishDate: true,
   baselineCost: true,
@@ -483,6 +615,25 @@ const taskScalarSelect = {
   remark: true,
   sortOrder: true,
 } satisfies Prisma.ProjectGanttTaskSelect;
+
+export const ganttSnapshotOwnerMemberIds = (task: Record<string, unknown>) => {
+  const ownerLinks = Array.isArray(task.ownerLinks) ? task.ownerLinks : [];
+  const linkedOwnerIds = ownerLinks
+    .map((link) => link && typeof link === "object" && "projectMemberId" in link
+      ? String(link.projectMemberId ?? "").trim()
+      : "")
+    .filter(Boolean);
+  if (linkedOwnerIds.length > 0) return [...new Set(linkedOwnerIds)];
+  const legacyOwnerId = typeof task.ownerMemberId === "string" ? task.ownerMemberId.trim() : "";
+  return legacyOwnerId ? [legacyOwnerId] : [];
+};
+
+export const ganttSnapshotOwnerLinkRows = (
+  tasks: Array<Record<string, unknown>>,
+  validOwnerIds: ReadonlySet<string>,
+) => tasks.flatMap((task) => ganttSnapshotOwnerMemberIds(task)
+  .filter((projectMemberId) => validOwnerIds.has(projectMemberId))
+  .map((projectMemberId) => ({ taskId: String(task.id), projectMemberId })));
 
 const dependencyScalarSelect = {
   id: true,
@@ -529,7 +680,7 @@ const taskSnapshotCreateData = (
   validParentIds: ReadonlySet<string>,
 ): Prisma.ProjectGanttTaskCreateManyInput => {
   const rawParentId = typeof rawTask.parentId === "string" ? rawTask.parentId : null;
-  const rawOwnerMemberId = typeof rawTask.ownerMemberId === "string" ? rawTask.ownerMemberId : null;
+  const ownerMemberIds = ganttSnapshotOwnerMemberIds(rawTask).filter((ownerId) => validOwnerIds.has(ownerId));
   const rawBudgetItemId = typeof rawTask.budgetItemId === "string" ? rawTask.budgetItemId : null;
   return {
     id: String(rawTask.id),
@@ -537,7 +688,7 @@ const taskSnapshotCreateData = (
     updatedAt: new Date(String(rawTask.updatedAt)),
     projectId,
     parentId: rawParentId && validParentIds.has(rawParentId) ? rawParentId : null,
-    ownerMemberId: rawOwnerMemberId && validOwnerIds.has(rawOwnerMemberId) ? rawOwnerMemberId : null,
+    ownerMemberId: ownerMemberIds.length === 1 ? ownerMemberIds[0] : null,
     taskCode: String(rawTask.taskCode ?? ""),
     taskCategory: String(rawTask.taskCategory ?? ""),
     taskName: String(rawTask.taskName ?? ""),
@@ -561,6 +712,7 @@ const taskSnapshotCreateData = (
     calendarUid: String(rawTask.calendarUid ?? ""),
     constraintType: rawTask.constraintType === null || rawTask.constraintType === undefined ? null : Number(rawTask.constraintType),
     constraintDate: String(rawTask.constraintDate ?? ""),
+    resourceNotBeforeDate: String(rawTask.resourceNotBeforeDate ?? ""),
     baselineStartDate: String(rawTask.baselineStartDate ?? ""),
     baselineFinishDate: String(rawTask.baselineFinishDate ?? ""),
     baselineCost: Number(rawTask.baselineCost ?? 0),
@@ -583,12 +735,17 @@ export const captureProjectGanttHistorySnapshot = async (params: {
   if (!sessionId) throw new Error("操作历史会话无效");
 
   // There is no concurrent plan editing yet, so parallel reads are both safe and
-  // substantially faster than serializing six full-plan queries on one transaction connection.
-  const [project, tasks, dependencies, weeklyLinks, riskLinks, scheduleMetadata] = await Promise.all([
+  // substantially faster than serializing full-plan queries on one transaction connection.
+  const [project, tasks, dependencies, weeklyLinks, weeklyTaskLinks, riskLinks, scheduleMetadata] = await Promise.all([
     prisma.project.findUnique({ where: { id: params.projectId }, select: { ganttCalendarMode: true } }),
     prisma.projectGanttTask.findMany({ where: { projectId: params.projectId }, orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }], select: taskScalarSelect }),
     prisma.projectGanttDependency.findMany({ where: { projectId: params.projectId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], select: dependencyScalarSelect }),
     prisma.weeklyItem.findMany({ where: { projectId: params.projectId, ganttTaskId: { not: null } }, select: { id: true, ganttTaskId: true, taskName: true } }),
+    prisma.weeklyItemGanttTask.findMany({
+      where: { weeklyItem: { projectId: params.projectId } },
+      orderBy: [{ createdAt: "asc" }, { ganttTaskId: "asc" }],
+      select: { weeklyItemId: true, ganttTaskId: true },
+    }),
     prisma.riskRegisterItem.findMany({ where: { projectId: params.projectId, ganttTaskId: { not: null } }, select: { id: true, ganttTaskId: true, linkedItemName: true } }),
     prisma.projectScheduleImportMetadata.findUnique({ where: { projectId: params.projectId }, select: scheduleMetadataScalarSelect }),
   ]);
@@ -599,6 +756,7 @@ export const captureProjectGanttHistorySnapshot = async (params: {
     tasks,
     dependencies,
     weeklyLinks,
+    weeklyTaskLinks,
     riskLinks,
     scheduleMetadata,
   };
@@ -653,16 +811,22 @@ export const restoreProjectGanttHistorySnapshot = async (params: {
       where: { id: params.projectId },
       select: { name: true, code: true },
     });
-    const ownerIds = [...new Set(snapshot.tasks.map((task) => typeof task.ownerMemberId === "string" ? task.ownerMemberId : "").filter(Boolean))];
+    const ownerIds = [...new Set(snapshot.tasks.flatMap(ganttSnapshotOwnerMemberIds))];
     const budgetIds = [...new Set(snapshot.tasks.map((task) => typeof task.budgetItemId === "string" ? task.budgetItemId : "").filter(Boolean))];
-    const [owners, budgetItems] = await Promise.all([
+    const [owners, budgetItems, currentTasks, currentWeeklyTaskLinks] = await Promise.all([
       ownerIds.length ? tx.projectMember.findMany({ where: { projectId: params.projectId, id: { in: ownerIds } }, select: { id: true } }) : Promise.resolve([]),
       budgetIds.length ? tx.projectBudgetItem.findMany({ where: { projectId: params.projectId, id: { in: budgetIds } }, select: { id: true } }) : Promise.resolve([]),
+      tx.projectGanttTask.findMany({ where: { projectId: params.projectId }, select: { id: true } }),
+      tx.weeklyItemGanttTask.findMany({
+        where: { weeklyItem: { projectId: params.projectId } },
+        select: { weeklyItemId: true, ganttTaskId: true },
+      }),
     ]);
     const validOwnerIds = new Set(owners.map((item) => item.id));
     const validBudgetIds = new Set(budgetItems.map((item) => item.id));
     const taskById = new Map(snapshot.tasks.map((task) => [String(task.id), task]));
     const taskIds = new Set(taskById.keys());
+    const stableTaskIds = new Set(currentTasks.map((task) => task.id).filter((taskId) => taskIds.has(taskId)));
     const tasksByDepth = new Map<number, Array<Record<string, unknown>>>();
     snapshot.tasks.forEach((task) => {
       const depth = snapshotTaskDepth(task, taskById);
@@ -684,6 +848,11 @@ export const restoreProjectGanttHistorySnapshot = async (params: {
       });
     }
 
+    const ownerLinkRows = ganttSnapshotOwnerLinkRows(snapshot.tasks, validOwnerIds);
+    if (ownerLinkRows.length > 0) {
+      await tx.projectGanttTaskOwner.createMany({ data: ownerLinkRows, skipDuplicates: true });
+    }
+
     const dependencies = snapshot.dependencies
       .filter((dependency) => taskIds.has(String(dependency.predecessorTaskId)) && taskIds.has(String(dependency.successorTaskId)))
       .map((dependency): Prisma.ProjectGanttDependencyCreateManyInput => ({
@@ -699,14 +868,35 @@ export const restoreProjectGanttHistorySnapshot = async (params: {
       }));
     if (dependencies.length > 0) await tx.projectGanttDependency.createMany({ data: dependencies });
 
-    for (const link of snapshot.weeklyLinks) {
-      if (!link.ganttTaskId || !taskIds.has(link.ganttTaskId)) continue;
-      await tx.weeklyItem.updateMany({ where: { id: link.id, projectId: params.projectId }, data: { ganttTaskId: link.ganttTaskId, taskName: link.taskName } });
+    const snapshotWeeklyTaskLinks = Array.isArray(snapshot.weeklyTaskLinks)
+      ? snapshot.weeklyTaskLinks
+      : (snapshot.weeklyLinks ?? []).flatMap((link) => (
+        link.ganttTaskId ? [{ weeklyItemId: link.id, ganttTaskId: link.ganttTaskId }] : []
+      ));
+    const targetOnlyTaskIds = new Set([...taskIds].filter((taskId) => !stableTaskIds.has(taskId)));
+    const desiredWeeklyTaskLinks = new Map<string, { weeklyItemId: string; ganttTaskId: string }>();
+    currentWeeklyTaskLinks.forEach((link) => {
+      if (stableTaskIds.has(link.ganttTaskId)) desiredWeeklyTaskLinks.set(`${link.weeklyItemId}:${link.ganttTaskId}`, link);
+    });
+    snapshotWeeklyTaskLinks.forEach((link) => {
+      if (targetOnlyTaskIds.has(link.ganttTaskId)) desiredWeeklyTaskLinks.set(`${link.weeklyItemId}:${link.ganttTaskId}`, link);
+    });
+    const desiredWeeklyLinks = [...desiredWeeklyTaskLinks.values()];
+    const snapshotWeeklyItemIds = uniqueNonEmptyIds(desiredWeeklyLinks.map((link) => link.weeklyItemId));
+    const existingWeeklyItems = snapshotWeeklyItemIds.length > 0
+      ? await tx.weeklyItem.findMany({
+        where: { projectId: params.projectId, id: { in: snapshotWeeklyItemIds } },
+        select: { id: true },
+      })
+      : [];
+    const existingWeeklyItemIds = new Set(existingWeeklyItems.map((item) => item.id));
+    const restorableWeeklyTaskLinks = desiredWeeklyLinks.filter((link) => (
+      existingWeeklyItemIds.has(link.weeklyItemId) && taskIds.has(link.ganttTaskId)
+    ));
+    if (restorableWeeklyTaskLinks.length > 0) {
+      await tx.weeklyItemGanttTask.createMany({ data: restorableWeeklyTaskLinks, skipDuplicates: true });
     }
-    for (const link of snapshot.riskLinks) {
-      if (!link.ganttTaskId || !taskIds.has(link.ganttTaskId)) continue;
-      await tx.riskRegisterItem.updateMany({ where: { id: link.id, projectId: params.projectId }, data: { ganttTaskId: link.ganttTaskId, linkedItemName: link.linkedItemName } });
-    }
+    await synchronizeWeeklyItemLegacyTaskFields(tx, params.projectId, snapshotWeeklyItemIds);
 
     if (snapshot.scheduleMetadata) {
       const metadata = snapshot.scheduleMetadata;
@@ -737,6 +927,8 @@ export const restoreProjectGanttHistorySnapshot = async (params: {
       await tx.projectScheduleImportMetadata.deleteMany({ where: { projectId: params.projectId } });
     }
 
+    await synchronizeGanttOwnerHierarchy({ tx, projectId: params.projectId });
+
     await tx.project.update({
       where: { id: params.projectId },
       data: {
@@ -753,7 +945,12 @@ export const restoreProjectGanttHistorySnapshot = async (params: {
         data: { actionType: "RESTORE_GANTT_HISTORY", operator: params.operator, projectId: params.projectId, projectName: project.name || project.code, detail },
       }),
     ]);
-    return { restoredTaskCount: snapshot.tasks.length, restoredDependencyCount: dependencies.length };
+    const warnings: string[] = [];
+    const skippedOwnerLinkCount = snapshot.tasks.flatMap(ganttSnapshotOwnerMemberIds).length - ownerLinkRows.length;
+    if (skippedOwnerLinkCount > 0) warnings.push(`${skippedOwnerLinkCount} 条负责人关联因项目成员不存在而未恢复`);
+    const skippedWeeklyLinkCount = desiredWeeklyLinks.length - restorableWeeklyTaskLinks.length;
+    if (skippedWeeklyLinkCount > 0) warnings.push(`${skippedWeeklyLinkCount} 条事项关联因事项不存在而未恢复`);
+    return { restoredTaskCount: snapshot.tasks.length, restoredDependencyCount: dependencies.length, warnings };
   }, { timeout: 30_000, maxWait: 10_000 });
 
   return { message: params.actionLabel, ...result };
@@ -793,7 +990,7 @@ const collectGanttDeletionSummary = async (
   const taskIds = ganttTaskSubtreeIds(allTasks, normalizedRootTaskIds);
   const taskIdSet = new Set(taskIds);
   const retainedTaskIds = allTasks.filter((task) => !taskIdSet.has(task.id)).map((task) => task.id);
-  const [dependencies, detachedWeeklyItemCount, detachedRiskCount] = await Promise.all([
+  const [dependencies, weeklyTaskLinks, legacyWeeklyItems] = await Promise.all([
     client.projectGanttDependency.findMany({
       where: {
         projectId,
@@ -804,9 +1001,34 @@ const collectGanttDeletionSummary = async (
       },
       select: { predecessorTaskId: true, successorTaskId: true },
     }),
-    client.weeklyItem.count({ where: { projectId, ganttTaskId: { in: taskIds } } }),
-    client.riskRegisterItem.count({ where: { projectId, ganttTaskId: { in: taskIds } } }),
+    client.weeklyItemGanttTask.findMany({
+      where: { ganttTaskId: { in: taskIds }, weeklyItem: { projectId } },
+      select: { weeklyItemId: true },
+    }),
+    client.weeklyItem.findMany({
+      where: { projectId, ganttTaskId: { in: taskIds } },
+      select: { id: true },
+    }),
   ]);
+  const affectedWeeklyItemIds = uniqueNonEmptyIds([
+    ...weeklyTaskLinks.map((link) => link.weeklyItemId),
+    ...legacyWeeklyItems.map((item) => item.id),
+  ]);
+  const affectedRisks = await client.riskRegisterItem.findMany({
+    where: {
+      projectId,
+      OR: [
+        { ganttTaskId: { in: taskIds } },
+        ...(affectedWeeklyItemIds.length > 0 ? [
+          { weeklyItemId: { in: affectedWeeklyItemIds } },
+          { weeklyItemLinks: { some: { weeklyItemId: { in: affectedWeeklyItemIds } } } },
+        ] : []),
+      ],
+    },
+    select: { id: true },
+  });
+  const detachedWeeklyItemCount = affectedWeeklyItemIds.length;
+  const affectedRiskCount = new Set(affectedRisks.map((risk) => risk.id)).size;
   const internalDependencyCount = dependencies.filter((dependency) => (
     taskIdSet.has(dependency.predecessorTaskId) && taskIdSet.has(dependency.successorTaskId)
   )).length;
@@ -827,7 +1049,8 @@ const collectGanttDeletionSummary = async (
     internalDependencyCount,
     externalDependencyCount: dependencies.length - internalDependencyCount,
     detachedWeeklyItemCount,
-    detachedRiskCount,
+    detachedRiskCount: affectedRiskCount,
+    affectedRiskCount,
     clearedPredecessorCount: successorTaskIds.length,
     ganttRevision: project.ganttRevision,
   };
@@ -839,7 +1062,7 @@ const buildGanttDeletionSnapshot = async (
   client: Prisma.TransactionClient,
 ): Promise<GanttDeletionSnapshot> => {
   const taskIds = summary.taskIds;
-  const [tasks, dependencies, weeklyLinks, riskLinks] = await Promise.all([
+  const [tasks, dependencies, weeklyLinks, weeklyTaskLinks, riskLinks] = await Promise.all([
     client.projectGanttTask.findMany({
       where: { projectId, id: { in: taskIds } },
       orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
@@ -860,6 +1083,10 @@ const buildGanttDeletionSnapshot = async (
       where: { projectId, ganttTaskId: { in: taskIds } },
       select: { id: true, ganttTaskId: true, taskName: true },
     }),
+    client.weeklyItemGanttTask.findMany({
+      where: { ganttTaskId: { in: taskIds }, weeklyItem: { projectId } },
+      select: { weeklyItemId: true, ganttTaskId: true },
+    }),
     client.riskRegisterItem.findMany({
       where: { projectId, ganttTaskId: { in: taskIds } },
       select: { id: true, ganttTaskId: true, linkedItemName: true },
@@ -870,6 +1097,7 @@ const buildGanttDeletionSnapshot = async (
     tasks,
     dependencies,
     weeklyLinks,
+    weeklyTaskLinks,
     riskLinks,
     summary,
   };
@@ -892,7 +1120,13 @@ const deleteGanttTaskIds = async (params: {
 }) => {
   const requestedTaskIds = uniqueNonEmptyIds(params.taskIds);
   if (requestedTaskIds.length === 0) {
-    return { deletedTaskCount: 0, detachedWeeklyItemCount: 0, detachedRiskCount: 0, clearedPredecessorCount: 0 };
+    return {
+      deletedTaskCount: 0,
+      detachedWeeklyItemCount: 0,
+      detachedRiskCount: 0,
+      affectedRiskCount: 0,
+      clearedPredecessorCount: 0,
+    };
   }
 
   const result = await prisma.$transaction(async (tx) => {
@@ -940,16 +1174,14 @@ const deleteGanttTaskIds = async (params: {
         expiresAt,
       },
     });
-    const [weeklyItems, riskItems] = await Promise.all([
-      tx.weeklyItem.updateMany({
-        where: { projectId: params.projectId, ganttTaskId: { in: summary.taskIds } },
-        data: { ganttTaskId: null, taskName: "" },
-      }),
-      tx.riskRegisterItem.updateMany({
-        where: { projectId: params.projectId, ganttTaskId: { in: summary.taskIds } },
-        data: { ganttTaskId: null, linkedItemName: "" },
-      }),
+    const affectedWeeklyItemIds = uniqueNonEmptyIds([
+      ...(snapshot.weeklyTaskLinks ?? []).map((link) => link.weeklyItemId),
+      ...snapshot.weeklyLinks.map((link) => link.id),
     ]);
+    await tx.riskRegisterItem.updateMany({
+      where: { projectId: params.projectId, ganttTaskId: { in: summary.taskIds } },
+      data: { ganttTaskId: null, linkedItemName: "" },
+    });
     if (successorTaskIds.length > 0) {
       await tx.projectGanttTask.updateMany({
         where: { id: { in: successorTaskIds }, projectId: params.projectId },
@@ -957,6 +1189,8 @@ const deleteGanttTaskIds = async (params: {
       });
     }
     const deleted = await tx.projectGanttTask.deleteMany({ where: { id: { in: summary.taskIds }, projectId: params.projectId } });
+    await synchronizeWeeklyItemLegacyTaskFields(tx, params.projectId, affectedWeeklyItemIds);
+    await synchronizeGanttOwnerHierarchy({ tx, projectId: params.projectId });
     const changedProject = await tx.project.update({
       where: { id: params.projectId },
       data: { ganttRevision: { increment: 1 } },
@@ -968,7 +1202,7 @@ const deleteGanttTaskIds = async (params: {
         data: { revisionAfterDelete: changedProject.ganttRevision },
       });
     }
-    const detail = `${params.detailPrefix}，共 ${deleted.count} 条；解除事项关联 ${weeklyItems.count} 条、风险关联 ${riskItems.count} 条，并清理紧前任务显示 ${successorTaskIds.length} 条。删除批次：${batch.id}。`;
+    const detail = `${params.detailPrefix}，共 ${deleted.count} 条；更新 ${summary.detachedWeeklyItemCount} 条事项的任务关联、${summary.affectedRiskCount} 条风险的受影响任务范围，并清理紧前任务显示 ${successorTaskIds.length} 条。删除批次：${batch.id}。`;
     await Promise.all([
       tx.operationHistory.create({
         data: {
@@ -997,8 +1231,9 @@ const deleteGanttTaskIds = async (params: {
       expiresAt: expiresAt.toISOString(),
       revisionAfterDelete: changedProject.ganttRevision,
       deletedTaskCount: deleted.count,
-      detachedWeeklyItemCount: weeklyItems.count,
-      detachedRiskCount: riskItems.count,
+      detachedWeeklyItemCount: summary.detachedWeeklyItemCount,
+      detachedRiskCount: summary.affectedRiskCount,
+      affectedRiskCount: summary.affectedRiskCount,
       clearedPredecessorCount: successorTaskIds.length,
     };
   });
@@ -1123,14 +1358,12 @@ export const restoreGanttTaskDeletionBatch = async (params: {
       where: { id: params.projectId },
       select: { name: true, code: true, ganttRevision: true },
     });
-    if (project.ganttRevision !== batch.revisionAfterDelete) {
-      throw new GanttRevisionConflictError("删除后甘特计划已发生变化，请先确认近期变更后再恢复");
-    }
+    const revisionChangedAfterDelete = project.ganttRevision !== batch.revisionAfterDelete;
     const taskIds = snapshot.tasks.map((task) => String(task.id || "")).filter(Boolean);
     const occupied = await tx.projectGanttTask.count({ where: { projectId: params.projectId, id: { in: taskIds } } });
     if (occupied > 0) throw new Error("部分待恢复任务 ID 已被占用，请刷新后重试");
 
-    const ownerIds = [...new Set(snapshot.tasks.map((task) => typeof task.ownerMemberId === "string" ? task.ownerMemberId : "").filter(Boolean))];
+    const ownerIds = [...new Set(snapshot.tasks.flatMap(ganttSnapshotOwnerMemberIds))];
     const budgetIds = [...new Set(snapshot.tasks.map((task) => typeof task.budgetItemId === "string" ? task.budgetItemId : "").filter(Boolean))];
     const [owners, budgetItems, retainedParentTasks] = await Promise.all([
       ownerIds.length ? tx.projectMember.findMany({ where: { projectId: params.projectId, id: { in: ownerIds } }, select: { id: true } }) : Promise.resolve([]),
@@ -1143,16 +1376,19 @@ export const restoreGanttTaskDeletionBatch = async (params: {
     const snapshotTaskIds = new Set(taskIds);
     const taskById = new Map(snapshot.tasks.map((task) => [String(task.id), task]));
     const warnings: string[] = [];
+    if (revisionChangedAfterDelete) {
+      warnings.push("删除后甘特计划还执行过其他操作；本次仅恢复原删除范围，其他任务变更已保留");
+    }
 
     const orderedTasks = [...snapshot.tasks].sort((left, right) => (
       taskDepthFromSnapshot(left, taskById) - taskDepthFromSnapshot(right, taskById)
       || Number(left.sortOrder ?? 0) - Number(right.sortOrder ?? 0)
     ));
     for (const rawTask of orderedTasks) {
-      const ownerMemberId = typeof rawTask.ownerMemberId === "string" && validOwnerIds.has(rawTask.ownerMemberId)
-        ? rawTask.ownerMemberId
-        : null;
-      if (rawTask.ownerMemberId && !ownerMemberId) warnings.push(`任务「${rawTask.taskName || rawTask.id}」的原负责人已不存在，已恢复为空`);
+      const snapshotOwnerIds = ganttSnapshotOwnerMemberIds(rawTask);
+      const ownerMemberIds = snapshotOwnerIds.filter((ownerId) => validOwnerIds.has(ownerId));
+      const ownerMemberId = ownerMemberIds.length === 1 ? ownerMemberIds[0] : null;
+      if (snapshotOwnerIds.length > ownerMemberIds.length) warnings.push(`任务「${rawTask.taskName || rawTask.id}」的部分原负责人已不存在，已忽略失效负责人`);
       const budgetItemId = typeof rawTask.budgetItemId === "string" && validBudgetIds.has(rawTask.budgetItemId)
         ? rawTask.budgetItemId
         : null;
@@ -1206,6 +1442,11 @@ export const restoreGanttTaskDeletionBatch = async (params: {
       existingTaskIds.add(String(rawTask.id));
     }
 
+    const ownerLinkRows = ganttSnapshotOwnerLinkRows(snapshot.tasks, validOwnerIds);
+    if (ownerLinkRows.length > 0) {
+      await tx.projectGanttTaskOwner.createMany({ data: ownerLinkRows, skipDuplicates: true });
+    }
+
     const restoredTaskIds = new Set([...existingTaskIds]);
     const dependencyRows = snapshot.dependencies
       .filter((dependency) => restoredTaskIds.has(String(dependency.predecessorTaskId)) && restoredTaskIds.has(String(dependency.successorTaskId)))
@@ -1220,26 +1461,43 @@ export const restoreGanttTaskDeletionBatch = async (params: {
         lag: Number(dependency.lag ?? 0),
         lagFormat: Number(dependency.lagFormat ?? 7),
       }));
+    const skippedDependencyCount = snapshot.dependencies.length - dependencyRows.length;
+    if (skippedDependencyCount > 0) warnings.push(`${skippedDependencyCount} 条依赖因关联任务不存在而未恢复`);
     if (dependencyRows.length > 0) {
       await tx.projectGanttDependency.createMany({ data: dependencyRows, skipDuplicates: true });
     }
 
-    let restoredWeeklyLinkCount = 0;
-    for (const link of snapshot.weeklyLinks ?? []) {
-      const updated = await tx.weeklyItem.updateMany({
-        where: { id: link.id, projectId: params.projectId, ganttTaskId: null },
-        data: { ganttTaskId: link.ganttTaskId, taskName: link.taskName },
-      });
-      restoredWeeklyLinkCount += updated.count;
+    const snapshotWeeklyTaskLinks = Array.isArray(snapshot.weeklyTaskLinks)
+      ? snapshot.weeklyTaskLinks
+      : (snapshot.weeklyLinks ?? []).flatMap((link) => (
+        link.ganttTaskId ? [{ weeklyItemId: link.id, ganttTaskId: link.ganttTaskId }] : []
+      ));
+    const snapshotWeeklyItemIds = uniqueNonEmptyIds(snapshotWeeklyTaskLinks.map((link) => link.weeklyItemId));
+    const existingWeeklyItems = snapshotWeeklyItemIds.length > 0
+      ? await tx.weeklyItem.findMany({
+        where: { projectId: params.projectId, id: { in: snapshotWeeklyItemIds } },
+        select: { id: true },
+      })
+      : [];
+    const existingWeeklyItemIds = new Set(existingWeeklyItems.map((item) => item.id));
+    const restorableWeeklyTaskLinks = snapshotWeeklyTaskLinks.filter((link) => (
+      existingWeeklyItemIds.has(link.weeklyItemId) && restoredTaskIds.has(link.ganttTaskId)
+    ));
+    const skippedWeeklyLinkCount = snapshotWeeklyTaskLinks.length - restorableWeeklyTaskLinks.length;
+    if (skippedWeeklyLinkCount > 0) warnings.push(`${skippedWeeklyLinkCount} 条事项关联因事项或任务不存在而未恢复`);
+    const restoredWeeklyLinks = restorableWeeklyTaskLinks.length > 0
+      ? await tx.weeklyItemGanttTask.createMany({ data: restorableWeeklyTaskLinks, skipDuplicates: true })
+      : { count: 0 };
+    const restoredWeeklyLinkCount = restoredWeeklyLinks.count;
+    await synchronizeWeeklyItemLegacyTaskFields(tx, params.projectId, snapshotWeeklyItemIds);
+
+    const legacyRiskLinkCount = (snapshot.riskLinks ?? []).filter((link) => Boolean(link.ganttTaskId)).length;
+    if (legacyRiskLinkCount > 0) {
+      warnings.push(`检测到 ${legacyRiskLinkCount} 条旧版风险直接任务关联；风险现仅关联事项，因此未恢复这些直接关联`);
     }
-    let restoredRiskLinkCount = 0;
-    for (const link of snapshot.riskLinks ?? []) {
-      const updated = await tx.riskRegisterItem.updateMany({
-        where: { id: link.id, projectId: params.projectId, ganttTaskId: null },
-        data: { ganttTaskId: link.ganttTaskId, linkedItemName: link.linkedItemName },
-      });
-      restoredRiskLinkCount += updated.count;
-    }
+    const restoredRiskLinkCount = 0;
+
+    await synchronizeGanttOwnerHierarchy({ tx, projectId: params.projectId });
 
     const restoredAt = new Date();
     await tx.projectGanttDeletionBatch.update({
@@ -1251,7 +1509,7 @@ export const restoreGanttTaskDeletionBatch = async (params: {
       data: { ganttRevision: { increment: 1 } },
       select: { ganttRevision: true },
     });
-    const detail = `恢复删除批次 ${batch.id}：恢复 ${taskIds.length} 条甘特任务、${dependencyRows.length} 条依赖、${restoredWeeklyLinkCount} 条事项关联、${restoredRiskLinkCount} 条风险关联。`;
+    const detail = `恢复删除批次 ${batch.id}：恢复 ${taskIds.length} 条甘特任务、${dependencyRows.length} 条依赖及 ${restoredWeeklyLinkCount} 条事项任务关联；风险受影响任务范围已通过关联事项自动恢复。`;
     await Promise.all([
       tx.operationHistory.create({
         data: {
@@ -1320,7 +1578,6 @@ export const redoGanttTaskDeletionBatch = async (params: {
     taskIds,
     operator: params.operator,
     operatorUserId: params.operatorUserId,
-    expectedRevision: batch.revisionAfterDelete + 1,
     auditActionType: "REDO_GANTT_TASK_DELETION",
     detailPrefix: `取消撤销删除批次 ${batch.id}`,
   });
@@ -1356,35 +1613,38 @@ export const changeProjectGanttTaskHierarchy = async (params: {
   const categoryUpdateCount = updates.filter((task) => originalById.get(task.id)?.taskCategory !== task.taskCategory).length;
 
   if (updates.length > 0) {
-    await prisma.$transaction([
-      ...updates.map((task) => prisma.projectGanttTask.update({
+    await prisma.$transaction(async (tx) => {
+      await Promise.all(updates.map((task) => tx.projectGanttTask.update({
         where: { id: task.id },
         data: {
           parentId: task.parentId ?? null,
           sortOrder: task.sortOrder,
           taskCategory: task.taskCategory,
         },
-      })),
-      prisma.project.update({
-        where: { id: params.projectId },
-        data: { ganttRevision: { increment: 1 } },
-      }),
-      prisma.operationHistory.create({
-        data: {
-          projectId: params.projectId,
-          entityType: "PROJECT_GANTT_TASK",
-          entityId: changed.movedTaskIds.join(","),
-          actionType: "UPDATE",
-          operator: params.operator,
-          detail: `${params.direction === "INDENT" ? "下移" : "上移"} ${changed.movedTaskIds.length} 个任务层级，子任务随父任务联动${categoryUpdateCount > 0 ? `，同步 ${categoryUpdateCount} 条任务类别` : ""}`,
-        },
-      }),
-    ]);
+      })));
+      await synchronizeGanttOwnerHierarchy({ tx, projectId: params.projectId });
+      await Promise.all([
+        tx.project.update({
+          where: { id: params.projectId },
+          data: { ganttRevision: { increment: 1 } },
+        }),
+        tx.operationHistory.create({
+          data: {
+            projectId: params.projectId,
+            entityType: "PROJECT_GANTT_TASK",
+            entityId: changed.movedTaskIds.join(","),
+            actionType: "UPDATE",
+            operator: params.operator,
+            detail: `${params.direction === "INDENT" ? "下移" : "上移"} ${changed.movedTaskIds.length} 个任务层级，子任务随父任务联动${categoryUpdateCount > 0 ? `，同步 ${categoryUpdateCount} 条任务类别` : ""}`,
+          },
+        }),
+      ]);
+    });
     await renumberProjectGanttTaskCodes(params.projectId);
   }
 
   return {
-    tasks: (await getOrderedGanttTasks(params.projectId)).map(serializeGanttTask),
+    tasks: serializeGanttTaskList(await getOrderedGanttTasks(params.projectId)),
     movedTaskIds: changed.movedTaskIds,
   };
 };
@@ -1442,6 +1702,7 @@ const cloneGanttTaskData = (
   calendarUid: task.calendarUid,
   constraintType: task.constraintType,
   constraintDate: task.constraintDate,
+  resourceNotBeforeDate: task.resourceNotBeforeDate,
   baselineStartDate: task.baselineStartDate,
   baselineFinishDate: task.baselineFinishDate,
   baselineCost: task.baselineCost,
@@ -1466,6 +1727,9 @@ export const insertProjectGanttTasks = async (params: {
     if (!anchor) throw new Error("插入位置对应的任务不存在");
     const childPlacement = params.placement === "CHILD_FIRST" || params.placement === "CHILD_LAST";
     const parentId = childPlacement ? anchor.id : anchor.parentId;
+    const inheritedOwnerMemberId = parentId
+      ? await resolveEffectiveGanttOwnerMemberId({ tx, projectId: params.projectId, taskId: parentId })
+      : null;
     const siblings = await tx.projectGanttTask.findMany({
       where: { projectId: params.projectId, parentId },
       orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
@@ -1483,6 +1747,7 @@ export const insertProjectGanttTasks = async (params: {
       data: Array.from({ length: count }, (_, index) => ({
           projectId: params.projectId,
           parentId,
+          ownerMemberId: inheritedOwnerMemberId,
           taskCode: "",
           taskCategory: anchor.taskCategory,
           taskName: "",
@@ -1506,6 +1771,7 @@ export const insertProjectGanttTasks = async (params: {
     const orderedSiblingIds = siblings.map((task) => task.id);
     orderedSiblingIds.splice(insertIndex, 0, ...ids);
     await bulkUpdateGanttSortOrders(tx, orderedSiblingIds.map((taskId, index) => ({ id: taskId, sortOrder: index + 1 })));
+    await synchronizeGanttOwnerHierarchy({ tx, projectId: params.projectId });
     await Promise.all([
       tx.project.update({ where: { id: params.projectId }, data: { ganttRevision: { increment: 1 } } }),
       tx.operationHistory.create({
@@ -1522,7 +1788,7 @@ export const insertProjectGanttTasks = async (params: {
     return ids;
   }, { timeout: 30_000, maxWait: 10_000 });
   await renumberProjectGanttTaskCodes(params.projectId);
-  return { tasks: (await getOrderedGanttTasks(params.projectId)).map(serializeGanttTask), createdTaskIds };
+  return { tasks: serializeGanttTaskList(await getOrderedGanttTasks(params.projectId)), createdTaskIds };
 };
 
 export const copyProjectGanttTasks = async (params: {
@@ -1563,6 +1829,13 @@ export const copyProjectGanttTasks = async (params: {
       const created = await tx.projectGanttTask.create({
         data: cloneGanttTaskData(source, copiedParentId, rootSet.has(source.id) ? insertIndex + rootIndex + 1 : nextChildOrder),
       });
+      const copiedOwnerMemberIds = ganttSnapshotOwnerMemberIds(source as unknown as Record<string, unknown>);
+      if (copiedOwnerMemberIds.length > 0) {
+        await tx.projectGanttTaskOwner.createMany({
+          data: copiedOwnerMemberIds.map((projectMemberId) => ({ taskId: created.id, projectMemberId })),
+          skipDuplicates: true,
+        });
+      }
       newIdByOldId.set(source.id, created.id);
       if (rootSet.has(source.id)) rootIds.push(created.id);
     }
@@ -1578,6 +1851,7 @@ export const copyProjectGanttTasks = async (params: {
     })).filter((dependency) => dependency.successorTaskId && dependency.predecessorTaskId !== dependency.successorTaskId);
     if (dependencyRows.length > 0) await tx.projectGanttDependency.createMany({ data: dependencyRows, skipDuplicates: true });
     const ids = orderedSource.map((task) => newIdByOldId.get(task.id)!).filter(Boolean);
+    await synchronizeGanttOwnerHierarchy({ tx, projectId: params.projectId });
     await Promise.all([
       tx.project.update({ where: { id: params.projectId }, data: { ganttRevision: { increment: 1 } } }),
       tx.operationHistory.create({
@@ -1588,7 +1862,7 @@ export const copyProjectGanttTasks = async (params: {
   }, { timeout: 30_000, maxWait: 10_000 });
   await renumberProjectGanttTaskCodes(params.projectId);
   await recalculateProjectGanttSchedule(params.projectId);
-  return { tasks: (await getOrderedGanttTasks(params.projectId)).map(serializeGanttTask), createdTaskIds };
+  return { tasks: serializeGanttTaskList(await getOrderedGanttTasks(params.projectId)), createdTaskIds };
 };
 
 export const moveProjectGanttTaskBranches = async (params: {
@@ -1654,6 +1928,7 @@ export const moveProjectGanttTaskBranches = async (params: {
       sortOrder: task.sortOrder,
       taskCategory: task.taskCategory,
     })));
+    await synchronizeGanttOwnerHierarchy({ tx, projectId: params.projectId });
     await Promise.all([
       tx.project.update({ where: { id: params.projectId }, data: { ganttRevision: { increment: 1 } } }),
       tx.operationHistory.create({
@@ -1663,5 +1938,5 @@ export const moveProjectGanttTaskBranches = async (params: {
     return [...movedSet];
   }, { timeout: 30_000, maxWait: 10_000 });
   await renumberProjectGanttTaskCodes(params.projectId);
-  return { tasks: (await getOrderedGanttTasks(params.projectId)).map(serializeGanttTask), movedTaskIds };
+  return { tasks: serializeGanttTaskList(await getOrderedGanttTasks(params.projectId)), movedTaskIds };
 };

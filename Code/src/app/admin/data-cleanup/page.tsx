@@ -12,6 +12,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Select } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { SystemBackupPanel } from "@/components/system-backup-panel";
+import { SystemLogPanel } from "@/components/system-log-panel";
+import { ProjectRestorePanel } from "@/components/project-restore-panel";
 
 interface CleanupModule {
   id: string;
@@ -135,6 +137,8 @@ export default function DataCleanupPage() {
   return (
     <div className="space-y-4">
       <SystemBackupPanel />
+      <ProjectRestorePanel />
+      <SystemLogPanel />
       <Card>
         <CardHeader className="pb-2">
           <div className="flex flex-wrap items-start justify-between gap-3">

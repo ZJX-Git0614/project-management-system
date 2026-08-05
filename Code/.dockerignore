@@ -5,6 +5,8 @@ node_modules
 .omx
 .codegraph
 graphify-out
+dist
+outputs
 docs/*
 !docs/佳佳智能助手使用手册.md
 __tests__

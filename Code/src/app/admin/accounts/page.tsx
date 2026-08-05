@@ -17,6 +17,10 @@ import {
 } from "@/components/ui/table";
 import { api } from "@/lib/api-client";
 import { useAuth } from "@/contexts/auth-context";
+import {
+  buildAccountRoleChangeConfirmation,
+  type ProjectRoleMembership,
+} from "@/lib/role-assignments";
 
 interface AccountItem {
   id: string;
@@ -27,6 +31,7 @@ interface AccountItem {
   passwordResetRequired: boolean;
   passwordUpdatedAt: string | null;
   createdAt: string;
+  projectMemberships: ProjectRoleMembership[];
 }
 
 interface RoleConfigItem {
@@ -121,6 +126,9 @@ function EditAccountDialog({
               <span className="text-xs text-muted-foreground">暂无可用角色，请先在“项目角色与人员管理”中添加。</span>
             )}
           </div>
+          <div className="mt-1.5 text-[11px] text-muted-foreground">
+            同一账号可选多个角色，有效权限按全部角色取并集。
+          </div>
         </div>
       </form>
     </ModalDialog>
@@ -173,8 +181,19 @@ export default function AccountsPage() {
   const handleUpdate = async (data: { username: string; displayName: string; assignedRoleNames: string[] }) => {
     if (!editAccount) return;
     try {
-      await api.put(`/api/accounts/${editAccount.id}`, data);
+      const roleChangeMessage = buildAccountRoleChangeConfirmation({
+        displayName: editAccount.displayName,
+        previousRoleNames: editAccount.assignedRoleNames,
+        nextRoleNames: data.assignedRoleNames,
+        memberships: editAccount.projectMemberships ?? [],
+      });
+      if (roleChangeMessage && !(await confirm(roleChangeMessage))) return;
+      await api.put(`/api/accounts/${editAccount.id}`, {
+        ...data,
+        confirmRoleChange: Boolean(roleChangeMessage),
+      });
       await fetchData();
+      if (roleChangeMessage) setToastMsg("账号角色已更新，项目成员和权限已同步");
     } catch (error) {
       alert(error instanceof Error ? error.message : "更新失败");
     }

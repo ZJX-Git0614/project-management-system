@@ -50,6 +50,10 @@ Assistant configuration
 - For local Ollama on Windows, install Ollama and pull the configured model. In Assistant
   Settings, use http://host.docker.internal:11434 instead of http://127.0.0.1:11434 because
   Ceastar PMS runs inside Docker.
+- Double-click assistant-services.bat to start/stop Ollama or a configured RAGLite instance,
+  check health, and independently enable startup recovery. Both startup options are disabled
+  by default. Configuration, logs, and RAGLite data are stored under C:\ProgramData\Ceastar-PMS
+  so application updates and rollbacks do not overwrite them.
 
 Optional binary MPP export
 --------------------------

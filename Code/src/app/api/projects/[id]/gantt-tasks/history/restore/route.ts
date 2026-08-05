@@ -15,7 +15,7 @@ export async function POST(
     userHasPermission(user, "project-gantt:edit"),
     userHasPermission(user, "project-gantt:delete"),
   ]);
-  if (!canWrite.some(Boolean)) return err("权限不足", 403);
+  if (!canWrite.every(Boolean)) return err("恢复整个 WBS 需要新增、编辑和删除权限", 403);
 
   const { id } = await params;
   const mutableError = await ensureMutableProject(id);

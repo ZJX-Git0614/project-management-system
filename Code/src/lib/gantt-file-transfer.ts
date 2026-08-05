@@ -258,11 +258,10 @@ export const parseProjectXmlBundle = (xml: string): GanttImportBundle => {
     const finishDate = dateOnly(rawTask.Finish);
     const durationMinutes = parseIsoDurationMinutes(rawTask.Duration);
     const isMilestone = text(rawTask.Milestone) === "1";
-    const durationDays = isMilestone
-      ? 0
-      : durationMinutes > 0
-        ? normalizeGanttDurationDays(durationMinutes / minutesPerDay)
-        : durationBetween(startDate, finishDate);
+    // PMS treats milestones as markers only. Preserve the source duration and dates.
+    const durationDays = durationMinutes > 0
+      ? normalizeGanttDurationDays(durationMinutes / minutesPerDay)
+      : durationBetween(startDate, finishDate);
     const predecessorDependencies = asArray(rawTask.PredecessorLink as Record<string, unknown> | Record<string, unknown>[] | undefined)
       .map((link) => ({
         predecessorExternalId: text(link.PredecessorUID),
@@ -432,9 +431,9 @@ export const parseGanttImportFile = async (
   options: { fallbackStartDate?: string } = {},
 ): Promise<GanttImportBundle> => {
   const extension = path.extname(fileName).toLowerCase();
-  if (extension === ".xlsx") return { tasks: parseGanttExcel(buffer, options.fallbackStartDate), metadata: null };
+  if (extension === ".xlsx" || extension === ".xls") return { tasks: parseGanttExcel(buffer, options.fallbackStartDate), metadata: null };
   if (extension === ".xml") return parseProjectXmlBundle(buffer.toString("utf8"));
-  if (extension !== ".mpp") throw new Error("仅支持 .mpp、.xml 或 .xlsx 文件");
+  if (extension !== ".mpp") throw new Error("仅支持 .mpp、.xml、.xls 或 .xlsx 文件");
 
   const directory = await mkdtemp(path.join(tmpdir(), "pms-mpp-"));
   const inputPath = path.join(directory, "input.mpp");
@@ -849,7 +848,7 @@ export const buildProjectXml = (
         .map((name) => uidByTaskName.get(name.trim()))
         .filter((uid): uid is number => Boolean(uid))
         .map((uid) => ({ PredecessorUID: uid, Type: 1, CrossProject: 0, LinkLag: 0, LagFormat: 7 }));
-    const durationMinutes = task.isMilestone ? 0 : (task.durationMinutes || Math.round(task.durationDays * 450));
+    const durationMinutes = task.durationMinutes || Math.round(task.durationDays * 450);
     const finishDate = task.finishDate || addDaysInclusive(task.startDate, task.durationDays) || task.startDate;
     const baselines = Array.isArray(task.baselines) && task.baselines.length > 0
       ? task.baselines

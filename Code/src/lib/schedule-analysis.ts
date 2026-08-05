@@ -61,6 +61,7 @@ export type ScheduleMatch = {
   currentTaskId: string | null;
   rule: "DATABASE_ID" | "EXTERNAL_UID" | "TASK_CODE" | "WBS_OUTLINE" | "NAME_PARENT" | "UNMATCHED" | "AMBIGUOUS";
   confidence: number;
+  candidateTaskIds?: string[];
 };
 
 export type ScheduleFieldChange = {
@@ -137,8 +138,8 @@ export const matchScheduleTasks = (current: ScheduleTask[], incoming: ScheduleTa
     { rule: "EXTERNAL_UID" as const, confidence: 1, values: uniqueIndex(current, (task) => normalized(task.externalUid)), incoming: (task: ScheduleTask) => normalized(task.externalUid) },
     { rule: "TASK_CODE" as const, confidence: 0.98, values: uniqueIndex(current, (task) => normalized(task.taskCode)), incoming: (task: ScheduleTask) => normalized(task.taskCode) },
     { rule: "WBS_OUTLINE" as const, confidence: 0.92, values: uniqueIndex(current, (task) => task.wbsCode && task.outlineNumber ? `${normalized(task.wbsCode)}|${normalized(task.outlineNumber)}` : ""), incoming: (task: ScheduleTask) => task.wbsCode && task.outlineNumber ? `${normalized(task.wbsCode)}|${normalized(task.outlineNumber)}` : "" },
-    { rule: "NAME_PARENT" as const, confidence: 0.78, values: uniqueIndex(current, (task) => `${normalized(task.taskName)}|${taskParentPath(task, currentById)}`), incoming: (task: ScheduleTask) => `${normalized(task.taskName)}|${taskParentPath(task, incomingById)}` },
   ];
+  const nameParentIndex = uniqueIndex(current, (task) => `${normalized(task.taskName)}|${taskParentPath(task, currentById)}`);
   const usedCurrent = new Set<string>();
 
   return incoming.map((task) => {
@@ -151,8 +152,18 @@ export const matchScheduleTasks = (current: ScheduleTask[], incoming: ScheduleTa
         return { incomingTaskId: task.id, currentTaskId: candidates[0].id, rule: index.rule, confidence: index.confidence };
       }
       if (candidates.length > 1) {
-        return { incomingTaskId: task.id, currentTaskId: null, rule: "AMBIGUOUS", confidence: 0 };
+        return { incomingTaskId: task.id, currentTaskId: null, rule: "AMBIGUOUS", confidence: 0, candidateTaskIds: candidates.map((candidate) => candidate.id) };
       }
+    }
+    const suspiciousCandidates = nameParentIndex.get(`${normalized(task.taskName)}|${taskParentPath(task, incomingById)}`) ?? [];
+    if (suspiciousCandidates.length > 0) {
+      return {
+        incomingTaskId: task.id,
+        currentTaskId: null,
+        rule: "AMBIGUOUS",
+        confidence: 0.78,
+        candidateTaskIds: suspiciousCandidates.map((candidate) => candidate.id),
+      };
     }
     return { incomingTaskId: task.id, currentTaskId: null, rule: "UNMATCHED", confidence: 0 };
   });
@@ -434,6 +445,19 @@ export const analyzeSchedule = (current: ScheduleSnapshot, incoming: ScheduleSna
   const issues = [
     ...analyzeScheduleIssues(incoming.tasks, incoming.statusDate),
     ...analyzeScheduleResourceIssues(incoming),
+    ...matches.filter((match) => match.rule === "AMBIGUOUS").map((match): ScheduleIssue => {
+      const task = incoming.tasks.find((item) => item.id === match.incomingTaskId);
+      return {
+        ruleId: "SCHEDULE_SUSPICIOUS_MATCH",
+        severity: "ERROR",
+        taskIds: [match.incomingTaskId],
+        taskCodes: task?.taskCode ? [task.taskCode] : [],
+        message: `任务“${task?.taskName || match.incomingTaskId}”仅能按名称或非唯一标识找到疑似匹配，不能自动覆盖`,
+        facts: { candidateTaskIds: match.candidateTaskIds ?? [] },
+        impactTaskIds: [],
+        suggestion: "请在导入预览中明确选择要更新的现有任务，或将其作为新任务导入",
+      };
+    }),
   ];
   const criticalTaskIds = [...findGanttCriticalTaskIds(incoming.tasks.map((task) => ({
     ...task,

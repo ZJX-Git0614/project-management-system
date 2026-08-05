@@ -24,6 +24,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { ModalDialog } from "@/components/modal-dialog";
+import { useConfirm } from "@/components/confirm-provider";
 import {
   Table,
   TableBody,
@@ -47,6 +48,34 @@ interface RoleConfigItem {
   allowMultiple: boolean;
   persons: string[];
 }
+
+interface RoleReferenceImpact {
+  roleId: string;
+  roleName: string;
+  accountCount: number;
+  accounts: Array<{ id: string; displayName: string }>;
+  projectCount: number;
+  membershipCount: number;
+  projects: Array<{
+    projectId: string;
+    projectName: string;
+    personNames: string[];
+  }>;
+}
+
+const describeRoleImpact = (impact: RoleReferenceImpact) => {
+  const lines: string[] = [];
+  if (impact.accounts.length > 0) {
+    lines.push(`关联账号：${impact.accounts.map((account) => account.displayName).join("、")}`);
+  }
+  if (impact.projects.length > 0) {
+    lines.push("关联项目：");
+    impact.projects.forEach((project) => {
+      lines.push(`《${project.projectName}》：${project.personNames.join("、") || "无指定人员"}`);
+    });
+  }
+  return lines;
+};
 
 export default function RoleConfigPage() {
   const { can } = usePermission();
@@ -72,6 +101,7 @@ export default function RoleConfigPage() {
   const [editAllowMultiple, setEditAllowMultiple] = useState(true);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const confirm = useConfirm();
 
   const canMaintainRoleConfig = can("role-config:edit");
   const canViewPermissionConfig = can("permission-config:view");
@@ -121,7 +151,7 @@ export default function RoleConfigPage() {
           canViewPermissionConfig ? "权限查看" : null,
           canEditPermissionConfig ? "权限修改" : null,
           canMaintainRoleConfig ? "编辑" : null,
-          canMaintainRoleConfig ? "删除" : null,
+          canMaintainRoleConfig && !item.systemPreset ? "删除" : null,
         ]
           .filter(Boolean)
           .join(" / ") || "-",
@@ -166,9 +196,16 @@ export default function RoleConfigPage() {
   };
 
   const handleDeleteRoleConfig = async (item: RoleConfigItem) => {
-    if (!confirm(`确认删除角色「${item.roleName}」？`)) return;
     try {
-      await api.delete(`/api/role-config/${item.id}`);
+      const impact = await api.get<RoleReferenceImpact>(`/api/role-config/${item.id}`);
+      const message = [
+        `确认删除角色「${item.roleName}」？`,
+        ...describeRoleImpact(impact),
+        "删除后，账号绑定和项目成员中的该角色会同步解除。",
+        "其他角色及其权限不受影响。",
+      ].join("\n");
+      if (!(await confirm(message))) return;
+      await api.delete(`/api/role-config/${item.id}?confirmed=true`);
       await fetchData();
     } catch (error) {
       alert(error instanceof Error ? error.message : "删除失败");
@@ -189,9 +226,21 @@ export default function RoleConfigPage() {
     event.preventDefault();
     if (!editDialog.role) return;
     try {
+      const nextRoleName = editRoleName.trim();
+      const roleNameChanged = nextRoleName !== editDialog.role.roleName;
+      if (roleNameChanged) {
+        const impact = await api.get<RoleReferenceImpact>(`/api/role-config/${editDialog.role.id}`);
+        const message = [
+          `确认将角色「${editDialog.role.roleName}」改名为「${nextRoleName}」？`,
+          ...describeRoleImpact(impact),
+          "账号绑定、项目成员和该角色的权限配置将同步更新。",
+        ].join("\n");
+        if (!(await confirm(message))) return;
+      }
       await api.put(`/api/role-config/${editDialog.role.id}`, {
-        roleName: editRoleName,
+        roleName: nextRoleName,
         allowMultiple: editAllowMultiple,
+        confirmRoleChange: roleNameChanged,
       });
       closeEditDialog();
       await fetchData();
@@ -329,7 +378,7 @@ export default function RoleConfigPage() {
                         ) : (
                           <span className="text-xs text-slate-300">编辑</span>
                         )}
-                        {canMaintainRoleConfig ? (
+                        {canMaintainRoleConfig && !item.systemPreset ? (
                           <Button
                             type="button"
                             variant="ghost"
@@ -339,9 +388,9 @@ export default function RoleConfigPage() {
                           >
                             删除
                           </Button>
-                        ) : (
+                        ) : !item.systemPreset ? (
                           <span className="text-xs text-slate-300">删除</span>
-                        )}
+                        ) : null}
                       </div>
                     </TableCell>
                   </TableRow>

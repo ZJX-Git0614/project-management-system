@@ -17,6 +17,21 @@ function TestSelect() {
 }
 
 describe("HierarchicalMultiSelect", () => {
+  it("can render its options open on mount for single-click inline editing", () => {
+    render(
+      <HierarchicalMultiSelect
+        ariaLabel="关联项目事项"
+        options={options}
+        value={[]}
+        onChange={() => undefined}
+        multiple={false}
+        defaultOpen
+      />,
+    );
+
+    expect(screen.getByRole("textbox", { name: "关联项目事项搜索" })).toBeInTheDocument();
+  });
+
   it("selects descendants and marks a parent indeterminate after a child is cleared", async () => {
     const user = userEvent.setup();
     render(<TestSelect />);

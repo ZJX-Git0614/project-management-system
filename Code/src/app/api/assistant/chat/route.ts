@@ -376,7 +376,11 @@ const handleAssistantChat = async (req: NextRequest, emit?: AssistantChatEmitter
       status: "RUNNING",
     },
   });
-  const context = await buildProjectAssistantContext({ user, projectId });
+  const context = await buildProjectAssistantContext({
+    user,
+    projectId,
+    includeResourceOptimization: intent.domains.includes("RESOURCE"),
+  });
   if (projectId && !context.project && !intent.identityOnly && !intent.domains.includes("GENERAL")) {
     return err("当前项目不存在", 404);
   }

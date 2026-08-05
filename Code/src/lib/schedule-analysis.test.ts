@@ -98,6 +98,21 @@ describe("schedule analysis", () => {
     expect(result.changes).toContainEqual(expect.objectContaining({ field: "progress", before: 10, after: 50 }));
   });
 
+  it("blocks name-only matches instead of silently overwriting an existing task", () => {
+    const current = snapshot([
+      task({ id: "db-1", externalUid: "old-uid", taskCode: "Task1", taskName: "接口联调" }),
+    ]);
+    const incoming = snapshot([
+      task({ id: "file-1", externalUid: "new-uid", taskCode: "", taskName: "接口联调" }),
+    ]);
+
+    const result = analyzeSchedule(current, incoming);
+
+    expect(result.matches[0]).toMatchObject({ rule: "AMBIGUOUS", currentTaskId: null, candidateTaskIds: ["db-1"] });
+    expect(result.issues).toContainEqual(expect.objectContaining({ ruleId: "SCHEDULE_SUSPICIOUS_MATCH", severity: "ERROR" }));
+    expect(result.summary.errors).toBeGreaterThan(0);
+  });
+
   it("detects overlapping assignments for the same resource", () => {
     const incoming = snapshot([
       task({ id: "1", externalUid: "1", taskCode: "Task001", taskName: "A", startDate: "2026-07-01", finishDate: "2026-07-05" }),

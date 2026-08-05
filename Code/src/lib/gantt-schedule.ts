@@ -25,6 +25,8 @@ export interface SchedulableGanttTask {
   durationMinutes?: number;
   estimatedWorkHours?: number;
   taskMode?: string;
+  progress?: number;
+  resourceNotBeforeDate?: string;
   predecessorDependencies?: SchedulableGanttDependency[];
 }
 
@@ -101,9 +103,19 @@ export const scheduleGanttTasks = <T extends SchedulableGanttTask>(
     const dependencyStarts = dependencies.map(({ dependency, predecessor }) => (
       dependencyDate(predecessor, durationDays, dependency, mode)
     ));
-    const startDate = durationDays > 0 && task.taskMode !== "MANUAL" && dependencyStarts.length > 0
+    const dependencyStartDate = durationDays > 0
+      && task.taskMode !== "MANUAL"
+      && task.taskMode !== "FIXED"
+      && (task.progress ?? 0) === 0
+      && dependencyStarts.length > 0
       ? dependencyStarts.sort().at(-1)!
       : normalizeTaskStartDate(task.startDate, mode);
+    const resourceNotBeforeDate = /^\d{4}-\d{2}-\d{2}$/.test(task.resourceNotBeforeDate || "")
+      ? normalizeTaskStartDate(task.resourceNotBeforeDate!, mode)
+      : "";
+    const startDate = resourceNotBeforeDate && task.taskMode !== "MANUAL" && task.taskMode !== "FIXED" && (task.progress ?? 0) === 0
+      ? [dependencyStartDate, resourceNotBeforeDate].sort().at(-1)!
+      : dependencyStartDate;
     scheduled.set(taskId, {
       ...task,
       startDate,

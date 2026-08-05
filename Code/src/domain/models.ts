@@ -24,7 +24,10 @@ export interface ProjectGanttTask extends BaseEntity {
   projectId: string;
   parentId?: string | null;
   ownerMemberId?: string | null;
-  ownerMember?: Pick<ProjectMember, "id" | "personName" | "roleName"> | null;
+  ownerMemberIds?: string[];
+  ownerMember?: Pick<ProjectMember, "id" | "accountId" | "personName" | "roleName"> | null;
+  ownerMembers?: Array<Pick<ProjectMember, "id" | "accountId" | "personName" | "roleName"> & { roleNames?: string[] }>;
+  ownerReadOnly?: boolean;
   taskCode: string;
   taskCategory: string;
   taskName: string;
@@ -59,6 +62,7 @@ export interface ProjectGanttTask extends BaseEntity {
   calendarUid?: string;
   constraintType?: number | null;
   constraintDate?: string;
+  resourceNotBeforeDate?: string;
   baselineStartDate?: string;
   baselineFinishDate?: string;
   baselineCost?: number;
@@ -91,6 +95,7 @@ export interface ProjectGanttDeletionPreview {
   externalDependencyCount: number;
   detachedWeeklyItemCount: number;
   detachedRiskCount: number;
+  affectedRiskCount?: number;
   clearedPredecessorCount: number;
   ganttRevision: number;
 }
@@ -143,6 +148,7 @@ export interface ProjectBudgetItem extends BaseEntity {
   remark: string;
   category?: ProjectBudgetCategory;
   project?: Pick<Project, "id" | "name" | "code" | "status">;
+  linkedTasks?: Array<{ id: string; taskCode: string; taskName: string }>;
 }
 
 export interface ProjectBudgetSetting extends BaseEntity {
@@ -178,6 +184,7 @@ export interface ProjectMember extends BaseEntity {
   projectId: string;
   accountId?: string | null;
   roleName: string;
+  roleNames?: string[];
   personName: string;
 }
 

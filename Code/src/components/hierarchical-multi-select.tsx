@@ -156,6 +156,7 @@ export interface HierarchicalMultiSelectProps {
   contentClassName?: string;
   portalContainer?: HTMLElement | null;
   title?: string;
+  defaultOpen?: boolean;
 }
 
 export function HierarchicalMultiSelect({
@@ -173,8 +174,9 @@ export function HierarchicalMultiSelect({
   contentClassName,
   portalContainer,
   title,
+  defaultOpen = false,
 }: HierarchicalMultiSelectProps) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   const [query, setQuery] = useState("");
   const [pendingValue, setPendingValue] = useState<string[]>(value);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());

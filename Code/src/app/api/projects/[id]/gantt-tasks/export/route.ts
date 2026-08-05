@@ -10,7 +10,7 @@ import {
   convertProjectXmlToMpp,
   ganttTransferCapabilities,
 } from "@/lib/gantt-file-transfer";
-import { getOrderedGanttTasks, serializeGanttTask } from "@/lib/gantt-task-service";
+import { getOrderedGanttTasks, serializeGanttTaskList } from "@/lib/gantt-task-service";
 import { prisma } from "@/lib/prisma";
 
 const safeFileName = (value: string) => value.replace(/[\\/:*?"<>|\r\n]+/g, "_").slice(0, 80) || "project";
@@ -37,7 +37,7 @@ export async function GET(
 
   const project = await prisma.project.findUnique({ where: { id }, select: { name: true, code: true } });
   if (!project) return notFound("项目");
-  const tasks = (await getOrderedGanttTasks(id)).map(serializeGanttTask);
+  const tasks = serializeGanttTaskList(await getOrderedGanttTasks(id));
   const scheduleMetadata = await prisma.projectScheduleImportMetadata.findUnique({ where: { projectId: id } });
   const baseName = safeFileName(project.code || project.name);
 

@@ -17,8 +17,12 @@ import {
   recalculateProjectGanttSchedule,
   renumberProjectGanttTaskCodes,
   replaceGanttTaskDependencies,
-  serializeGanttTask,
+  serializeGanttTaskList,
 } from "@/lib/gantt-task-service";
+import {
+  resolveEffectiveGanttOwnerMemberIds,
+  synchronizeGanttOwnerHierarchy,
+} from "@/lib/gantt-owner-service";
 
 export async function GET(
   req: NextRequest,
@@ -34,7 +38,7 @@ export async function GET(
 
   const tasks = await getOrderedGanttTasks(id);
 
-  return ok(tasks.map(serializeGanttTask));
+  return ok(serializeGanttTaskList(tasks));
 }
 
 export async function POST(
@@ -64,11 +68,14 @@ export async function POST(
   const estimatedWorkHours = estimatedHoursForDuration(durationDays);
   const actualWorkHours = roundGanttHours(Number(body.actualWorkHours ?? 0));
   const progress = Number(body.progress ?? 0);
+  const isMilestone = Boolean(body.isMilestone);
   const predecessorTask = String(body.predecessorTask ?? "").trim();
   const remark = String(body.remark ?? "").trim();
   const dependencies = parseGanttDependencyInput(body);
   const parentId = body.parentId ? String(body.parentId) : null;
-  const ownerMemberId = body.ownerMemberId ? String(body.ownerMemberId) : null;
+  const requestedOwnerMemberIds = Array.isArray(body.ownerMemberIds)
+    ? [...new Set(body.ownerMemberIds.map((value) => String(value).trim()).filter(Boolean))]
+    : (body.ownerMemberId ? [String(body.ownerMemberId).trim()] : []);
   const budgetItemId = body.budgetItemId ? String(body.budgetItemId) : null;
 
   if (durationDays > 0 && !/^\d{4}-\d{2}-\d{2}$/.test(finishDate)) return err("计划完成时间格式应为 YYYY-MM-DD");
@@ -91,9 +98,9 @@ export async function POST(
     const budgetItem = await prisma.projectBudgetItem.findFirst({ where: { id: budgetItemId, projectId: id }, select: { id: true } });
     if (!budgetItem) return notFound("预算条目");
   }
-  if (ownerMemberId) {
-    const owner = await prisma.projectMember.findFirst({ where: { id: ownerMemberId, projectId: id }, select: { id: true } });
-    if (!owner) return err("负责人必须来自当前项目组成员");
+  if (requestedOwnerMemberIds.length > 0) {
+    const owners = await prisma.projectMember.findMany({ where: { id: { in: requestedOwnerMemberIds }, projectId: id }, select: { id: true } });
+    if (owners.length !== requestedOwnerMemberIds.length) return err("负责人必须来自当前项目组成员");
   }
 
   const siblings = await prisma.projectGanttTask.findMany({
@@ -108,6 +115,11 @@ export async function POST(
   const sortOrder = insertAfterSortOrder + 1;
 
   const task = await prisma.$transaction(async (tx) => {
+    const inheritedOwnerMemberIds = parentId
+      ? await resolveEffectiveGanttOwnerMemberIds({ tx, projectId: id, taskId: parentId })
+      : [];
+    const ownerMemberIds = requestedOwnerMemberIds.length > 0 ? requestedOwnerMemberIds : inheritedOwnerMemberIds;
+    const ownerMemberId = ownerMemberIds.length === 1 ? ownerMemberIds[0] : null;
     await tx.projectGanttTask.updateMany({
       where: { projectId: id, parentId, sortOrder: { gte: sortOrder } },
       data: { sortOrder: { increment: 1 } },
@@ -118,6 +130,9 @@ export async function POST(
         projectId: id,
         parentId,
         ownerMemberId,
+        ownerLinks: ownerMemberIds.length > 0
+          ? { createMany: { data: ownerMemberIds.map((projectMemberId) => ({ projectMemberId })) } }
+          : undefined,
         taskCode: "",
         taskCategory,
         taskName,
@@ -131,6 +146,7 @@ export async function POST(
         estimatedWorkHours,
         actualWorkHours,
         progress,
+        isMilestone,
         budgetItemId,
         predecessorTask,
         remark,
@@ -138,11 +154,13 @@ export async function POST(
       },
     });
     await replaceGanttTaskDependencies(tx, id, created.id, dependencies);
+    await synchronizeGanttOwnerHierarchy({ tx, projectId: id });
     return created;
   });
   await renumberProjectGanttTaskCodes(id);
   await recalculateProjectGanttSchedule(id, calendarMode);
-  const normalizedTask = (await getOrderedGanttTasks(id)).find((item) => item.id === task.id);
+  const normalizedTask = serializeGanttTaskList(await getOrderedGanttTasks(id)).find((item) => item.id === task.id);
+  if (!normalizedTask) return err("新增任务后读取失败", 500);
 
-  return ok(normalizedTask ? serializeGanttTask(normalizedTask) : task, 201);
+  return ok(normalizedTask, 201);
 }

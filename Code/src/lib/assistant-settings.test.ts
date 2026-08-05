@@ -49,14 +49,18 @@ describe("assistant settings foundations", () => {
       "risk.create.batch",
       "risk.status.update",
       "schedule.compare.file",
+      "schedule.import.preview",
       "schedule.convert.file",
       "schedule.merge.files",
       "document.revision.generate",
+      "gantt.resource.optimize",
     ]));
     expect(ASSISTANT_TOOL_CATALOG.find((tool) => tool.id === "schedule.convert.file")).toMatchObject({
-      attachments: { min: 1, max: 1, extensions: [".mpp", ".xml", ".xlsx"] },
+      attachments: { min: 1, max: 1, extensions: [".mpp", ".xml", ".xls", ".xlsx"] },
       output: "FILE",
     });
+    expect(ASSISTANT_TOOL_CATALOG.find((tool) => tool.id === "schedule.import.preview")?.attachments?.extensions)
+      .toEqual(expect.arrayContaining([".mpp", ".xls", ".xlsx", ".csv", ".md", ".txt", ".docx", ".pdf"]));
   });
 
   it("publishes a complete executable contract for every tool", () => {
@@ -73,6 +77,8 @@ describe("assistant settings foundations", () => {
   it("rejects undeclared or invalid tool arguments before execution", () => {
     expect(validateAssistantToolArgs("gantt.progress.update", { taskId: "task-1", progress: 35 })).toMatchObject({ ok: true });
     expect(validateAssistantToolArgs("gantt.progress.update", { taskId: "task-1", progress: 101 })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("gantt.resource.optimize", { candidateKind: "MINIMAL_CHANGE", revision: 3, snapshotHash: "hash" })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("gantt.resource.optimize", { candidateKind: "UNKNOWN", revision: 3, snapshotHash: "hash" })).toMatchObject({ ok: false });
     expect(validateAssistantToolArgs("weekly.status.update", { weeklyItemId: "item-1", progress: 100 })).toMatchObject({ ok: true });
     expect(validateAssistantToolArgs("weekly.status.update", { weeklyItemId: "item-1", status: "DONE", progress: 100 })).toMatchObject({ ok: false });
     expect(validateAssistantToolArgs("todo.create", { title: "核对计划", targetPersonName: "张三", injected: true })).toMatchObject({ ok: false });

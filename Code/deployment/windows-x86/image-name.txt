@@ -1,1 +1,1 @@
-ceastar-project-management:2026.08.03.3-amd64
+ceastar-project-management:2026.08.05.1-amd64

@@ -24,7 +24,12 @@ vi.mock("@/lib/api-client", () => ({
 
 function PermissionProbe() {
   const { can } = usePermissionContext();
-  return <div data-testid="project-list-permission">{String(can("project-list:view"))}</div>;
+  return (
+    <>
+      <div data-testid="project-list-permission">{String(can("project-list:view"))}</div>
+      <div data-testid="combined-permission">{String(can("project-list:view", "project-budget:view"))}</div>
+    </>
+  );
 }
 
 describe("PermissionProvider", () => {
@@ -63,6 +68,33 @@ describe("PermissionProvider", () => {
     await waitFor(() => {
       expect(apiGet).toHaveBeenCalledWith("/api/permission-tree");
       expect(screen.getByTestId("project-list-permission")).toHaveTextContent("true");
+    });
+  });
+
+  it("combines permissions granted by multiple assigned roles", async () => {
+    authState.user = {
+      id: "user-2",
+      username: "multi-role",
+      displayName: "多角色用户",
+      assignedRoleNames: ["项目查看", "成本管理"],
+      passwordResetRequired: false,
+    };
+    apiGet.mockResolvedValue({
+      data: {
+        "项目查看": ["project-list", "project-list:view"],
+        "成本管理": ["project-budget", "project-budget:view"],
+      },
+    });
+
+    render(
+      <PermissionProvider>
+        <PermissionProbe />
+      </PermissionProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("project-list-permission")).toHaveTextContent("true");
+      expect(screen.getByTestId("combined-permission")).toHaveTextContent("true");
     });
   });
 });
