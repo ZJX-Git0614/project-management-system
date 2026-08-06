@@ -1,11 +1,14 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ArrowUpRight, MessageCircleMore, MessagesSquare, Send, UsersRound } from "lucide-react"
+import { ArrowUpRight, LoaderCircle, MessageCircleMore, MessagesSquare, Plus, Send, UsersRound } from "lucide-react"
 
 import { useSystemFeedback } from "@/components/system-feedback-provider"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
+import { useAuth } from "@/contexts/auth-context"
+import type { ProjectMember } from "@/domain/models"
 import { api } from "@/lib/api-client"
 import { cn } from "@/lib/utils"
 import { usePermission } from "@/lib/use-permission"
@@ -47,12 +50,19 @@ const formatTime = (value: string) => new Date(value).toLocaleString("zh-CN", {
 export function AssistantCollaborationPanel({ active, currentProjectId, fullScreen }: AssistantCollaborationPanelProps) {
   const { notify } = useSystemFeedback()
   const { can } = usePermission()
+  const { user } = useAuth()
   const [threads, setThreads] = useState<CollaborationThread[]>([])
   const [selectedId, setSelectedId] = useState("")
   const [selectedThread, setSelectedThread] = useState<CollaborationThread | null>(null)
   const [message, setMessage] = useState("")
   const [loading, setLoading] = useState(false)
   const [sending, setSending] = useState(false)
+  const [createOpen, setCreateOpen] = useState(false)
+  const [createTitle, setCreateTitle] = useState("")
+  const [members, setMembers] = useState<ProjectMember[]>([])
+  const [membersLoading, setMembersLoading] = useState(false)
+  const [participantIds, setParticipantIds] = useState<string[]>([])
+  const [creating, setCreating] = useState(false)
   const messageEndRef = useRef<HTMLDivElement>(null)
 
   const loadThread = useCallback(async (threadId: string) => {
@@ -69,14 +79,17 @@ export function AssistantCollaborationPanel({ active, currentProjectId, fullScre
     }
   }, [notify])
 
-  const loadThreads = useCallback(async () => {
+  const loadThreads = useCallback(async (preferredId?: string) => {
     if (!active || !can("collaboration-center:view")) return
     setLoading(true)
     try {
       const query = currentProjectId ? `?projectId=${encodeURIComponent(currentProjectId)}` : ""
       const data = await api.get<CollaborationThread[]>(`/api/collaboration/threads${query}`)
       setThreads(data)
-      setSelectedId((current) => data.some((thread) => thread.id === current) ? current : data[0]?.id ?? "")
+      setSelectedId((current) => {
+        const candidate = preferredId || current
+        return data.some((thread) => thread.id === candidate) ? candidate : data[0]?.id ?? ""
+      })
     } catch (error) {
       notify(error instanceof Error ? error.message : "协同会话加载失败", "error")
     } finally {
@@ -113,6 +126,64 @@ export function AssistantCollaborationPanel({ active, currentProjectId, fullScre
     }
   }
 
+  const loadMembers = useCallback(async () => {
+    if (!currentProjectId) {
+      setMembers([])
+      return
+    }
+    setMembersLoading(true)
+    try {
+      const data = await api.get<ProjectMember[]>(`/api/projects/${currentProjectId}/members`)
+      setMembers(data.filter((member) => Boolean(member.accountId) && member.accountId !== user?.id))
+    } catch (error) {
+      setMembers([])
+      notify(error instanceof Error ? error.message : "项目成员加载失败", "error")
+    } finally {
+      setMembersLoading(false)
+    }
+  }, [currentProjectId, notify, user?.id])
+
+  const beginCreate = () => {
+    if (!currentProjectId) {
+      notify("请先进入具体项目后再创建协同会话", "warning")
+      return
+    }
+    setCreateTitle("")
+    setParticipantIds([])
+    setCreateOpen(true)
+    void loadMembers()
+  }
+
+  const createThread = async () => {
+    if (!currentProjectId || !createTitle.trim()) {
+      notify("请填写会话名称", "warning")
+      return
+    }
+    if (participantIds.length === 0) {
+      notify("请至少选择一位项目成员参与协同", "warning")
+      return
+    }
+
+    setCreating(true)
+    try {
+      const created = await api.post<CollaborationThread>("/api/collaboration/threads", {
+        projectId: currentProjectId,
+        title: createTitle.trim(),
+        participantAccountIds: participantIds,
+      })
+      setCreateOpen(false)
+      setCreateTitle("")
+      setParticipantIds([])
+      await loadThreads(created.id)
+      await loadThread(created.id)
+      notify("协同会话已创建", "success")
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "协同会话创建失败", "error")
+    } finally {
+      setCreating(false)
+    }
+  }
+
   const openCollaborationCenter = () => {
     const query = selectedId ? `?threadId=${encodeURIComponent(selectedId)}` : ""
     window.location.assign(`/collaboration${query}`)
@@ -134,16 +205,21 @@ export function AssistantCollaborationPanel({ active, currentProjectId, fullScre
             <MessagesSquare className="size-3.5 shrink-0 text-primary" />
             <span className="truncate">协同沟通</span>
           </div>
-          <Button type="button" variant="ghost" size="icon" className="size-7 shrink-0" title="管理或新建会话" onClick={openCollaborationCenter}>
-            <ArrowUpRight className="size-3.5" />
-          </Button>
+          <div className="flex shrink-0 items-center">
+            {can("collaboration-center:create") && <Button type="button" variant="ghost" size="icon" className="size-7" title="新建协同会话" onClick={beginCreate}>
+              <Plus className="size-3.5" />
+            </Button>}
+            <Button type="button" variant="ghost" size="icon" className="size-7" title="打开协同管理页" onClick={openCollaborationCenter}>
+              <ArrowUpRight className="size-3.5" />
+            </Button>
+          </div>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
           {loading && <div className="px-2 py-3 text-center text-[11px] text-muted-foreground">正在加载会话...</div>}
           {!loading && threads.length === 0 && (
             <div className="px-2 py-5 text-center text-[11px] leading-5 text-muted-foreground">
               {currentProjectId ? "当前项目暂无你参与的协同会话" : "暂无你参与的协同会话"}
-              <Button type="button" variant="link" size="sm" className="mt-1 h-6 px-1 text-[11px]" onClick={openCollaborationCenter}>新建会话</Button>
+              {can("collaboration-center:create") && <Button type="button" variant="link" size="sm" className="mt-1 h-6 px-1 text-[11px]" onClick={beginCreate}>新建会话</Button>}
             </div>
           )}
           {threads.map((thread) => {
@@ -168,7 +244,69 @@ export function AssistantCollaborationPanel({ active, currentProjectId, fullScre
       </aside>
 
       <section className="flex min-h-0 min-w-0 flex-col bg-card/25">
-        {selectedThread ? (
+        {createOpen ? (
+          <form
+            className="flex min-h-0 flex-1 flex-col"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void createThread()
+            }}
+          >
+            <div className="flex min-h-11 items-center justify-between gap-2 border-b border-border px-3">
+              <div className="min-w-0">
+                <div className="truncate text-xs font-medium">新建协同会话</div>
+                <div className="mt-0.5 truncate text-[10px] text-muted-foreground">仅邀请当前项目中的其他有效成员</div>
+              </div>
+              <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-[11px]" disabled={creating} onClick={() => setCreateOpen(false)}>取消</Button>
+            </div>
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+              <div className="space-y-1.5">
+                <label htmlFor="assistant-collaboration-title" className="text-[11px] font-medium">会话名称</label>
+                <Input
+                  id="assistant-collaboration-title"
+                  value={createTitle}
+                  onChange={(event) => setCreateTitle(event.target.value)}
+                  placeholder="例如：交付风险协调"
+                  maxLength={200}
+                  autoFocus
+                  className="h-8 text-xs"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-medium">参与成员</span>
+                  <span className="text-[10px] text-muted-foreground">已选 {participantIds.length} 人</span>
+                </div>
+                <div className="max-h-56 overflow-y-auto rounded-md border border-border bg-background/35 p-1.5">
+                  {membersLoading && <div className="flex items-center justify-center gap-1.5 py-6 text-[11px] text-muted-foreground"><LoaderCircle className="size-3.5 animate-spin" />加载项目成员...</div>}
+                  {!membersLoading && members.map((member) => {
+                    const accountId = member.accountId!
+                    const checked = participantIds.includes(accountId)
+                    return (
+                      <label key={member.id} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-[11px] hover:bg-muted/50">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(event) => setParticipantIds((current) => event.target.checked
+                            ? [...current, accountId]
+                            : current.filter((id) => id !== accountId))}
+                          className="size-3.5 accent-primary"
+                        />
+                        <span className="min-w-0 flex-1 truncate font-medium">{member.personName}</span>
+                        <span className="max-w-[42%] truncate text-[10px] text-muted-foreground">{member.roleNames?.join("、") || member.roleName}</span>
+                      </label>
+                    )
+                  })}
+                  {!membersLoading && members.length === 0 && <div className="px-2 py-6 text-center text-[11px] leading-5 text-muted-foreground">当前项目没有可邀请的有效成员，请先在项目组成员中添加后台账号。</div>}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-border p-2.5">
+              <Button type="button" variant="outline" size="sm" disabled={creating} onClick={() => setCreateOpen(false)}>取消</Button>
+              <Button type="submit" size="sm" disabled={creating || !createTitle.trim() || participantIds.length === 0}>{creating ? <><LoaderCircle className="size-3.5 animate-spin" />创建中</> : <><Plus className="size-3.5" />创建会话</>}</Button>
+            </div>
+          </form>
+        ) : selectedThread ? (
           <>
             <div className="flex min-h-11 items-center justify-between gap-2 border-b border-border px-3">
               <div className="min-w-0">
@@ -221,7 +359,8 @@ export function AssistantCollaborationPanel({ active, currentProjectId, fullScre
           <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-5 text-center text-xs text-muted-foreground">
             <MessagesSquare className="mb-2 size-6 text-muted-foreground/60" />
             选择左侧会话即可在佳佳中协同沟通
-            <Button type="button" variant="link" size="sm" className="mt-2 h-7 text-xs" onClick={openCollaborationCenter}>管理或新建会话</Button>
+            {can("collaboration-center:create") && <Button type="button" variant="link" size="sm" className="mt-2 h-7 text-xs" onClick={beginCreate}>新建协同会话</Button>}
+            <Button type="button" variant="link" size="sm" className="h-7 text-xs" onClick={openCollaborationCenter}>打开协同管理页</Button>
           </div>
         )}
       </section>
