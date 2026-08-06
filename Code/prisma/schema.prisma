@@ -59,6 +59,10 @@ model Project {
   assistantAttachments   AssistantAttachment[]
   assistantArtifacts     AssistantArtifact[]
   assistantPlans         AssistantPlanRun[]
+  approvalInstances      ApprovalWorkflowInstance[]
+  collaborationThreads   CollaborationThread[]
+  collaborationMessages  CollaborationMessage[]
+  notifications          SystemNotification[]
 }
 
 model ProjectGanttTask {
@@ -423,18 +427,379 @@ model MonthlyItem {
 }
 
 model TodoItem {
-  id               String   @id @default(cuid())
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-  projectId        String
-  title            String
-  detail           String
-  targetRole       String
-  targetPersonName String?
-  type             String
-  status           String   @default("OPEN")
+  id                     String    @id @default(cuid())
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  projectId              String
+  approvalInstanceId     String?
+  approvalAssignmentId   String?   @unique
+  collaborationThreadId  String?
+  collaborationMessageId String?
+  targetAccountId        String?
+  title                  String
+  detail                 String
+  targetRole             String
+  targetPersonName       String?
+  type                   String
+  status                 String    @default("OPEN")
+  dueAt                  DateTime?
+  lastRemindedAt         DateTime?
+  reminderCount          Int       @default(0)
+  reminderIntervalHours  Int       @default(24)
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project              Project                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  approvalInstance     ApprovalWorkflowInstance? @relation(fields: [approvalInstanceId], references: [id], onDelete: SetNull)
+  approvalAssignment   ApprovalAssignment?       @relation(fields: [approvalAssignmentId], references: [id], onDelete: SetNull)
+  collaborationThread  CollaborationThread?      @relation(fields: [collaborationThreadId], references: [id], onDelete: SetNull)
+  collaborationMessage CollaborationMessage?     @relation(fields: [collaborationMessageId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, type, status])
+  @@index([approvalInstanceId, status])
+  @@index([collaborationThreadId, targetAccountId, type, status])
+  @@index([targetAccountId, status])
+  @@index([status, dueAt])
+}
+
+model ApprovalWorkflowDefinition {
+  id                  String   @id @default(cuid())
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  businessType        String   @unique
+  moduleKey           String
+  name                String
+  description         String   @default("")
+  enabled             Boolean  @default(true)
+  activeVersionNumber Int      @default(0)
+  createdByAccountId  String   @default("")
+  createdByName       String   @default("")
+  updatedByAccountId  String   @default("")
+  updatedByName       String   @default("")
+
+  versions  ApprovalWorkflowVersion[]
+  instances ApprovalWorkflowInstance[]
+
+  @@index([moduleKey, enabled])
+}
+
+model ApprovalWorkflowVersion {
+  id                   String    @id @default(cuid())
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  definitionId         String
+  version              Int
+  status               String    @default("DRAFT")
+  triggerPermissionKey String    @default("")
+  completionHandlerKey String    @default("")
+  config               Json      @default("{}")
+  publishedAt          DateTime?
+  publishedByAccountId String    @default("")
+  publishedByName      String    @default("")
+
+  definition ApprovalWorkflowDefinition       @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+  nodes      ApprovalWorkflowNodeDefinition[]
+  instances  ApprovalWorkflowInstance[]
+
+  @@unique([definitionId, version])
+  @@index([definitionId, status])
+}
+
+model ApprovalWorkflowNodeDefinition {
+  id                    String   @id @default(cuid())
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  versionId             String
+  nodeKey               String
+  nodeOrder             Int
+  nodeType              String   @default("APPROVAL")
+  nodeName              String
+  assignmentType        String   @default("PROJECT_ROLE")
+  projectRoleName       String   @default("")
+  accountId             String   @default("")
+  approvalMode          String   @default("ALL")
+  requiredApprovals     Int      @default(1)
+  returnTargetNodeKey   String   @default("")
+  reminderAfterHours    Int      @default(24)
+  reminderIntervalHours Int      @default(24)
+  conditionConfig       Json     @default("{}")
+  actionsConfig         Json     @default("[]")
+
+  version       ApprovalWorkflowVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  nodeInstances ApprovalNodeInstance[]
+
+  @@unique([versionId, nodeKey])
+  @@unique([versionId, nodeOrder])
+  @@index([versionId, nodeType])
+}
+
+model ApprovalWorkflowInstance {
+  id                 String    @id @default(cuid())
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  projectId          String
+  definitionId       String?
+  versionId          String?
+  businessType       String
+  businessId         String
+  activeKey          String?   @unique
+  title              String
+  summary            String    @default("") @db.Text
+  status             String    @default("PENDING")
+  requesterAccountId String
+  requesterName      String
+  currentNodeOrder   Int       @default(1)
+  payload            Json      @default("{}")
+  workflowSnapshot   Json      @default("{}")
+  requestedAt        DateTime  @default(now())
+  completedAt        DateTime?
+  resultComment      String    @default("") @db.Text
+  lastError          String    @default("") @db.Text
+  revision           Int       @default(0)
+
+  project             Project                     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  definition          ApprovalWorkflowDefinition? @relation(fields: [definitionId], references: [id], onDelete: SetNull)
+  version             ApprovalWorkflowVersion?    @relation(fields: [versionId], references: [id], onDelete: SetNull)
+  nodes               ApprovalNodeInstance[]
+  effects             ApprovalEffect[]
+  todos               TodoItem[]
+  collaborationThread CollaborationThread?
+
+  @@index([projectId, status, createdAt])
+  @@index([projectId, businessType, businessId])
+  @@index([requesterAccountId, status])
+}
+
+model ApprovalNodeInstance {
+  id                  String    @id @default(cuid())
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  instanceId          String
+  definitionNodeId    String?
+  nodeKey             String
+  nodeOrder           Int
+  nodeType            String
+  nodeName            String
+  status              String    @default("WAITING")
+  approvalMode        String    @default("ALL")
+  requiredApprovals   Int       @default(1)
+  returnTargetNodeKey String    @default("")
+  config              Json      @default("{}")
+  activatedAt         DateTime?
+  completedAt         DateTime?
+  resultComment       String    @default("") @db.Text
+
+  instance       ApprovalWorkflowInstance        @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  definitionNode ApprovalWorkflowNodeDefinition? @relation(fields: [definitionNodeId], references: [id], onDelete: SetNull)
+  assignments    ApprovalAssignment[]
+  submissions    ApprovalSubmission[]
+
+  @@unique([instanceId, nodeKey])
+  @@unique([instanceId, nodeOrder])
+  @@index([instanceId, status])
+}
+
+model ApprovalAssignment {
+  id                     String    @id @default(cuid())
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  nodeInstanceId         String
+  projectMemberId        String?
+  accountId              String
+  displayNameSnapshot    String
+  roleNameSnapshot       String    @default("")
+  status                 String    @default("PENDING")
+  comment                String    @default("") @db.Text
+  processedAt            DateTime?
+  delegatedFromAccountId String    @default("")
+
+  nodeInstance ApprovalNodeInstance @relation(fields: [nodeInstanceId], references: [id], onDelete: Cascade)
+  todo         TodoItem?
+
+  @@unique([nodeInstanceId, accountId])
+  @@index([accountId, status, createdAt])
+  @@index([projectMemberId])
+}
+
+model ApprovalSubmission {
+  id                   String   @id @default(cuid())
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  nodeInstanceId       String
+  actionKey            String
+  actionType           String
+  actionName           String
+  status               String   @default("COMPLETED")
+  data                 Json     @default("{}")
+  submittedByAccountId String
+  submittedByName      String
+
+  nodeInstance ApprovalNodeInstance @relation(fields: [nodeInstanceId], references: [id], onDelete: Cascade)
+
+  @@unique([nodeInstanceId, actionKey, submittedByAccountId])
+  @@index([nodeInstanceId, status])
+}
+
+model ApprovalEffect {
+  id             String    @id @default(cuid())
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  instanceId     String
+  handlerKey     String
+  idempotencyKey String    @unique
+  status         String    @default("PENDING")
+  payload        Json      @default("{}")
+  result         Json      @default("{}")
+  attemptCount   Int       @default(0)
+  nextAttemptAt  DateTime?
+  completedAt    DateTime?
+  errorMessage   String    @default("") @db.Text
+
+  instance ApprovalWorkflowInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAttemptAt])
+  @@index([instanceId, status])
+}
+
+model ApprovalDelegation {
+  id                 String   @id @default(cuid())
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  projectId          String?
+  fromAccountId      String
+  fromDisplayName    String
+  toAccountId        String
+  toDisplayName      String
+  startsAt           DateTime
+  endsAt             DateTime
+  enabled            Boolean  @default(true)
+  reason             String   @default("")
+  createdByAccountId String
+  createdByName      String
+
+  @@index([fromAccountId, enabled, startsAt, endsAt])
+  @@index([toAccountId, enabled])
+  @@index([projectId])
+}
+
+model CollaborationThread {
+  id                 String    @id @default(cuid())
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  projectId          String
+  approvalInstanceId String?   @unique
+  kind               String    @default("MANUAL")
+  entityType         String    @default("")
+  entityId           String    @default("")
+  title              String
+  createdByAccountId String
+  createdByName      String
+  lastMessageAt      DateTime  @default(now())
+  closedAt           DateTime?
+
+  project          Project                    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  approvalInstance ApprovalWorkflowInstance?  @relation(fields: [approvalInstanceId], references: [id], onDelete: SetNull)
+  participants     CollaborationParticipant[]
+  messages         CollaborationMessage[]
+  todos            TodoItem[]
+
+  @@index([projectId, lastMessageAt])
+  @@index([entityType, entityId])
+}
+
+model CollaborationParticipant {
+  id              String    @id @default(cuid())
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  threadId        String
+  accountId       String
+  projectMemberId String?
+  displayName     String
+  participantRole String    @default("MEMBER")
+  lastReadAt      DateTime?
+  mutedAt         DateTime?
+
+  thread CollaborationThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@unique([threadId, accountId])
+  @@index([accountId, lastReadAt])
+}
+
+model CollaborationMessage {
+  id              String    @id @default(cuid())
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  projectId       String
+  threadId        String
+  senderAccountId String
+  senderName      String
+  messageType     String    @default("TEXT")
+  content         String    @db.Text
+  replyToId       String?
+  metadata        Json      @default("{}")
+  editedAt        DateTime?
+  deletedAt       DateTime?
+
+  project     Project                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  thread      CollaborationThread       @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  replyTo     CollaborationMessage?     @relation("CollaborationMessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies     CollaborationMessage[]    @relation("CollaborationMessageReplies")
+  attachments CollaborationAttachment[]
+  mentions    CollaborationMention[]
+  todos       TodoItem[]
+
+  @@index([threadId, createdAt])
+  @@index([projectId, createdAt])
+}
+
+model CollaborationAttachment {
+  id           String   @id @default(cuid())
+  createdAt    DateTime @default(now())
+  messageId    String
+  originalName String
+  storedName   String   @unique
+  mimeType     String   @default("application/octet-stream")
+  sizeBytes    Int
+  storagePath  String   @db.Text
+
+  message CollaborationMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+}
+
+model CollaborationMention {
+  id          String    @id @default(cuid())
+  createdAt   DateTime  @default(now())
+  messageId   String
+  accountId   String
+  displayName String
+  readAt      DateTime?
+
+  message CollaborationMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, accountId])
+  @@index([accountId, readAt])
+}
+
+model SystemNotification {
+  id         String    @id @default(cuid())
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  projectId  String?
+  accountId  String
+  category   String
+  title      String
+  detail     String    @db.Text
+  severity   String    @default("INFO")
+  sourceType String    @default("")
+  sourceId   String    @default("")
+  status     String    @default("UNREAD")
+  readAt     DateTime?
+  expiresAt  DateTime?
+
+  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, status, createdAt])
+  @@index([projectId, category, createdAt])
+  @@index([sourceType, sourceId])
 }
 
 model OperationHistory {

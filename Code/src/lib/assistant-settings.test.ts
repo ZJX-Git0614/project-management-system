@@ -44,6 +44,10 @@ describe("assistant settings foundations", () => {
     const toolIds = ASSISTANT_TOOL_CATALOG.map((tool) => tool.id);
     expect(toolIds).toEqual(expect.arrayContaining([
       "todo.complete",
+      "approval.project-status.request",
+      "approval.wbs-baseline.request",
+      "approval.process",
+      "collaboration.message",
       "weekly.status.update",
       "risk.create",
       "risk.create.batch",
@@ -91,5 +95,10 @@ describe("assistant settings foundations", () => {
     expect(validateAssistantToolArgs("project.export", { exportType: "gantt", taskDepths: [1.5] })).toMatchObject({ ok: false });
     expect(validateAssistantToolArgs("risk.create.batch", { risks: [{ riskName: "供应商延期风险" }] })).toMatchObject({ ok: true });
     expect(validateAssistantToolArgs("risk.create.batch", { risks: [] })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("approval.project-status.request", { targetStatus: "COMPLETED" })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("approval.project-status.request", { targetStatus: "UNKNOWN" })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("approval.process", { action: "reject", instanceId: "approval-1", comment: "资料不完整" })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("approval.process", { action: "skip", instanceId: "approval-1" })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("collaboration.message", { threadId: "thread-1", content: "请补充评审意见" })).toMatchObject({ ok: true });
   });
 });

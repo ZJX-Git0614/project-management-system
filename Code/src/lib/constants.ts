@@ -48,5 +48,8 @@ export const TODO_STATUS_LABEL: Record<TodoStatus, string> = {
 
 export const TODO_TYPE_LABEL: Record<TodoType, string> = {
   [TodoType.WEEKLY_ITEM_OVERDUE]: "项目事项逾期",
+  [TodoType.APPROVAL_PENDING]: "审批待处理",
+  [TodoType.APPROVAL_REMINDER]: "审批提醒",
+  [TodoType.COLLABORATION_MENTION]: "协同提及",
   [TodoType.CUSTOM]: "自定义",
 };

@@ -269,7 +269,8 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
     };
 
     try {
-      await api.put(`/api/projects/${projectId}`, { status: statusMap[action] });
+      const result = await api.put<{ approvalRequired?: boolean }>(`/api/projects/${projectId}`, { status: statusMap[action] });
+      if (result.approvalRequired) alert("项目状态变更审批已发起，可在审批中心查看进度。");
       await fetchProject();
       onRefresh();
     } catch (error) {

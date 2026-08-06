@@ -149,6 +149,9 @@ describe("project assistant model routing", () => {
     expect(shouldPlanProjectAssistantAction("更新 Matter007 的进度")).toBe(true)
     expect(shouldPlanProjectAssistantAction("把两个进度计划合并成可导入文件")).toBe(true)
     expect(shouldPlanProjectAssistantAction("把这个 MPP 按系统格式输出文件")).toBe(true)
+    expect(shouldPlanProjectAssistantAction("申请发布当前 WBS 基线")).toBe(true)
+    expect(shouldPlanProjectAssistantAction("同意审批《项目状态变更》")).toBe(true)
+    expect(shouldPlanProjectAssistantAction("在结构评审会话发送消息：请补充意见")).toBe(true)
     expect(shouldPlanProjectAssistantWorkflow("处理这些内容", {
       version: 1,
       originalRequest: "处理这些内容",
@@ -167,6 +170,29 @@ describe("project assistant model routing", () => {
     const request = callAssistantProviderModel.mock.calls[0][0]
     expect(request.messages[0].content).toContain("白名单工具")
     expect(request.messages[0].content).toContain("不得生成数据库 ID")
+  })
+
+  it("plans approval processing with a natural-language query instead of inventing an instance id", async () => {
+    callAssistantProviderModel.mockResolvedValue(JSON.stringify({
+      toolId: "approval.process",
+      args: { action: "return", approvalQuery: "发布 WBS 基线", comment: "计划日期未确认" },
+      command: "退回审批《发布 WBS 基线》，原因为计划日期未确认",
+      decisionSummary: "用户明确指定了审批动作、目标和原因",
+    }))
+
+    const plan = await planProjectAssistantActionWithModel({
+      message: "退回发布 WBS 基线的审批，原因为计划日期未确认",
+      history: [],
+      runtime: { ...runtime, agentEnabledToolIds: ["approval.process"] },
+    })
+
+    expect(plan).toMatchObject({
+      toolId: "approval.process",
+      args: { action: "return", approvalQuery: "发布 WBS 基线", comment: "计划日期未确认" },
+    })
+    expect(plan?.args).not.toHaveProperty("instanceId")
+    const request = callAssistantProviderModel.mock.calls[0][0]
+    expect(request.messages[0].content).toContain("不得编造 instanceId")
   })
 
   it("plans referenced risk analysis as a complete batch action with full recent context", async () => {

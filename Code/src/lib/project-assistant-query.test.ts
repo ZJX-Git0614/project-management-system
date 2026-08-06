@@ -142,6 +142,25 @@ const context = {
   }],
   documents: [{ id: "document-1", name: "项目计划.docx" }],
   todos: [{ id: "todo-1", title: "完成评审" }],
+  approvals: [{
+    id: "approval-1",
+    title: "示例项目：发布 WBS 基线",
+    summary: "固化当前计划",
+    status: "PENDING",
+    requesterName: "李四",
+    requestedAt: "2026-07-24T08:00:00.000Z",
+    pendingForMe: true,
+    currentNode: { name: "项目经理审批" },
+  }],
+  collaboration: [{
+    id: "thread-1",
+    title: "结构评审",
+    kind: "MANUAL",
+    closed: false,
+    lastMessageAt: "2026-07-24T09:00:00.000Z",
+    participants: [{ accountId: "user-1", displayName: "管理员" }, { accountId: "user-2", displayName: "李四" }],
+    latestMessage: { senderName: "李四", content: "请确认评审结论" },
+  }],
   recentOperations: [{ detail: "更新任务进度" }],
 } as unknown as ProjectAssistantContext
 
@@ -185,6 +204,20 @@ describe("project assistant query routing", () => {
       "risk",
       "project-document",
     ])
+  })
+
+  it("exposes approval and collaboration data only for their requested domains", () => {
+    const approvalIntent = detectProjectAssistantQueryIntent("查看我的待审批")
+    const approvalVisible = buildProjectAssistantVisibleContext(context, approvalIntent) as Record<string, unknown>
+    const collaborationIntent = detectProjectAssistantQueryIntent("查看结构评审协同会话")
+    const collaborationVisible = buildProjectAssistantVisibleContext(context, collaborationIntent) as Record<string, unknown>
+
+    expect(approvalIntent.domains).toEqual(["APPROVAL"])
+    expect(approvalVisible).toHaveProperty("approvals")
+    expect(approvalVisible).not.toHaveProperty("collaboration")
+    expect(collaborationIntent.domains).toEqual(["COLLABORATION"])
+    expect(collaborationVisible).toHaveProperty("collaboration")
+    expect(collaborationVisible).not.toHaveProperty("approvals")
   })
 
   it("routes schedule analysis, earned value, resources, and comparison separately", () => {

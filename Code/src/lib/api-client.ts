@@ -201,7 +201,8 @@ export const api = {
     request<T>(url, { method: "PUT", body: data ? JSON.stringify(data) : undefined }),
   patch: <T>(url: string, data?: unknown) =>
     request<T>(url, { method: "PATCH", body: data ? JSON.stringify(data) : undefined }),
-  delete: <T>(url: string) => request<T>(url, { method: "DELETE" }),
+  delete: <T>(url: string, data?: unknown) =>
+    request<T>(url, { method: "DELETE", body: data ? JSON.stringify(data) : undefined }),
   upload: <T>(url: string, data: FormData) =>
     request<T>(url, { method: "POST", body: data }),
   download: (url: string) => requestBlob(url),

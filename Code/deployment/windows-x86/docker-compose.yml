@@ -33,6 +33,7 @@ services:
       ASSISTANT_SERVICE_MANAGER_URL: ${ASSISTANT_SERVICE_MANAGER_URL:-http://host.docker.internal:8766}
       ASSISTANT_SERVICE_MANAGER_TOKEN: ${ASSISTANT_SERVICE_MANAGER_TOKEN:-}
       PROJECT_DOCUMENT_STORAGE_DIR: /app/.local-runtime/project-documents
+      COLLABORATION_ATTACHMENT_STORAGE_DIR: /app/.local-runtime/project-documents/.collaboration-attachments
       SYSTEM_BACKUP_DIR: /app/.local-runtime/system-backups
       SYSTEM_BACKUP_ALLOWED_ROOTS: /app/.local-runtime/system-backups,/data/system-backups
       PROJECT_MPP_EXPORT_SERVICE_URL: ${PROJECT_MPP_EXPORT_SERVICE_URL:-}

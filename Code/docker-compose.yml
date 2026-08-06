@@ -26,6 +26,7 @@ services:
       - DATABASE_URL=postgresql://pms:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be configured in .env}@postgres:5432/pms?schema=public
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be configured in .env}
       - PROJECT_DOCUMENT_STORAGE_DIR=/app/.local-runtime/project-documents
+      - COLLABORATION_ATTACHMENT_STORAGE_DIR=/app/.local-runtime/project-documents/.collaboration-attachments
       - SYSTEM_BACKUP_DIR=/app/.local-runtime/system-backups
       - PROJECT_MPP_EXPORT_SERVICE_URL=${PROJECT_MPP_EXPORT_SERVICE_URL:-}
       - PROJECT_MPP_EXPORT_SERVICE_HEALTH_URL=${PROJECT_MPP_EXPORT_SERVICE_HEALTH_URL:-}

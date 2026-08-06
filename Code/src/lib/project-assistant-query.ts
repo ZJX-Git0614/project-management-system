@@ -19,6 +19,8 @@ export type ProjectAssistantQueryDomain =
   | "DOCUMENT"
   | "MEMBER"
   | "TODO"
+  | "APPROVAL"
+  | "COLLABORATION"
   | "OPERATION"
   | "GENERAL"
 
@@ -46,6 +48,8 @@ export const PROJECT_ASSISTANT_QUERY_DOMAIN_CATALOG: Array<{
   { domain: "DOCUMENT", label: "项目文档", description: "文档、文件、资料、报告和知识库内容" },
   { domain: "MEMBER", label: "项目成员", description: "项目组成员、角色和负责人" },
   { domain: "TODO", label: "待办事项", description: "本人待办、提醒和未完成事项" },
+  { domain: "APPROVAL", label: "审批流程", description: "本人发起或待处理的审批、审批节点和审批状态" },
+  { domain: "COLLABORATION", label: "协同沟通", description: "项目协同会话、参与人、提及和最近消息" },
   { domain: "OPERATION", label: "操作记录", description: "项目操作历史和最近变更" },
   { domain: "GENERAL", label: "普通对话", description: "寒暄、感谢或不需要查询项目数据的一般问题" },
 ]
@@ -89,6 +93,8 @@ const DOMAIN_RULES: Array<{
   { domain: "DOCUMENT", pattern: /文档|文件|资料|报告|知识库|目录/u },
   { domain: "MEMBER", pattern: /项目组|项目成员|团队成员|人员|角色|负责人/u },
   { domain: "TODO", pattern: /待办|提醒|催办|未完成的事/u },
+  { domain: "APPROVAL", pattern: /审批|审核|批准|驳回|退回|流程状态|待我审批|我发起的/u },
+  { domain: "COLLABORATION", pattern: /协同|会话|项目沟通|讨论|消息|提及/u },
   { domain: "OPERATION", pattern: /操作记录|操作历史|变更记录|谁改的|最近修改/u },
   { domain: "PROJECT", pattern: /项目概况|项目情况|项目状态|项目总览|项目汇总|总体情况|当前项目|项目编号|客户/u },
 ]
@@ -187,6 +193,8 @@ export const buildProjectAssistantVisibleContext = (
       matters: context.weeklyItems.length,
       risks: context.risks.length,
       documents: context.documents.length,
+      approvals: context.approvals.length,
+      collaborationThreads: context.collaboration.length,
       budget: {
         contractAmount: context.budget.contractAmount,
         total: context.budget.total,
@@ -283,6 +291,8 @@ export const buildProjectAssistantVisibleContext = (
   if (domains.has("DOCUMENT")) visible.documents = context.documents
   if (domains.has("MEMBER")) visible.members = context.members
   if (domains.has("TODO")) visible.todos = context.todos
+  if (domains.has("APPROVAL")) visible.approvals = context.approvals
+  if (domains.has("COLLABORATION")) visible.collaboration = context.collaboration
   if (domains.has("OPERATION")) visible.recentOperations = context.recentOperations
   return visible
 }
@@ -296,7 +306,7 @@ export const buildProjectAssistantFallbackAnswer = (params: {
   const assistantName = params.assistantName.trim() || "佳佳"
   if (params.intent.identityOnly) {
     return {
-      answer: `我是${assistantName}，Ceastar 项目管理系统的智能助手。我可以在当前账号权限范围内协助查询项目概况、任务进度、项目事项、预算成本、风险、文档、成员和待办，也可以在你确认后执行已授权操作。`,
+      answer: `我是${assistantName}，Ceastar 项目管理系统的智能助手。我可以在当前账号权限范围内协助查询项目概况、任务进度、项目事项、预算成本、风险、文档、成员、待办、审批和协同会话，也可以在你确认后执行已授权操作。`,
       source: "SYSTEM" as const,
     }
   }

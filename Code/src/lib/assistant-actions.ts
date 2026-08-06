@@ -4,6 +4,7 @@ import { dirname, extname, basename } from "node:path";
 
 import type { AssistantActionRun } from "@prisma/client";
 
+import { ProjectStatus } from "@/domain/enums";
 import { userHasPermission, type AuthenticatedUser } from "@/lib/server-auth";
 import {
   getAssistantToolDefinition,
@@ -79,6 +80,15 @@ import {
   isContextualRiskRegistrationRequest,
   normalizeAssistantRiskDrafts,
 } from "@/lib/assistant-risk-drafts";
+import { PROJECT_STATUS_LABEL } from "@/lib/constants";
+import {
+  APPROVAL_BUSINESS_TYPES,
+  approvalBusinessIdForProjectStatus,
+  approvalBusinessIdForWbsBaseline,
+} from "@/lib/approval-workflow";
+import { processApprovalAction, startApprovalWorkflow } from "@/lib/approval-workflow-server";
+import { postCollaborationMessage } from "@/lib/collaboration-server";
+import { assertProjectStatusTransition, projectStatusActionPermission } from "@/lib/project-lifecycle";
 
 export type AssistantActionView = {
   id: string;
@@ -334,10 +344,76 @@ export const isScheduleImportRequest = (message: string) => (
   && /(附件|文件|mpp|xml|xls|xlsx|excel|csv|docx|pdf|排期|计划)/iu.test(message)
 );
 
+const PROJECT_STATUS_VALUES = Object.values(ProjectStatus) as string[];
+
+const normalizeProjectStatus = (value: unknown): ProjectStatus | null => {
+  const normalized = String(value || "").trim().toUpperCase();
+  return PROJECT_STATUS_VALUES.includes(normalized) ? normalized as ProjectStatus : null;
+};
+
+export const parseProjectStatusApprovalIntent = (message: string): { targetStatus: ProjectStatus } | null => {
+  const text = String(message || "").trim();
+  if (!/(项目|当前项目)/u.test(text)) return null;
+  const requestsChange = /(申请|提交|发起|帮我|将|把|设为|改为|启动|作废|恢复|结项|完成)/u.test(text);
+  if (!requestsChange) return null;
+  if (/(恢复|改为|设为).{0,8}草稿|草稿状态/u.test(text)) return { targetStatus: ProjectStatus.DRAFT };
+  if (/(启动|开始|恢复|重新启动).{0,10}项目|项目.{0,10}(启动|开始|恢复|进行中)/u.test(text)) return { targetStatus: ProjectStatus.IN_PROGRESS };
+  if (/(完成|结项|结束).{0,10}项目|项目.{0,10}(完成|结项|已完成)/u.test(text)) return { targetStatus: ProjectStatus.COMPLETED };
+  if (/(作废|取消).{0,10}项目|项目.{0,10}(作废|已作废)/u.test(text)) return { targetStatus: ProjectStatus.VOIDED };
+  return null;
+};
+
+export const isWbsBaselineApprovalRequest = (message: string) => (
+  /(申请|提交|发起|发布|固化).{0,16}(wbs|甘特|项目计划).{0,8}基线|(wbs|甘特|项目计划).{0,12}基线.{0,8}(申请|提交|发起|发布|固化)/iu.test(message)
+);
+
+const normalizeApprovalAction = (value: unknown): "approve" | "reject" | "return" | null => {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["approve", "同意", "通过", "批准"].includes(normalized)) return "approve";
+  if (["reject", "拒绝", "驳回", "不通过"].includes(normalized)) return "reject";
+  if (["return", "退回", "退回修改"].includes(normalized)) return "return";
+  return null;
+};
+
+export const parseApprovalProcessIntent = (message: string) => {
+  const text = String(message || "").trim();
+  if (!/(审批|审核|流程)/u.test(text)) return null;
+  const action = /(拒绝|驳回|不通过)/u.test(text)
+    ? "reject" as const
+    : /(退回修改|退回)/u.test(text)
+      ? "return" as const
+      : /(同意|通过|批准)/u.test(text)
+        ? "approve" as const
+        : null;
+  if (!action) return null;
+  const quoted = text.match(/[“"'《]([^”"'》]{1,200})[”"'》]/u)?.[1]?.trim();
+  const query = quoted
+    || text.match(/(?:同意|通过|批准|拒绝|驳回|不通过|退回修改|退回)\s*(?:这个|该|当前)?\s*([^，。；;]{1,200}?)(?:审批|审核|流程)/u)?.[1]?.trim()
+    || "";
+  const comment = text.match(/(?:原因|意见|备注|说明)\s*(?:为|[:：])\s*([\s\S]{1,2000})$/u)?.[1]?.trim() || "";
+  return { action, approvalQuery: query || undefined, comment: comment || undefined };
+};
+
+const parseCollaborationMessageIntent = (message: string) => {
+  const text = String(message || "").trim();
+  if (!/(协同|会话|消息)/u.test(text) || !/(发送|回复|告诉|留言)/u.test(text)) return null;
+  const content = text.match(/(?:发送|回复|告诉|留言)(?:消息)?\s*(?:为|[:：])?\s*[“"']([\s\S]{1,4000})[”"']\s*$/u)?.[1]?.trim()
+    || text.match(/(?:发送|回复|留言)(?:消息)?\s*(?:为|[:：])\s*([\s\S]{1,4000})$/u)?.[1]?.trim()
+    || "";
+  const threadTitle = text.match(/(?:在|向)\s*[“"'《]?([^”"'》，。；;]{1,200})[”"'》]?\s*(?:协同)?(?:会话|群组)/u)?.[1]?.trim() || "";
+  return content ? { content, threadTitle: threadTitle || undefined } : null;
+};
+
 const ensureProjectAccess = async (user: AuthenticatedUser, projectId: string) => {
   if (user.assignedRoleNames.includes("管理员")) return true;
   return Boolean(await prisma.projectMember.findFirst({
-    where: { projectId, personName: user.displayName },
+    where: {
+      projectId,
+      OR: [
+        { accountId: user.userId },
+        { accountId: null, personName: user.displayName },
+      ],
+    },
     select: { id: true },
   }));
 };
@@ -422,6 +498,165 @@ export const proposeAssistantAction = async (params: {
     allowed: await canUseAssistantTool(params.user, toolId),
   })))).filter((item) => item.allowed).map((item) => item.toolId));
   const canUse = (toolId: string) => allowed.has(toolId) && (!params.expectedToolId || params.expectedToolId === toolId);
+
+  const plannedProjectStatus = params.expectedToolId === "approval.project-status.request"
+    ? normalizeProjectStatus(params.plannedArgs?.targetStatus)
+    : null;
+  const requestedProjectStatus = plannedProjectStatus ?? parseProjectStatusApprovalIntent(params.message)?.targetStatus ?? null;
+  if (canUse("approval.project-status.request") && requestedProjectStatus) {
+    const project = await prisma.project.findUnique({
+      where: { id: params.projectId },
+      select: { id: true, name: true, status: true },
+    });
+    if (!project) return null;
+    assertProjectStatusTransition(project.status, requestedProjectStatus);
+    const permission = projectStatusActionPermission(project.status, requestedProjectStatus);
+    if (!(await userHasPermission(params.user, permission))) return null;
+    return createProposal({
+      ...params,
+      toolId: "approval.project-status.request",
+      riskLevel: "MEDIUM",
+      args: { targetStatus: requestedProjectStatus },
+      title: "申请项目状态变更",
+      description: `申请将项目“${project.name}”从“${PROJECT_STATUS_LABEL[project.status as ProjectStatus] ?? project.status}”变更为“${PROJECT_STATUS_LABEL[requestedProjectStatus] ?? requestedProjectStatus}”；审批通过后才会更新项目状态`,
+    });
+  }
+
+  if (canUse("approval.wbs-baseline.request") && (params.expectedToolId === "approval.wbs-baseline.request" || isWbsBaselineApprovalRequest(params.message))) {
+    const [project, taskCount] = await Promise.all([
+      prisma.project.findUnique({
+        where: { id: params.projectId },
+        select: { name: true, status: true, ganttRevision: true },
+      }),
+      prisma.projectGanttTask.count({ where: { projectId: params.projectId } }),
+    ]);
+    if (!project || taskCount === 0 || [ProjectStatus.COMPLETED, ProjectStatus.VOIDED].includes(project.status as ProjectStatus)) return null;
+    return createProposal({
+      ...params,
+      toolId: "approval.wbs-baseline.request",
+      riskLevel: "MEDIUM",
+      args: {},
+      title: "申请发布 WBS 基线",
+      description: `申请发布项目“${project.name}”当前第 ${project.ganttRevision} 版 WBS 基线，共 ${taskCount} 条任务；审批通过后固化当前计划数据`,
+    });
+  }
+
+  const plannedApprovalAction = params.expectedToolId === "approval.process"
+    ? normalizeApprovalAction(params.plannedArgs?.action)
+    : null;
+  const requestedApprovalAction: {
+    action: "approve" | "reject" | "return";
+    instanceId?: string;
+    approvalQuery?: string;
+    comment?: string;
+  } | null = plannedApprovalAction
+    ? {
+        action: plannedApprovalAction,
+        instanceId: String(params.plannedArgs?.instanceId || "").trim() || undefined,
+        approvalQuery: String(params.plannedArgs?.approvalQuery || "").trim() || undefined,
+        comment: String(params.plannedArgs?.comment || "").trim() || undefined,
+      }
+    : parseApprovalProcessIntent(params.message);
+  if (canUse("approval.process") && requestedApprovalAction) {
+    if (requestedApprovalAction.action !== "approve" && !requestedApprovalAction.comment) return null;
+    const targetWhere = requestedApprovalAction.instanceId
+      ? { id: requestedApprovalAction.instanceId }
+      : requestedApprovalAction.approvalQuery
+        ? {
+            OR: [
+              { title: { contains: requestedApprovalAction.approvalQuery, mode: "insensitive" as const } },
+              { summary: { contains: requestedApprovalAction.approvalQuery, mode: "insensitive" as const } },
+            ],
+          }
+        : {};
+    const matches = await prisma.approvalWorkflowInstance.findMany({
+      where: {
+        projectId: params.projectId,
+        status: "PENDING",
+        ...targetWhere,
+        nodes: {
+          some: {
+            status: "PENDING",
+            assignments: { some: { accountId: params.user.userId, status: "PENDING" } },
+          },
+        },
+      },
+      orderBy: { requestedAt: "desc" },
+      take: 2,
+      select: { id: true, title: true },
+    });
+    if (matches.length !== 1) return null;
+    const actionLabel = requestedApprovalAction.action === "approve" ? "同意" : requestedApprovalAction.action === "reject" ? "拒绝" : "退回";
+    return createProposal({
+      ...params,
+      toolId: "approval.process",
+      riskLevel: "HIGH",
+      args: {
+        action: requestedApprovalAction.action,
+        instanceId: matches[0].id,
+        ...(requestedApprovalAction.comment ? { comment: requestedApprovalAction.comment } : {}),
+      },
+      title: `${actionLabel}本人待审批流程`,
+      description: `${actionLabel}审批“${matches[0].title}”${requestedApprovalAction.comment ? `，意见：${requestedApprovalAction.comment}` : ""}；执行时会再次校验审批节点和审批人`,
+    });
+  }
+
+  const plannedCollaborationMessage = params.expectedToolId === "collaboration.message"
+    ? {
+        content: String(params.plannedArgs?.content || "").trim(),
+        threadId: String(params.plannedArgs?.threadId || "").trim() || undefined,
+        threadTitle: String(params.plannedArgs?.threadTitle || "").trim() || undefined,
+        mentionAccountIds: Array.isArray(params.plannedArgs?.mentionAccountIds)
+          ? params.plannedArgs.mentionAccountIds.map(String).map((item) => item.trim()).filter(Boolean)
+          : [],
+      }
+    : null;
+  const requestedCollaborationMessage: {
+    content: string;
+    threadId?: string;
+    threadTitle?: string;
+    mentionAccountIds?: string[];
+  } | null = plannedCollaborationMessage?.content
+    ? plannedCollaborationMessage
+    : parseCollaborationMessageIntent(params.message);
+  if (canUse("collaboration.message") && requestedCollaborationMessage?.content) {
+    const threadWhere = requestedCollaborationMessage.threadId
+      ? { id: requestedCollaborationMessage.threadId }
+      : requestedCollaborationMessage.threadTitle
+        ? { title: { contains: requestedCollaborationMessage.threadTitle, mode: "insensitive" as const } }
+        : {};
+    const matches = await prisma.collaborationThread.findMany({
+      where: {
+        projectId: params.projectId,
+        closedAt: null,
+        ...threadWhere,
+        participants: { some: { accountId: params.user.userId } },
+      },
+      orderBy: { lastMessageAt: "desc" },
+      take: 2,
+      select: {
+        id: true,
+        title: true,
+        participants: { select: { accountId: true } },
+      },
+    });
+    if (matches.length !== 1) return null;
+    const participantIds = new Set(matches[0].participants.map((participant) => participant.accountId));
+    const mentionAccountIds = Array.from(new Set<string>(requestedCollaborationMessage.mentionAccountIds ?? []))
+      .filter((accountId) => participantIds.has(accountId));
+    return createProposal({
+      ...params,
+      toolId: "collaboration.message",
+      riskLevel: "MEDIUM",
+      args: {
+        threadId: matches[0].id,
+        content: requestedCollaborationMessage.content,
+        ...(mentionAccountIds.length > 0 ? { mentionAccountIds } : {}),
+      },
+      title: "发送项目协同消息",
+      description: `向协同会话“${matches[0].title}”发送：${requestedCollaborationMessage.content.slice(0, 160)}${requestedCollaborationMessage.content.length > 160 ? "…" : ""}`,
+    });
+  }
 
   if (canUse("schedule.import.preview") && isScheduleImportRequest(params.message)) {
     const requestedIds = Array.from(new Set((params.attachmentIds ?? []).map((id) => id.trim()).filter(Boolean)));
@@ -1092,6 +1327,130 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
   });
   if (claimed.count === 0) {
     return await prisma.assistantActionRun.findUniqueOrThrow({ where: { id: action.id } });
+  }
+
+  if (action.toolId === "approval.project-status.request") {
+    const targetStatus = normalizeProjectStatus(args.targetStatus);
+    if (!targetStatus) throw new Error("项目目标状态无效");
+    const project = await prisma.project.findUnique({
+      where: { id: action.projectId },
+      select: { name: true, status: true },
+    });
+    if (!project) throw new Error("项目不存在");
+    assertProjectStatusTransition(project.status, targetStatus);
+    const permission = projectStatusActionPermission(project.status, targetStatus);
+    if (!(await userHasPermission(user, permission))) throw new Error("当前账号没有申请该项目状态变更的权限");
+    const instance = await startApprovalWorkflow({
+      projectId: action.projectId,
+      businessType: APPROVAL_BUSINESS_TYPES.PROJECT_STATUS_CHANGE,
+      businessId: approvalBusinessIdForProjectStatus(action.projectId),
+      requester: user,
+      payload: { fromStatus: project.status, targetStatus },
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: {
+        status: "SUCCEEDED",
+        executedAt: new Date(),
+        resultJson: JSON.stringify({
+          message: `项目状态变更审批已发起：${PROJECT_STATUS_LABEL[project.status as ProjectStatus] ?? project.status} → ${PROJECT_STATUS_LABEL[targetStatus] ?? targetStatus}`,
+          approvalInstanceId: instance.id,
+          approvalStatus: instance.status,
+          navigateUrl: "/approvals",
+          navigateLabel: "查看审批中心",
+        }),
+      },
+    });
+  }
+
+  if (action.toolId === "approval.wbs-baseline.request") {
+    const project = await prisma.project.findUnique({
+      where: { id: action.projectId },
+      select: { name: true, status: true, ganttRevision: true },
+    });
+    if (!project) throw new Error("项目不存在");
+    if ([ProjectStatus.COMPLETED, ProjectStatus.VOIDED].includes(project.status as ProjectStatus)) {
+      throw new Error("已完成或已作废项目不能发布新的 WBS 基线");
+    }
+    const instance = await startApprovalWorkflow({
+      projectId: action.projectId,
+      businessType: APPROVAL_BUSINESS_TYPES.WBS_BASELINE_PUBLISH,
+      businessId: approvalBusinessIdForWbsBaseline(action.projectId),
+      requester: user,
+      payload: { ganttRevision: project.ganttRevision },
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: {
+        status: "SUCCEEDED",
+        executedAt: new Date(),
+        resultJson: JSON.stringify({
+          message: `WBS 第 ${project.ganttRevision} 版基线审批已发起`,
+          approvalInstanceId: instance.id,
+          approvalStatus: instance.status,
+          navigateUrl: "/approvals",
+          navigateLabel: "查看审批中心",
+        }),
+      },
+    });
+  }
+
+  if (action.toolId === "approval.process") {
+    const approvalAction = normalizeApprovalAction(args.action);
+    const instanceId = String(args.instanceId || "").trim();
+    const comment = String(args.comment || "").trim();
+    if (!approvalAction || !instanceId) throw new Error("审批处理参数无效");
+    if (approvalAction !== "approve" && !comment) throw new Error("拒绝或退回审批时必须填写原因");
+    const instance = await processApprovalAction({
+      instanceId,
+      action: approvalAction,
+      comment,
+      operator: user,
+    });
+    const actionLabel = approvalAction === "approve" ? "同意" : approvalAction === "reject" ? "拒绝" : "退回";
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: {
+        status: "SUCCEEDED",
+        executedAt: new Date(),
+        resultJson: JSON.stringify({
+          message: `已${actionLabel}审批“${instance.title}”`,
+          approvalInstanceId: instance.id,
+          approvalStatus: instance.status,
+          navigateUrl: "/approvals",
+          navigateLabel: "查看审批中心",
+        }),
+      },
+    });
+  }
+
+  if (action.toolId === "collaboration.message") {
+    const threadId = String(args.threadId || "").trim();
+    const content = String(args.content || "").trim();
+    const mentionAccountIds = Array.isArray(args.mentionAccountIds)
+      ? args.mentionAccountIds.map(String).map((item) => item.trim()).filter(Boolean)
+      : [];
+    if (!threadId || !content) throw new Error("协同会话和消息内容不能为空");
+    const message = await postCollaborationMessage({
+      threadId,
+      content,
+      mentionAccountIds,
+      sender: user,
+    });
+    return prisma.assistantActionRun.update({
+      where: { id: action.id },
+      data: {
+        status: "SUCCEEDED",
+        executedAt: new Date(),
+        resultJson: JSON.stringify({
+          message: "协同消息已发送",
+          collaborationMessageId: message.id,
+          threadId: message.threadId,
+          navigateUrl: `/collaboration?threadId=${encodeURIComponent(message.threadId)}`,
+          navigateLabel: "查看协同会话",
+        }),
+      },
+    });
   }
 
   if (action.toolId === "todo.create") {

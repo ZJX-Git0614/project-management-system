@@ -158,7 +158,8 @@ export default function ProjectsPage() {
     };
 
     try {
-      await api.put(`/api/projects/${projectId}`, { status: statusMap[action] });
+      const result = await api.put<{ approvalRequired?: boolean }>(`/api/projects/${projectId}`, { status: statusMap[action] });
+      if (result.approvalRequired) alert("项目状态变更审批已发起，可在审批中心查看进度。");
       await fetchData();
     } catch (error) {
       alert(error instanceof Error ? error.message : "操作失败");

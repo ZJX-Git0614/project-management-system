@@ -9,6 +9,7 @@ import { decryptAssistantSecret } from "@/lib/assistant-secrets";
 import { prisma } from "@/lib/prisma";
 import { PROJECT_DOCUMENT_STORAGE_ROOT } from "@/lib/project-document-storage";
 import { ASSISTANT_ARTIFACT_STORAGE_ROOT } from "@/lib/assistant-artifact-storage";
+import { COLLABORATION_ATTACHMENT_STORAGE_ROOT } from "@/lib/collaboration-attachment-storage";
 import {
   ensureWebDavDirectory,
   pruneWebDavBackups,
@@ -150,6 +151,13 @@ export const getBackupDirectoryRoots = (settings?: Pick<SystemBackupSettings, "l
 const isPathInsideRoot = (candidate: string, root: string) => (
   candidate === root || candidate.startsWith(`${root}${path.sep}`)
 );
+
+export const selectSystemBackupArchiveDirectories = (directories: string[]) => {
+  const resolved = uniquePaths(directories);
+  return resolved.filter((candidate) => !resolved.some((root) => (
+    root !== candidate && isPathInsideRoot(candidate, root)
+  )));
+};
 
 export const assertAllowedBackupDirectory = (
   directory: string,
@@ -399,17 +407,20 @@ const createSystemBackupUnlocked = async ({
       postgresToolConnectionUrl(process.env.DATABASE_URL),
     ]);
 
-    await mkdir(PROJECT_DOCUMENT_STORAGE_ROOT, { recursive: true });
-    await mkdir(ASSISTANT_ARTIFACT_STORAGE_ROOT, { recursive: true });
+    const archiveDirectories = selectSystemBackupArchiveDirectories([
+      PROJECT_DOCUMENT_STORAGE_ROOT,
+      ASSISTANT_ARTIFACT_STORAGE_ROOT,
+      COLLABORATION_ATTACHMENT_STORAGE_ROOT,
+    ]);
+    await Promise.all(archiveDirectories.map((archiveDirectory) => mkdir(archiveDirectory, { recursive: true })));
     await runSystemCommand("tar", [
       "-czf",
       documentArchivePath,
-      "-C",
-      path.dirname(PROJECT_DOCUMENT_STORAGE_ROOT),
-      path.basename(PROJECT_DOCUMENT_STORAGE_ROOT),
-      "-C",
-      path.dirname(ASSISTANT_ARTIFACT_STORAGE_ROOT),
-      path.basename(ASSISTANT_ARTIFACT_STORAGE_ROOT),
+      ...archiveDirectories.flatMap((archiveDirectory) => [
+        "-C",
+        path.dirname(archiveDirectory),
+        path.basename(archiveDirectory),
+      ]),
     ]);
 
     await writeFile(path.join(directory, "manifest.json"), JSON.stringify({
@@ -418,7 +429,7 @@ const createSystemBackupUnlocked = async ({
       triggerMode,
       databaseFile: databaseFileName,
       documentArchiveFile: documentArchiveFileName,
-      documentArchiveContents: ["project-documents", "assistant-artifacts"],
+      documentArchiveContents: ["project-documents", "assistant-artifacts", "collaboration-attachments"],
     }, null, 2));
 
     let cloudStatus = "SKIPPED";

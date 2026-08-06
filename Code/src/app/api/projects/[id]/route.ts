@@ -1,9 +1,12 @@
 import { rm } from "node:fs/promises"
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { ok, err, forbidden, notFound, ensureMutableProject, isStatusTransitionAllowed, unauthorizedFromRequest } from "@/lib/api-utils"
+import { ok, err, forbidden, notFound, ensureMutableProject, unauthorizedFromRequest } from "@/lib/api-utils"
+import { APPROVAL_BUSINESS_TYPES, approvalBusinessIdForProjectStatus } from "@/lib/approval-workflow"
+import { serializeApprovalInstance, startApprovalWorkflow } from "@/lib/approval-workflow-server"
 import { getOrderedGanttTasks, serializeGanttTaskList } from "@/lib/gantt-task-service"
 import { getProjectDocumentDirectory } from "@/lib/project-document-storage"
+import { assertProjectStatusTransition, projectStatusActionPermission } from "@/lib/project-lifecycle"
 import { getValidProjectRoleNames, serializeProjectMember } from "@/lib/project-member-view"
 import { getAuthenticatedUser, requireSystemAdmin, userHasPermission } from "@/lib/server-auth"
 
@@ -69,21 +72,33 @@ export async function PUT(
 
   const body = await req.json()
   const isOnlyStatusChange = Object.keys(body).length === 1 && body.status !== undefined
-  const statusPermission = body.status === "ACTIVE"
-    ? (existing.status === "DRAFT" ? "project-info:start" : "project-info:restore")
-    : body.status === "COMPLETED"
-      ? "project-info:complete"
-      : body.status === "VOIDED"
-        ? "project-info:void"
-        : "project-info:edit"
-  if (!await userHasPermission(user, isOnlyStatusChange ? statusPermission : "project-info:edit")) return forbidden()
-  if (
-    !isOnlyStatusChange ||
-    !isStatusTransitionAllowed(existing.status, body.status)
-  ) {
-    const m = await ensureMutableProject(id)
-    if (m) return m
+  if (body.status !== undefined && !isOnlyStatusChange) {
+    return err("项目状态变更必须单独提交审批，请先保存其他项目信息")
   }
+  const statusPermission = projectStatusActionPermission(existing.status, String(body.status || ""))
+  if (!await userHasPermission(user, isOnlyStatusChange ? statusPermission : "project-info:edit")) return forbidden()
+  if (isOnlyStatusChange) {
+    const targetStatus = String(body.status || "")
+    if (targetStatus === existing.status) {
+      return ok({ ...existing, createdAt: existing.createdAt.toISOString() })
+    }
+    try {
+      assertProjectStatusTransition(existing.status, targetStatus)
+      const approval = await startApprovalWorkflow({
+        projectId: id,
+        businessType: APPROVAL_BUSINESS_TYPES.PROJECT_STATUS_CHANGE,
+        businessId: approvalBusinessIdForProjectStatus(id),
+        requester: user,
+        payload: { fromStatus: existing.status, targetStatus },
+      })
+      return ok({ approvalRequired: true, approvalInstance: serializeApprovalInstance(approval) }, 202)
+    } catch (error) {
+      return err(error instanceof Error ? error.message : "项目状态变更审批发起失败")
+    }
+  }
+
+  const m = await ensureMutableProject(id)
+  if (m) return m
 
   const updateData: Record<string, unknown> = {}
 
@@ -96,8 +111,6 @@ export async function PUT(
     updateData.repairCycleDays = body.repairCycleDays
   if (body.startDate !== undefined) updateData.startDate = body.startDate
   if (body.expectedEndDate !== undefined) updateData.expectedEndDate = body.expectedEndDate
-  if (body.status !== undefined) updateData.status = body.status
-
   if (body.startDate !== undefined || body.expectedEndDate !== undefined) {
     const startDate = String(body.startDate !== undefined ? body.startDate : existing.startDate).trim()
     const expectedEndDate = String(body.expectedEndDate !== undefined ? body.expectedEndDate : existing.expectedEndDate).trim()

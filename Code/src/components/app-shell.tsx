@@ -11,10 +11,12 @@ import {
   DatabaseBackup,
   FileText,
   KeyRound,
+  Gavel,
   LayoutDashboard,
   ListTodo,
   LogOut,
   Menu,
+  MessagesSquare,
   PanelLeftClose,
   PanelLeftOpen,
   Search,
@@ -22,6 +24,7 @@ import {
   TrendingUp,
   User,
   Wallet,
+  Workflow,
   X,
 } from "lucide-react";
 import { useAuth } from "@/contexts/auth-context";
@@ -398,6 +401,25 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
         : [],
     },
     {
+      title: "项目协同管理",
+      items: [
+        {
+          href: "/approvals",
+          label: "审批中心",
+          active: pathname === "/approvals",
+          permissionKey: "approval-center:view",
+          icon: <Gavel className="size-4" />,
+        },
+        {
+          href: "/collaboration",
+          label: "协同沟通",
+          active: pathname === "/collaboration",
+          permissionKey: "collaboration-center:view",
+          icon: <MessagesSquare className="size-4" />,
+        },
+      ],
+    },
+    {
       title: "系统设置",
       items: [
         {
@@ -413,6 +435,13 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
           active: pathname === "/admin/accounts",
           permissionKey: "account-management:view",
           icon: <ListTodo className="size-4" />,
+        },
+        {
+          href: "/admin/approval-workflows",
+          label: "审批流程配置",
+          active: pathname === "/admin/approval-workflows",
+          permissionKey: "approval-workflow-config:view",
+          icon: <Workflow className="size-4" />,
         },
         ...(isSuperAdmin
           ? [

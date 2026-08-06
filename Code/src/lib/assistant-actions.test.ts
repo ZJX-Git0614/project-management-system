@@ -3,11 +3,14 @@ import { describe, expect, it } from "vitest";
 import {
   isScheduleConversionRequest,
   isScheduleMergeRequest,
+  isWbsBaselineApprovalRequest,
+  parseApprovalProcessIntent,
   parseGanttDepthPruneIntent,
   parseGanttTaskCreateIntent,
   parseGanttTaskDeleteIntent,
   parseGanttTaskTextUpdateIntent,
   parseHierarchyIntent,
+  parseProjectStatusApprovalIntent,
   parseRiskCreationName,
   parseRiskDeleteIntent,
   parseRiskStatusUpdateIntent,
@@ -103,5 +106,30 @@ describe("assistant action intent parsing", () => {
     expect(isScheduleConversionRequest(message)).toBe(true);
     expect(isScheduleMergeRequest(message)).toBe(false);
     expect(isScheduleConversionRequest("把这两个进度计划合并成系统可导入 Excel")).toBe(false);
+  });
+
+  it("parses only explicit approval commands", () => {
+    expect(parseProjectStatusApprovalIntent("申请将当前项目变更为已完成"))
+      .toEqual({ targetStatus: "COMPLETED" });
+    expect(parseProjectStatusApprovalIntent("当前项目是什么状态"))
+      .toBeNull();
+    expect(isWbsBaselineApprovalRequest("帮我申请发布当前 WBS 基线")).toBe(true);
+    expect(isWbsBaselineApprovalRequest("查看当前 WBS 基线")).toBe(false);
+  });
+
+  it("requires an explicit decision and preserves rejection reasons", () => {
+    expect(parseApprovalProcessIntent("同意审批《F26007：发布 WBS 基线》"))
+      .toEqual({
+        action: "approve",
+        approvalQuery: "F26007：发布 WBS 基线",
+        comment: undefined,
+      });
+    expect(parseApprovalProcessIntent("退回审批《F26007：发布 WBS 基线》，原因为计划日期未确认"))
+      .toEqual({
+        action: "return",
+        approvalQuery: "F26007：发布 WBS 基线",
+        comment: "计划日期未确认",
+      });
+    expect(parseApprovalProcessIntent("查看我的待审批")).toBeNull();
   });
 });

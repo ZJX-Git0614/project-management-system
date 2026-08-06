@@ -152,7 +152,7 @@ export const shouldPlanProjectAssistantAction = (
   message: string,
   contract?: AssistantIntentContract,
 ) => (
-  /(创建|新增|新建|登记|更新|修改|调整|推进|设置|设为|改为|完成|关闭|办结|导出|输出|下载|保存|转换|转成|转为|整理成|做成|生成|制作|合并|整合|汇总|合成|合二为一|拼接)/u.test(message)
+  /(创建|新增|新建|登记|更新|修改|调整|推进|设置|设为|改为|完成|关闭|办结|导出|输出|下载|保存|转换|转成|转为|整理成|做成|生成|制作|合并|整合|汇总|合成|合二为一|拼接|申请|发起|提交审批|同意|批准|拒绝|驳回|退回|发送|回复|留言)/u.test(message)
   || executableObjectives(contract).length > 0
 )
 
@@ -279,6 +279,10 @@ export const planProjectAssistantActionWithModel = async (params: {
             "用户指定业务类别或对象关键词时，project.export 必须写入 taskCategoryKeywords；用户同时要求任务总结、分析或报告时必须写入 includeProgressReport:true；用户要求预算数据可视化、图表或仪表盘时必须写入 includeVisualization:true。",
             "用户要求把“以上风险”“这些风险”或前文分析结果写入风险登记册时，必须从最近对话逐条提取风险并选择 risk.create.batch；不得选择 risk.create，也不得把用户整句指令作为 riskName。",
             "risk.create.batch 的 risks 必须覆盖前文建议登记的全部风险，保留风险名称、等级、状态、识别依据、可能影响和应对措施；若前文同时有完整分析表和优先登记表，应以优先登记表的风险范围为准，并用完整分析表补充字段。",
+            "项目启动、完成、作废、恢复或回到草稿必须选择 approval.project-status.request，并明确 targetStatus；不得声称或尝试直接修改项目状态。",
+            "申请发布 WBS/甘特基线必须选择 approval.wbs-baseline.request；不得把普通导入、导出或查询误判为基线申请。",
+            "处理审批必须选择 approval.process。只有用户明确表达同意、拒绝或退回时才能规划；用 approvalQuery 保留用户给出的审批标题或关键词，不得编造 instanceId。拒绝和退回必须携带用户明确给出的 comment，否则返回 null。",
+            "发送协同消息必须选择 collaboration.message，并同时保留消息 content 与用户给出的 threadTitle；只有数据观察中明确给出的账号 ID 才能写入 mentionAccountIds，不得根据姓名编造账号 ID。",
             "不得生成数据库 ID、SQL、接口、虚构名称、虚构进度或用户没有提供的业务字段。",
             "command 必须保留用户提供的 Task/Matter/Risk 编号、百分比、名称和动作，不得复制工具描述代替命令。",
           ].join("\n"),

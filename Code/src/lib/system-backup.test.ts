@@ -5,6 +5,7 @@ import {
   isAutomaticBackupDue,
   postgresToolConnectionUrl,
   selectBackupIdsForPruning,
+  selectSystemBackupArchiveDirectories,
 } from "@/lib/system-backup";
 
 const settings = {
@@ -88,5 +89,16 @@ describe("system backup schedule", () => {
     ], 5_000);
 
     expect(result).toEqual({ ids: ["oversized"], totalBytes: 0 });
+  });
+
+  it("archives collaboration attachments without duplicating nested persistent directories", () => {
+    expect(selectSystemBackupArchiveDirectories([
+      "/app/.local-runtime/project-documents",
+      "/app/.local-runtime/project-documents/.collaboration-attachments",
+      "/app/.local-runtime/assistant-artifacts",
+    ])).toEqual([
+      "/app/.local-runtime/project-documents",
+      "/app/.local-runtime/assistant-artifacts",
+    ]);
   });
 });
