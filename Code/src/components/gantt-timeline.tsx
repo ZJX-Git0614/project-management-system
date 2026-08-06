@@ -279,7 +279,7 @@ const GanttColumnFilterMenu = ({
         <button
           type="button"
           className={cn(
-            "ml-auto flex size-5 shrink-0 items-center justify-center border-0 bg-transparent p-0 text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:text-primary",
+            "ml-auto flex !size-5 !min-h-0 shrink-0 items-center justify-center !rounded-none !border-0 !bg-transparent !p-0 text-muted-foreground !shadow-none outline-none transition-colors hover:!border-0 hover:!bg-transparent hover:text-foreground focus-visible:!border-0 focus-visible:!bg-transparent focus-visible:!shadow-none focus-visible:text-primary active:!transform-none",
             active && "text-primary",
           )}
           aria-label={`筛选${GANTT_COLUMN_LABELS[columnKey]}`}
@@ -2353,7 +2353,7 @@ const EditableTaskRow = ({
             <TooltipTrigger asChild>
               <button
                 type="button"
-                className="flex size-4 shrink-0 items-center justify-center border-0 bg-transparent p-0 text-amber-500 outline-none transition-colors hover:text-amber-400 focus-visible:text-amber-300"
+                className="flex size-4 shrink-0 items-center justify-center border-0 bg-transparent p-0 text-muted-foreground/75 outline-none transition-colors hover:text-foreground focus-visible:text-foreground"
                 aria-label={`${draft.taskName || row.taskCode || "父任务"}存在 ${unassignedLeafTasks.length} 个未分配负责人任务`}
                 onClick={(event) => event.stopPropagation()}
               >
@@ -2365,7 +2365,7 @@ const EditableTaskRow = ({
               align="start"
               className="max-h-64 max-w-[min(420px,calc(100vw-2rem))] overflow-y-auto px-3 py-2 leading-5"
             >
-              <div className="font-medium text-amber-500">以下任务未安排负责人</div>
+              <div className="font-medium">以下任务未安排负责人</div>
               <ul className="mt-1 space-y-0.5 text-card-foreground">
                 {unassignedLeafTasks.map((task) => (
                   <li key={task.id} className="break-words">
@@ -2501,7 +2501,7 @@ const EditableTaskRow = ({
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  className="absolute right-1 top-1/2 flex size-4 -translate-y-1/2 items-center justify-center border-0 bg-transparent p-0 text-destructive outline-none transition-colors hover:text-red-400 focus-visible:text-red-300"
+                  className="absolute right-1 top-1/2 flex size-4 -translate-y-1/2 items-center justify-center border-0 bg-transparent p-0 text-muted-foreground/75 outline-none transition-colors hover:text-foreground focus-visible:text-foreground"
                   aria-label={`${draft.taskName || row.taskCode || "任务"}存在资源冲突`}
                   onClick={(event) => event.stopPropagation()}
                 >
