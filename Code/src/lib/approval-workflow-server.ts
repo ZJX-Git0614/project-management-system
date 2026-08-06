@@ -129,7 +129,9 @@ const ensureDefaultApprovalWorkflowsInTransaction = async (
   db: Prisma.TransactionClient,
   operator: Pick<AuthenticatedUser, "userId" | "displayName"> = { userId: "system", displayName: "系统" },
 ) => {
-  await db.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('ceastar-default-approval-workflows'))`;
+  // pg_advisory_xact_lock returns PostgreSQL's void type. Execute it instead of
+  // querying it so Prisma does not try to deserialize a void result column.
+  await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('ceastar-default-approval-workflows'))`;
   for (const seed of DEFAULT_APPROVAL_WORKFLOWS) {
     const definition = await db.approvalWorkflowDefinition.upsert({
       where: { businessType: seed.businessType },
@@ -463,7 +465,7 @@ export const startApprovalWorkflow = async (params: {
   if (!project) throw new Error("项目不存在");
   await assertProjectAccess(params.requester, params.projectId, tx);
   const activeKey = approvalActiveKey(params);
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${activeKey}))`;
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${activeKey}))`;
   const existing = await tx.approvalWorkflowInstance.findUnique({ where: { activeKey }, include: INSTANCE_INCLUDE });
   if (existing) return existing;
   const definition = await tx.approvalWorkflowDefinition.findUnique({ where: { businessType: params.businessType } });

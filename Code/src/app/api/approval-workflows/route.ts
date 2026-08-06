@@ -10,17 +10,21 @@ export async function GET(req: NextRequest) {
   const user = await getAuthenticatedUser(req);
   if (!user) return unauthorizedFromRequest(req);
   if (!await userHasPermission(user, "approval-workflow-config:view")) return forbidden();
-  await ensureDefaultApprovalWorkflows(user);
-  const definitions = await prisma.approvalWorkflowDefinition.findMany({
-    orderBy: [{ moduleKey: "asc" }, { name: "asc" }],
-    include: {
-      versions: {
-        orderBy: { version: "desc" },
-        include: { nodes: { orderBy: { nodeOrder: "asc" } } },
+  try {
+    await ensureDefaultApprovalWorkflows(user);
+    const definitions = await prisma.approvalWorkflowDefinition.findMany({
+      orderBy: [{ moduleKey: "asc" }, { name: "asc" }],
+      include: {
+        versions: {
+          orderBy: { version: "desc" },
+          include: { nodes: { orderBy: { nodeOrder: "asc" } } },
+        },
       },
-    },
-  });
-  return ok(definitions);
+    });
+    return ok(definitions);
+  } catch (error) {
+    return err(error instanceof Error ? error.message : "审批流程配置加载失败", 500);
+  }
 }
 
 export async function POST(req: NextRequest) {

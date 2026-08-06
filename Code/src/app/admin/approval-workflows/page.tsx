@@ -284,6 +284,14 @@ export default function ApprovalWorkflowSettingsPage() {
     }
   };
 
+  const createDraftVersion = async () => {
+    if (!selectedDefinition || !selectedVersion) {
+      notify("请先选择要配置的审批业务", "warning");
+      return;
+    }
+    await saveDraft();
+  };
+
   const publishVersion = async () => {
     if (!selectedVersion || selectedVersion.status !== "DRAFT") return;
     if (!await confirm(`确认发布审批流程 v${selectedVersion.version}？发布后新发起的审批将使用该版本，历史审批仍按原快照运行。`)) return;
@@ -364,9 +372,12 @@ export default function ApprovalWorkflowSettingsPage() {
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <CardTitle className="flex items-center gap-2 text-sm"><Workflow className="size-4 text-primary" />审批流程配置</CardTitle>
-              <CardDescription className="mt-1 text-xs">流程版本发布后只影响新审批；运行中的审批保留发起时的节点快照。</CardDescription>
+              <CardDescription className="mt-1 text-xs">选择已接入业务后创建新版本，配置节点并发布；发布只影响新审批，运行中的审批保留发起时的节点快照。</CardDescription>
             </div>
-            <Button size="sm" variant="outline" className="h-8 text-xs" onClick={() => void loadConfiguration()} disabled={loading || busy}><RefreshCw className={cn("size-3.5", loading && "animate-spin")} />刷新</Button>
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="outline" className="h-8 text-xs" onClick={() => void createDraftVersion()} disabled={loading || busy || !selectedDefinition || !selectedVersion || !can("approval-workflow-config:edit")}><FilePenLine className="size-3.5" />新建版本</Button>
+              <Button size="sm" variant="outline" className="h-8 text-xs" onClick={() => void loadConfiguration()} disabled={loading || busy}><RefreshCw className={cn("size-3.5", loading && "animate-spin")} />刷新</Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="flex flex-wrap gap-1.5 border-t border-border pt-3">
@@ -467,7 +478,7 @@ export default function ApprovalWorkflowSettingsPage() {
                   </section>
 
                   <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
-                    <Button size="sm" variant="outline" className="h-8 text-xs" disabled={busy || !can("approval-workflow-config:edit")} onClick={() => void saveDraft()}><Save className="size-3.5" />另存为草稿版本</Button>
+                    <Button size="sm" variant="outline" className="h-8 text-xs" disabled={busy || !can("approval-workflow-config:edit")} onClick={() => void saveDraft()}><Save className="size-3.5" />保存为草稿版本</Button>
                     <Button size="sm" className="h-8 text-xs" disabled={busy || selectedVersion.status !== "DRAFT" || !can("approval-workflow-config:publish")} onClick={() => void publishVersion()}><Send className="size-3.5" />发布当前草稿</Button>
                   </div>
                 </CardContent>

@@ -20,6 +20,7 @@ import {
   Hand,
   ListChecks,
   Maximize2,
+  MessagesSquare,
   Minimize2,
   Paperclip,
   Send,
@@ -34,6 +35,7 @@ import {
 } from "lucide-react"
 
 import { AssistantMessageContent } from "@/components/assistant-message-content"
+import { AssistantCollaborationPanel } from "@/components/assistant-collaboration-panel"
 import { OperationErrorDialog } from "@/components/operation-error-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -459,6 +461,7 @@ export function ProjectAssistant({
   const { notify } = useSystemFeedback()
   const [open, setOpen] = useState(false)
   const [fullScreen, setFullScreen] = useState(false)
+  const [assistantView, setAssistantView] = useState<"CHAT" | "COLLABORATION">("CHAT")
   const [input, setInput] = useState("")
   const [sending, setSending] = useState(false)
   const [loadingHistory, setLoadingHistory] = useState(false)
@@ -971,6 +974,14 @@ export function ProjectAssistant({
                   {launcherWelcomeText(runtime)}
                 </p>
               </div>
+              <div className="flex shrink-0 items-center rounded-md border border-border bg-background/40 p-0.5">
+                <Button variant={assistantView === "CHAT" ? "secondary" : "ghost"} size="icon" className="size-7" title="佳佳对话" aria-label="佳佳对话" onClick={() => setAssistantView("CHAT")}>
+                  <Bot className="size-3.5" />
+                </Button>
+                <Button variant={assistantView === "COLLABORATION" ? "secondary" : "ghost"} size="icon" className="size-7" title="协同沟通" aria-label="协同沟通" onClick={() => setAssistantView("COLLABORATION")}>
+                  <MessagesSquare className="size-3.5" />
+                </Button>
+              </div>
               <Button variant="ghost" size="icon" className="size-8" onClick={() => setFullScreen((current) => !current)} title={fullScreen ? "退出全屏" : "展开助手"}>
                 {fullScreen ? <Minimize2 /> : <Maximize2 />}
               </Button>
@@ -979,6 +990,7 @@ export function ProjectAssistant({
               </Button>
             </header>
 
+            {assistantView === "CHAT" ? (
             <div ref={messagesRef} className="min-h-0 w-full min-w-0 overflow-x-hidden overflow-y-auto overscroll-contain px-3 py-4">
               <div className={cn("mx-auto w-full min-w-0 space-y-4", fullScreen ? "max-w-[1680px]" : "max-w-none")}>
                 {loadingHistory && (
@@ -1175,7 +1187,11 @@ export function ProjectAssistant({
                 )}
               </div>
             </div>
+            ) : (
+              <AssistantCollaborationPanel active={open && assistantView === "COLLABORATION"} currentProjectId={currentProjectId} fullScreen={fullScreen} />
+            )}
 
+            {assistantView === "CHAT" && (
             <footer className="w-full min-w-0 shrink-0 overflow-x-hidden border-t border-border bg-background/25 px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
               <div className={cn("mx-auto w-full min-w-0", fullScreen ? "max-w-[1680px]" : "max-w-none")}>
                 <div className="rounded-md border border-border bg-card/70 p-2 shadow-[var(--app-shadow-soft)] transition-colors focus-within:border-primary/45 focus-within:bg-card">
@@ -1271,6 +1287,7 @@ export function ProjectAssistant({
                 </div>
               </div>
             </footer>
+            )}
           </div>
         </aside>
       )}
