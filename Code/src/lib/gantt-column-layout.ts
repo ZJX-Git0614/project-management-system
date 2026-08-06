@@ -34,6 +34,7 @@ export interface GanttColumnLayoutTask {
   taskName?: string;
   taskDescription?: string;
   ownerMember?: { personName?: string; roleName?: string } | null;
+  ownerMembers?: Array<{ personName?: string; roleName?: string }>;
   durationDays?: number;
   startDate?: string;
   endDate?: string;
@@ -174,6 +175,16 @@ const GANTT_COLUMN_MAX_WIDTHS: GanttColumnWidths = {
   remark: 720,
 };
 
+const GANTT_FILTERABLE_COLUMN_KEYS = new Set<GanttColumnKey>([
+  "taskName",
+  "taskDescription",
+  "owner",
+  "durationDays",
+  "startDate",
+  "endDate",
+  "predecessor",
+]);
+
 const textWidth = (value: unknown) => Array.from(String(value ?? "")).reduce((width, character) => (
   width + (/^[\u0000-\u00ff]$/.test(character) ? 7 : 12)
 ), 0);
@@ -208,7 +219,7 @@ export const fitGanttColumnWidth = (
   tasks: GanttColumnLayoutTask[],
   depths = ganttTaskDepths(tasks),
 ) => {
-  const headerWidth = textWidth(GANTT_COLUMN_LABELS[key]) + 30;
+  const headerWidth = textWidth(GANTT_COLUMN_LABELS[key]) + (GANTT_FILTERABLE_COLUMN_KEYS.has(key) ? 48 : 30);
   const codeById = new Map(tasks.map((task) => [task.id, task.taskCode || task.id]));
   const values = tasks.map((task, index) => {
     const depth = depths.get(task.id) ?? 0;
@@ -219,7 +230,18 @@ export const fitGanttColumnWidth = (
       case "taskCategory": return textWidth(task.taskCategory) + 28;
       case "taskName": return textWidth(task.taskName) + depth * 18 + (task.isCritical ? 92 : 28);
       case "taskDescription": return textWidth(task.taskDescription) + 28;
-      case "owner": return textWidth(task.ownerMember ? `${task.ownerMember.personName ?? ""}（${task.ownerMember.roleName ?? ""}）` : "未分配") + 36;
+      case "owner": {
+        const owners = task.ownerMembers?.length
+          ? task.ownerMembers
+          : task.ownerMember
+            ? [task.ownerMember]
+            : [];
+        const ownerLabel = owners
+          .map((owner) => owner.personName || owner.roleName || "")
+          .filter(Boolean)
+          .join("、") || "未分配";
+        return textWidth(ownerLabel) + 48;
+      }
       case "durationDays": return textWidth(task.durationDays && task.durationDays > 0 ? task.durationDays : "--") + 34;
       case "startDate": return textWidth(task.startDate) + 42;
       case "endDate": return textWidth(task.endDate || task.finishDate) + 42;

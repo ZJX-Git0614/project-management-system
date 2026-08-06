@@ -176,7 +176,7 @@ export function HierarchicalMultiSelect({
   title,
   defaultOpen = false,
 }: HierarchicalMultiSelectProps) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [open, setOpen] = useState(() => defaultOpen && !disabled);
   const [query, setQuery] = useState("");
   const [pendingValue, setPendingValue] = useState<string[]>(value);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
@@ -205,6 +205,10 @@ export function HierarchicalMultiSelect({
     setPendingValue((current) => (open ? current : validValue));
   }, [open, selectableIds, value]);
 
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
   const selectableValue = useMemo(() => value.filter((id) => optionById.has(id)), [optionById, value]);
   const pendingSet = useMemo(() => new Set(pendingValue), [pendingValue]);
   const allState = useMemo(() => {
@@ -228,6 +232,10 @@ export function HierarchicalMultiSelect({
   const triggerTitle = title ?? (selectedLabels.length > 0 ? selectedLabels.join("\n") : placeholder);
 
   const openChange = (nextOpen: boolean) => {
+    if (disabled) {
+      setOpen(false);
+      return;
+    }
     if (nextOpen) {
       setPendingValue(value.filter((id) => selectableIds.has(id)));
       setQuery("");
@@ -240,6 +248,7 @@ export function HierarchicalMultiSelect({
   };
 
   const updateSelection = (nextValue: string[]) => {
+    if (disabled) return;
     const normalized = options.map((option) => option.id).filter((id) => nextValue.includes(id));
     setPendingValue(normalized);
     if (!applyOnClose) onChange(normalized);

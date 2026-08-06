@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { HierarchicalMultiSelect } from "@/components/hierarchical-multi-select";
 
@@ -30,6 +30,26 @@ describe("HierarchicalMultiSelect", () => {
     );
 
     expect(screen.getByRole("textbox", { name: "关联项目事项搜索" })).toBeInTheDocument();
+  });
+
+  it("never opens or emits a value change while disabled", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <HierarchicalMultiSelect
+        ariaLabel="只读负责人"
+        options={options}
+        value={["task-1"]}
+        onChange={onChange}
+        disabled
+        defaultOpen
+      />,
+    );
+
+    expect(screen.queryByRole("textbox", { name: "只读负责人搜索" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "只读负责人" }));
+    expect(screen.queryByRole("textbox", { name: "只读负责人搜索" })).not.toBeInTheDocument();
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("selects descendants and marks a parent indeterminate after a child is cleared", async () => {

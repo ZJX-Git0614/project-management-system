@@ -24,7 +24,6 @@ import {
 import { GanttTimeline, type GanttTaskDraft } from "@/components/gantt-timeline";
 import { OperationErrorDialog } from "@/components/operation-error-dialog";
 import { useConfirm } from "@/components/confirm-provider";
-import { useSystemFeedback } from "@/components/system-feedback-provider";
 import { usePermission } from "@/lib/use-permission";
 import { api } from "@/lib/api-client";
 import { buildGanttRows, getGanttDateRange } from "@/lib/gantt";
@@ -217,7 +216,6 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const [fullScreen, setFullScreen] = useState(false);
   const [importing, setImporting] = useState(false);
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
-  const [requestingBaseline, setRequestingBaseline] = useState(false);
   const [mppExportAvailable, setMppExportAvailable] = useState(false);
   const [importPreview, setImportPreview] = useState<ScheduleImportPreview | null>(null);
   const [importMatchResolutions, setImportMatchResolutions] = useState<Record<string, string>>({});
@@ -239,7 +237,6 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     setGanttPortalContainer(element);
   }, []);
   const confirm = useConfirm();
-  const { notify } = useSystemFeedback();
   const { can } = usePermission();
   const searchParams = useSearchParams();
 
@@ -248,19 +245,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const canCreate = can("project-gantt:create") && !readOnly;
   const canEdit = can("project-gantt:edit") && !readOnly;
   const canDelete = can("project-gantt:delete") && !readOnly;
-  const canRequestBaseline = can("project-gantt:baseline-request") && !readOnly;
-
-  const requestWbsBaseline = useCallback(async () => {
-    setRequestingBaseline(true);
-    try {
-      await api.post(`/api/projects/${projectId}/gantt-tasks/baseline`, {});
-      notify("WBS 基线发布审批已发起，可在审批中心查看进度。", "success");
-    } catch (error) {
-      notify(error instanceof Error ? error.message : "WBS 基线审批发起失败", "error");
-    } finally {
-      setRequestingBaseline(false);
-    }
-  }, [notify, projectId]);
+  const canViewBaselineControl = can("project-gantt:baseline-request");
 
   const fetchResourceAnalysis = useCallback(async (includeCandidates = false) => {
     try {
@@ -1043,17 +1028,16 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   </Button>
                 </>
               )}
-              {canRequestBaseline && (
+              {canViewBaselineControl && (
                 <Button
                   type="button"
                   size="sm"
                   variant="outline"
                   className="h-8 text-xs"
-                  disabled={requestingBaseline || tasks.length === 0}
-                  onClick={() => void requestWbsBaseline()}
-                  title="提交审批，通过后固化当前计划日期、工时和预算成本"
+                  disabled
+                  title="发布基线功能暂未启用"
                 >
-                  <FlagTriangleRight className="size-3.5" /> {requestingBaseline ? "提交中..." : "发布基线"}
+                  <FlagTriangleRight className="size-3.5" /> 发布基线
                 </Button>
               )}
               <DropdownMenu>

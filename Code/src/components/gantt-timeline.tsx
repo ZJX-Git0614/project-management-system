@@ -456,7 +456,7 @@ const GanttTimelineContent = ({
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [taskDropTarget, setTaskDropTarget] = useState<{ id: string; position: DropPosition } | null>(null);
   const [flashingTaskId, setFlashingTaskId] = useState<string | null>(null);
-  const [columnWidths, setColumnWidths] = useState<GanttColumnWidths>({ ...GANTT_COLUMN_MIN_WIDTHS });
+  const [columnWidths, setColumnWidths] = useState<GanttColumnWidths>(() => fitGanttColumnWidths(tasks));
   const [hiddenColumnKeys, setHiddenColumnKeys] = useState<Set<GanttColumnKey>>(
     () => new Set(GANTT_DEFAULT_HIDDEN_COLUMN_KEYS),
   );
@@ -2480,6 +2480,7 @@ const EditableTaskRow = ({
               placeholder="未分配"
               title={ownerReadOnly ? `已汇总 ${ownerNames.length} 名子任务负责人，请先调整子任务` : ownerNames.join("、") || "未分配"}
               onChange={(ownerMemberIds) => {
+                if (!canEdit || isSaving || ownerReadOnly) return;
                 const normalizedOwnerMemberIds = [...new Set(ownerMemberIds)];
                 const nextDraft = {
                   ...draft,
@@ -2487,7 +2488,7 @@ const EditableTaskRow = ({
                   ownerMemberId: normalizedOwnerMemberIds.length === 1 ? normalizedOwnerMemberIds[0] : null,
                 };
                 setDraft(nextDraft);
-                if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
+                if (!taskDraftEquals(row, nextDraft, calendarMode)) {
                   void onUpdateTask?.(row, nextDraft, "owner");
                 }
               }}

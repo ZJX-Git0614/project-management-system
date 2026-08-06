@@ -30,6 +30,25 @@ describe("gantt column layout", () => {
     expect(fitGanttColumnWidth("taskCode", tasks)).toBe(widths.taskCode);
   });
 
+  it("reserves width for filter controls and aggregated task owners", () => {
+    const widths = fitGanttColumnWidths([
+      ...tasks,
+      {
+        id: "owners",
+        taskCode: "Task2",
+        taskName: "联调任务",
+        ownerMembers: [
+          { personName: "张三" },
+          { personName: "李四" },
+          { personName: "王五" },
+        ],
+      },
+    ]);
+
+    expect(widths.durationDays).toBeGreaterThan(GANTT_COLUMN_MIN_WIDTHS.durationDays);
+    expect(widths.owner).toBeGreaterThan(GANTT_COLUMN_MIN_WIDTHS.owner);
+  });
+
   it("uses the same widths for the grid template and panel total", () => {
     const widths = fitGanttColumnWidths(tasks);
     const templateWidths = ganttColumnTemplate(widths, true).split(" ").map((value) => Number(value.replace("px", "")));
