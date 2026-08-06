@@ -2353,7 +2353,7 @@ const EditableTaskRow = ({
             <TooltipTrigger asChild>
               <button
                 type="button"
-                className="flex size-4 shrink-0 items-center justify-center border-0 bg-transparent p-0 text-muted-foreground/75 outline-none transition-colors hover:text-foreground focus-visible:text-foreground"
+                className="flex !size-4 !min-h-0 shrink-0 items-center justify-center !rounded-none !border-0 !bg-transparent !p-0 text-muted-foreground/75 !shadow-none outline-none transition-colors hover:!border-0 hover:!bg-transparent hover:text-foreground focus-visible:!border-0 focus-visible:!bg-transparent focus-visible:!shadow-none focus-visible:text-foreground active:!transform-none"
                 aria-label={`${draft.taskName || row.taskCode || "父任务"}存在 ${unassignedLeafTasks.length} 个未分配负责人任务`}
                 onClick={(event) => event.stopPropagation()}
               >
@@ -2501,7 +2501,7 @@ const EditableTaskRow = ({
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  className="absolute right-1 top-1/2 flex size-4 -translate-y-1/2 items-center justify-center border-0 bg-transparent p-0 text-muted-foreground/75 outline-none transition-colors hover:text-foreground focus-visible:text-foreground"
+                  className="absolute right-1 top-1/2 flex !size-4 !min-h-0 -translate-y-1/2 items-center justify-center !rounded-none !border-0 !bg-transparent !p-0 text-muted-foreground/75 !shadow-none outline-none transition-colors hover:!border-0 hover:!bg-transparent hover:text-foreground focus-visible:!border-0 focus-visible:!bg-transparent focus-visible:!shadow-none focus-visible:text-foreground active:!transform-none"
                   aria-label={`${draft.taskName || row.taskCode || "任务"}存在资源冲突`}
                   onClick={(event) => event.stopPropagation()}
                 >
