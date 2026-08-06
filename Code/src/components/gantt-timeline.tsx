@@ -2469,39 +2469,41 @@ const EditableTaskRow = ({
         />
       ))}
       {isColumnVisible("owner") && (
-        <div data-gantt-column-key="owner" className="relative min-w-0">
-          <HierarchicalMultiSelect
-            options={ownerSelectOptions}
-            value={ownerSelectValue}
-            ariaLabel="负责人"
-            searchPlaceholder="搜索项目成员或角色"
-            emptyText="没有可选择的项目成员"
-            placeholder="未分配"
-            title={ownerReadOnly ? `已汇总 ${ownerNames.length} 名子任务负责人，请先调整子任务` : ownerNames.join("、") || "未分配"}
-            onChange={(ownerMemberIds) => {
-              const normalizedOwnerMemberIds = [...new Set(ownerMemberIds)];
-              const nextDraft = {
-                ...draft,
-                ownerMemberIds: normalizedOwnerMemberIds,
-                ownerMemberId: normalizedOwnerMemberIds.length === 1 ? normalizedOwnerMemberIds[0] : null,
-              };
-              setDraft(nextDraft);
-              if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
-                void onUpdateTask?.(row, nextDraft, "owner");
-              }
-            }}
-            applyOnClose
-            className={cn(inlineSelectClass, "text-left", hasResourceConflict && "pr-6")}
-            contentClassName="w-[360px]"
-            portalContainer={portalContainer}
-            disabled={!canEdit || isSaving || ownerReadOnly}
-          />
+        <div data-gantt-column-key="owner" className="flex min-w-0 items-center gap-1">
+          <div className="min-w-0 flex-1">
+            <HierarchicalMultiSelect
+              options={ownerSelectOptions}
+              value={ownerSelectValue}
+              ariaLabel="负责人"
+              searchPlaceholder="搜索项目成员或角色"
+              emptyText="没有可选择的项目成员"
+              placeholder="未分配"
+              title={ownerReadOnly ? `已汇总 ${ownerNames.length} 名子任务负责人，请先调整子任务` : ownerNames.join("、") || "未分配"}
+              onChange={(ownerMemberIds) => {
+                const normalizedOwnerMemberIds = [...new Set(ownerMemberIds)];
+                const nextDraft = {
+                  ...draft,
+                  ownerMemberIds: normalizedOwnerMemberIds,
+                  ownerMemberId: normalizedOwnerMemberIds.length === 1 ? normalizedOwnerMemberIds[0] : null,
+                };
+                setDraft(nextDraft);
+                if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
+                  void onUpdateTask?.(row, nextDraft, "owner");
+                }
+              }}
+              applyOnClose
+              className={cn(inlineSelectClass, "text-left")}
+              contentClassName="w-[360px]"
+              portalContainer={portalContainer}
+              disabled={!canEdit || isSaving || ownerReadOnly}
+            />
+          </div>
           {hasResourceConflict && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  className="absolute right-1 top-1/2 flex !size-4 !min-h-0 -translate-y-1/2 items-center justify-center !rounded-none !border-0 !bg-transparent !p-0 text-muted-foreground/75 !shadow-none outline-none transition-colors hover:!border-0 hover:!bg-transparent hover:text-foreground focus-visible:!border-0 focus-visible:!bg-transparent focus-visible:!shadow-none focus-visible:text-foreground active:!transform-none"
+                  className="flex !size-4 !min-h-0 shrink-0 items-center justify-center !rounded-none !border-0 !bg-transparent !p-0 text-muted-foreground/75 !shadow-none outline-none transition-colors hover:!border-0 hover:!bg-transparent hover:text-foreground focus-visible:!border-0 focus-visible:!bg-transparent focus-visible:!shadow-none focus-visible:text-foreground active:!transform-none"
                   aria-label={`${draft.taskName || row.taskCode || "任务"}存在资源冲突`}
                   onClick={(event) => event.stopPropagation()}
                 >
