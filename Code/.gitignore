@@ -27,3 +27,7 @@ deployment/**/images/*.tar
 
 .worktrees
 *.db*
+
+# Local analysis/runtime artifacts
+graphify-out/
+dist/

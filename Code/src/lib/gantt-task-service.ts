@@ -12,9 +12,22 @@ import {
   synchronizeGanttTaskCategories,
   type GanttHierarchyDirection,
 } from "@/lib/gantt-hierarchy";
-import { normalizeGanttCalendarMode, type GanttCalendarMode } from "@/lib/gantt-calendar";
+import {
+  calculateTaskDurationDays,
+  normalizeGanttCalendarMode,
+  type GanttCalendarMode,
+} from "@/lib/gantt-calendar";
 import { calculateGanttCpm, type GanttCpmMetrics } from "@/lib/gantt-cpm";
 import { scheduleGanttTasks } from "@/lib/gantt-schedule";
+import {
+  deriveGanttPriority,
+  ganttSchedulePriorityFor,
+  GANTT_FS_DEPENDENCY_TYPE,
+  priorityRank,
+  UNSUPPORTED_GANTT_DEPENDENCY_REASON,
+  validateFsDependencies,
+  type GanttEffectivePriority,
+} from "@/lib/gantt-planning-rules";
 import { buildGanttOwnerIdentityIndex, buildGanttOwnerRollups } from "@/lib/gantt-owner-hierarchy";
 import {
   resolveEffectiveGanttOwnerMemberId,
@@ -53,7 +66,183 @@ type GanttScheduleUpdate = {
   durationDays: number;
   durationMinutes: number;
   estimatedWorkHours: number;
+  schedulePriority: number;
+  effectivePriority: GanttEffectivePriority;
   metrics: GanttCpmMetrics;
+};
+
+type GanttActualRollupUpdate = {
+  id: string;
+  actualStartDate: string;
+  actualEndDate: string;
+  actualStartSlot: string;
+  actualFinishSlot: string;
+  actualWorkHours: number;
+  progress: number;
+};
+
+type ParentRollupTask = {
+  id: string;
+  parentId: string | null;
+  parentBoundaryMode?: string;
+  startDate: string;
+  finishDate: string;
+  durationDays: number;
+  durationMinutes: number;
+  estimatedWorkHours: number;
+};
+
+type ParentActualRollupTask = {
+  id: string;
+  parentId: string | null;
+  actualStartDate: string;
+  actualEndDate: string;
+  actualStartSlot?: string;
+  actualFinishSlot?: string;
+  actualWorkHours: number;
+  progress: number;
+  estimatedWorkHours: number;
+  durationDays: number;
+};
+
+const isGanttPlanDate = (value: string | null | undefined) => /^\d{4}-\d{2}-\d{2}$/.test(value ?? "");
+
+/**
+ * Parent rows are summary rows by default. Their plan dates and estimate are
+ * derived from direct and indirect child work, unless the user explicitly
+ * changes the parent to a target/locked boundary.
+ */
+const rollupGanttParentSchedules = <T extends ParentRollupTask>(
+  tasks: T[],
+  mode: GanttCalendarMode,
+): T[] => {
+  const taskById = new Map(tasks.map((task) => [task.id, { ...task }]));
+  const childrenByParentId = new Map<string, string[]>();
+  tasks.forEach((task) => {
+    if (!task.parentId) return;
+    childrenByParentId.set(task.parentId, [...(childrenByParentId.get(task.parentId) ?? []), task.id]);
+  });
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+
+  const rollup = (taskId: string) => {
+    if (visited.has(taskId) || visiting.has(taskId)) return;
+    visiting.add(taskId);
+    const task = taskById.get(taskId);
+    const childIds = childrenByParentId.get(taskId) ?? [];
+    childIds.forEach(rollup);
+    if (task && childIds.length > 0 && task.parentBoundaryMode !== "TARGET" && task.parentBoundaryMode !== "LOCKED") {
+      const children = childIds.map((childId) => taskById.get(childId)).filter((child): child is T => Boolean(child));
+      const datedChildren = children.filter((child) => isGanttPlanDate(child.startDate) && isGanttPlanDate(child.finishDate));
+      if (datedChildren.length > 0) {
+        const startDate = datedChildren.map((child) => child.startDate).sort()[0];
+        const finishDate = datedChildren.map((child) => child.finishDate).sort().at(-1)!;
+        const durationDays = calculateTaskDurationDays(startDate, finishDate, mode);
+        taskById.set(taskId, {
+          ...task,
+          startDate,
+          finishDate,
+          durationDays,
+          durationMinutes: Math.round(durationDays * 450),
+          estimatedWorkHours: Math.round(children.reduce((sum, child) => sum + Math.max(0, Number(child.estimatedWorkHours) || 0), 0) * 100) / 100,
+        });
+      }
+    }
+    visiting.delete(taskId);
+    visited.add(taskId);
+  };
+
+  tasks.forEach((task) => rollup(task.id));
+  return tasks.map((task) => taskById.get(task.id) ?? task);
+};
+
+const normalizeActualSlot = (value: string | null | undefined, fallback: "AM" | "PM") => (
+  String(value ?? fallback).toUpperCase() === "PM" ? "PM" : "AM"
+);
+
+const compareActualPoints = (
+  left: { date: string; slot: "AM" | "PM" },
+  right: { date: string; slot: "AM" | "PM" },
+) => (
+  left.date.localeCompare(right.date) || (left.slot === "PM" ? 1 : 0) - (right.slot === "PM" ? 1 : 0)
+);
+
+/**
+ * Parent rows never accept direct actual-work input. They instead expose a
+ * weighted rollup of their direct children: planned work is the weight when
+ * available, with duration as a stable fallback. This gives a parent one
+ * coherent progress value without reserving any resource capacity itself.
+ */
+export const rollupGanttParentActuals = <T extends ParentActualRollupTask>(tasks: T[]): T[] => {
+  const taskById = new Map(tasks.map((task) => [task.id, { ...task }]));
+  const childrenByParentId = new Map<string, string[]>();
+  tasks.forEach((task) => {
+    if (!task.parentId) return;
+    childrenByParentId.set(task.parentId, [...(childrenByParentId.get(task.parentId) ?? []), task.id]);
+  });
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+
+  const rollup = (taskId: string) => {
+    if (visited.has(taskId) || visiting.has(taskId)) return;
+    visiting.add(taskId);
+    const task = taskById.get(taskId);
+    const childIds = childrenByParentId.get(taskId) ?? [];
+    childIds.forEach(rollup);
+    if (task && childIds.length > 0) {
+      const children = childIds.map((childId) => taskById.get(childId)).filter((child): child is T => Boolean(child));
+      const weightedProgress = children.reduce((total, child) => {
+        const estimate = Number(child.estimatedWorkHours);
+        const durationEstimate = Number(child.durationDays) * 7.5;
+        const weight = estimate > 0 ? estimate : durationEstimate > 0 ? durationEstimate : 1;
+        return {
+          progress: total.progress + Math.max(0, Math.min(100, Number(child.progress) || 0)) * weight,
+          weight: total.weight + weight,
+        };
+      }, { progress: 0, weight: 0 });
+      const allCompleted = children.length > 0 && children.every((child) => Number(child.progress) >= 100);
+      const startPoints = children
+        .filter((child) => isGanttPlanDate(child.actualStartDate))
+        .map<{ date: string; slot: "AM" | "PM" }>((child) => ({
+          date: child.actualStartDate,
+          slot: normalizeActualSlot(child.actualStartSlot, "AM"),
+        }))
+        .sort(compareActualPoints);
+      const finishPoints = children
+        .filter((child) => isGanttPlanDate(child.actualEndDate))
+        .map<{ date: string; slot: "AM" | "PM" }>((child) => ({
+          date: child.actualEndDate,
+          slot: normalizeActualSlot(child.actualFinishSlot, "PM"),
+        }))
+        .sort(compareActualPoints);
+      const completedWithActualEnd = allCompleted && finishPoints.length === children.length;
+      const calculatedProgress = weightedProgress.weight > 0
+        ? Math.round(weightedProgress.progress / weightedProgress.weight)
+        : 0;
+      const progress = completedWithActualEnd ? 100 : Math.min(99, calculatedProgress);
+      const firstStart = startPoints[0];
+      const lastFinish = completedWithActualEnd
+        ? finishPoints.at(-1)
+        : undefined;
+      taskById.set(taskId, {
+        ...task,
+        actualStartDate: firstStart?.date ?? "",
+        actualStartSlot: firstStart?.slot ?? "AM",
+        actualEndDate: lastFinish?.date ?? "",
+        actualFinishSlot: lastFinish?.slot ?? "PM",
+        actualWorkHours: Math.round(children.reduce(
+          (sum, child) => sum + Math.max(0, Number(child.actualWorkHours) || 0),
+          0,
+        ) * 100) / 100,
+        progress,
+      });
+    }
+    visiting.delete(taskId);
+    visited.add(taskId);
+  };
+
+  tasks.forEach((task) => rollup(task.id));
+  return tasks.map((task) => taskById.get(task.id) ?? task);
 };
 
 const bulkUpdateGanttTaskCodes = async (
@@ -111,15 +300,19 @@ const bulkUpdateGanttSchedule = async (
   client: GanttWriteClient,
   rows: GanttScheduleUpdate[],
   calculatedAt: Date,
+  options: { preservePlannedDates?: boolean } = {},
 ) => {
   if (rows.length === 0) return;
+  const preservePlannedDates = options.preservePlannedDates === true;
   await client.$executeRaw(Prisma.sql`
     UPDATE "ProjectGanttTask" AS target
-    SET "startDate" = source."startDate",
-        "finishDate" = source."finishDate",
-        "durationDays" = source."durationDays",
-        "durationMinutes" = source."durationMinutes",
-        "estimatedWorkHours" = source."estimatedWorkHours",
+    SET "startDate" = CASE WHEN ${preservePlannedDates} THEN target."startDate" ELSE source."startDate" END,
+        "finishDate" = CASE WHEN ${preservePlannedDates} THEN target."finishDate" ELSE source."finishDate" END,
+        "durationDays" = CASE WHEN ${preservePlannedDates} THEN target."durationDays" ELSE source."durationDays" END,
+        "durationMinutes" = CASE WHEN ${preservePlannedDates} THEN target."durationMinutes" ELSE source."durationMinutes" END,
+        "estimatedWorkHours" = CASE WHEN ${preservePlannedDates} THEN target."estimatedWorkHours" ELSE source."estimatedWorkHours" END,
+        "schedulePriority" = source."schedulePriority",
+        "effectivePriority" = source."effectivePriority",
         "earlyStartDate" = source."earlyStartDate",
         "earlyFinishDate" = source."earlyFinishDate",
         "lateStartDate" = source."lateStartDate",
@@ -136,6 +329,8 @@ const bulkUpdateGanttSchedule = async (
       ${row.durationDays}::double precision,
       ${row.durationMinutes}::integer,
       ${row.estimatedWorkHours}::double precision,
+      ${row.schedulePriority}::integer,
+      ${row.effectivePriority}::text,
       ${row.metrics.earlyStartDate}::text,
       ${row.metrics.earlyFinishDate}::text,
       ${row.metrics.lateStartDate}::text,
@@ -144,9 +339,38 @@ const bulkUpdateGanttSchedule = async (
       ${row.metrics.freeFloatMinutes ?? null}::integer,
       ${row.metrics.scheduleStatus}::text
     )`) )}) AS source(
-      "id", "startDate", "finishDate", "durationDays", "durationMinutes", "estimatedWorkHours",
+      "id", "startDate", "finishDate", "durationDays", "durationMinutes", "estimatedWorkHours", "schedulePriority", "effectivePriority",
       "earlyStartDate", "earlyFinishDate", "lateStartDate", "lateFinishDate",
       "totalFloatMinutes", "freeFloatMinutes", "scheduleStatus"
+    )
+    WHERE target."id" = source."id"
+  `);
+};
+
+const bulkUpdateGanttActualRollups = async (
+  client: GanttWriteClient,
+  rows: GanttActualRollupUpdate[],
+) => {
+  if (rows.length === 0) return;
+  await client.$executeRaw(Prisma.sql`
+    UPDATE "ProjectGanttTask" AS target
+    SET "actualStartDate" = source."actualStartDate",
+        "actualEndDate" = source."actualEndDate",
+        "actualStartSlot" = source."actualStartSlot",
+        "actualFinishSlot" = source."actualFinishSlot",
+        "actualWorkHours" = source."actualWorkHours",
+        "progress" = source."progress",
+        "updatedAt" = NOW()
+    FROM (VALUES ${Prisma.join(rows.map((row) => Prisma.sql`(
+      ${row.id}::text,
+      ${row.actualStartDate}::text,
+      ${row.actualEndDate}::text,
+      ${row.actualStartSlot}::text,
+      ${row.actualFinishSlot}::text,
+      ${row.actualWorkHours}::double precision,
+      ${row.progress}::integer
+    )`) )}) AS source(
+      "id", "actualStartDate", "actualEndDate", "actualStartSlot", "actualFinishSlot", "actualWorkHours", "progress"
     )
     WHERE target."id" = source."id"
   `);
@@ -270,39 +494,138 @@ export const recalculateProjectGanttSchedule = async (
   projectId: string,
   requestedMode?: GanttCalendarMode,
   client: GanttWriteClient = prisma,
+  options: { preservePlannedDates?: boolean } = {},
 ) => {
   const mode = requestedMode ?? await getProjectGanttCalendarMode(projectId, client);
   const [project, currentTasks] = await Promise.all([
-    client.project.findUnique({ where: { id: projectId }, select: { expectedEndDate: true } }),
+    client.project.findUnique({
+      where: { id: projectId },
+      select: { startDate: true, expectedEndDate: true, ganttHardFinishDate: true },
+    }),
     client.projectGanttTask.findMany({
     where: { projectId },
     orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
     include: {
       predecessorDependencies: {
-        select: { predecessorTaskId: true, type: true, lag: true, lagFormat: true },
+        select: { predecessorTaskId: true, type: true, lag: true, lagFormat: true, unsupportedReason: true },
       },
     },
     }),
   ]);
-  const scheduled = scheduleGanttTasks(currentTasks, mode);
-  const cpm = calculateGanttCpm(scheduled, mode, project?.expectedEndDate ?? "");
+  const unsupportedDependencyTaskIds = new Set(
+    currentTasks
+      .filter((task) => validateFsDependencies(task.predecessorDependencies).length > 0)
+      .map((task) => task.id),
+  );
+  const taskById = new Map(currentTasks.map((task) => [task.id, task]));
+  const invalidScheduleTaskIds = new Set(unsupportedDependencyTaskIds);
+  unsupportedDependencyTaskIds.forEach((taskId) => {
+    let parentId = taskById.get(taskId)?.parentId ?? null;
+    const seen = new Set<string>();
+    while (parentId && !seen.has(parentId)) {
+      seen.add(parentId);
+      invalidScheduleTaskIds.add(parentId);
+      parentId = taskById.get(parentId)?.parentId ?? null;
+    }
+  });
+  if (unsupportedDependencyTaskIds.size > 0) {
+    await client.projectGanttDependency.updateMany({
+      where: {
+        projectId,
+        type: { not: GANTT_FS_DEPENDENCY_TYPE },
+        unsupportedReason: "",
+      },
+      data: { unsupportedReason: UNSUPPORTED_GANTT_DEPENDENCY_REASON },
+    });
+  }
+  const schedulerTasks = currentTasks.map((task) => ({
+    ...task,
+    // Preserve imported non-FS data in the database, but never let it silently
+    // drive the FS-only scheduler. The affected task stays fixed until the
+    // relationship is explicitly repaired.
+    taskMode: unsupportedDependencyTaskIds.has(task.id) ? "DATES_FIXED" : task.taskMode,
+    predecessorDependencies: task.predecessorDependencies.filter(
+      (dependency) => Number(dependency.type ?? GANTT_FS_DEPENDENCY_TYPE) === GANTT_FS_DEPENDENCY_TYPE,
+    ),
+  }));
+  const schedulingFinishBoundary = isGanttPlanDate(project?.ganttHardFinishDate)
+    ? project!.ganttHardFinishDate
+    : project?.expectedEndDate ?? "";
+  const scheduled = rollupGanttParentActuals(rollupGanttParentSchedules(scheduleGanttTasks(schedulerTasks, mode, {
+    projectStartDate: project?.startDate ?? "",
+    expectedEndDate: schedulingFinishBoundary,
+  }), mode));
+  const cpm = calculateGanttCpm(scheduled, mode, schedulingFinishBoundary);
   const currentById = new Map(currentTasks.map((task) => [task.id, task]));
+  const childrenByParentId = new Map<string, string[]>();
+  currentTasks.forEach((task) => {
+    if (!task.parentId) return;
+    childrenByParentId.set(task.parentId, [...(childrenByParentId.get(task.parentId) ?? []), task.id]);
+  });
+  const effectivePriorityById = new Map<string, GanttEffectivePriority>();
+  const taskIdsWithSupportedDependencies = new Set<string>();
+  currentTasks.forEach((task) => {
+    task.predecessorDependencies.forEach((dependency) => {
+      if (Number(dependency.type ?? GANTT_FS_DEPENDENCY_TYPE) !== GANTT_FS_DEPENDENCY_TYPE) return;
+      taskIdsWithSupportedDependencies.add(task.id);
+      taskIdsWithSupportedDependencies.add(dependency.predecessorTaskId);
+    });
+  });
+  const resolvingPriority = new Set<string>();
+  const resolveEffectivePriority = (taskId: string): GanttEffectivePriority => {
+    const cached = effectivePriorityById.get(taskId);
+    if (cached) return cached;
+    const task = currentById.get(taskId);
+    if (!task || resolvingPriority.has(taskId)) return "MEDIUM";
+    resolvingPriority.add(taskId);
+    const childPriorities = (childrenByParentId.get(taskId) ?? []).map(resolveEffectivePriority);
+    const effectivePriority = childPriorities.length > 0
+      ? childPriorities.reduce((highest, candidate) => (
+        priorityRank[candidate] > priorityRank[highest] ? candidate : highest
+      ), "LOW" as GanttEffectivePriority)
+      : deriveGanttPriority({
+        userPriority: task.userPriority,
+        isCritical: cpm.metricsByTaskId.get(taskId)?.isCritical,
+        hasSupportedDependency: taskIdsWithSupportedDependencies.has(task.id),
+      }).effectivePriority;
+    resolvingPriority.delete(taskId);
+    effectivePriorityById.set(taskId, effectivePriority);
+    return effectivePriority;
+  };
   const updates = scheduled.flatMap((task) => {
     const current = currentById.get(task.id)!;
-    const metrics = cpm.metricsByTaskId.get(task.id);
+    const calculatedMetrics = cpm.metricsByTaskId.get(task.id);
+    const metrics = calculatedMetrics && invalidScheduleTaskIds.has(task.id)
+      ? {
+        ...calculatedMetrics,
+        earlyStartDate: "",
+        earlyFinishDate: "",
+        lateStartDate: "",
+        lateFinishDate: "",
+        totalFloatMinutes: null,
+        freeFloatMinutes: null,
+        scheduleStatus: "INVALID_DEPENDENCY" as const,
+        isCritical: false,
+      }
+      : calculatedMetrics;
     if (!metrics) return [];
-    const changed = current.startDate !== task.startDate
+    const effectivePriority = resolveEffectivePriority(task.id);
+    const schedulePriority = ganttSchedulePriorityFor(effectivePriority);
+    const plannedValuesChanged = current.startDate !== task.startDate
       || current.finishDate !== task.finishDate
       || current.durationDays !== task.durationDays
       || current.durationMinutes !== task.durationMinutes
-      || Math.abs(current.estimatedWorkHours - (task.estimatedWorkHours ?? task.durationDays * 7.5)) > 0.001
-      || current.earlyStartDate !== metrics.earlyStartDate
+      || Math.abs(current.estimatedWorkHours - (task.estimatedWorkHours ?? task.durationDays * 7.5)) > 0.001;
+    const calculatedValuesChanged = current.earlyStartDate !== metrics.earlyStartDate
       || current.earlyFinishDate !== metrics.earlyFinishDate
       || current.lateStartDate !== metrics.lateStartDate
       || current.lateFinishDate !== metrics.lateFinishDate
       || current.totalFloatMinutes !== metrics.totalFloatMinutes
       || current.freeFloatMinutes !== metrics.freeFloatMinutes
-      || current.scheduleStatus !== metrics.scheduleStatus;
+      || current.scheduleStatus !== metrics.scheduleStatus
+      || current.effectivePriority !== effectivePriority
+      || current.schedulePriority !== schedulePriority;
+    const changed = (!options.preservePlannedDates && plannedValuesChanged) || calculatedValuesChanged;
     return changed ? [{
       id: task.id,
       startDate: task.startDate,
@@ -310,11 +633,38 @@ export const recalculateProjectGanttSchedule = async (
       durationDays: task.durationDays,
       durationMinutes: task.durationMinutes ?? Math.round(task.durationDays * 450),
       estimatedWorkHours: task.estimatedWorkHours ?? task.durationDays * 7.5,
+      schedulePriority,
+      effectivePriority,
       metrics,
     }] : [];
   });
 
-  await bulkUpdateGanttSchedule(client, updates, new Date());
+  const actualRollupUpdates = scheduled.flatMap((task) => {
+    const current = currentById.get(task.id)!;
+    if (!childrenByParentId.has(task.id)) return [];
+    const actualStartSlot = normalizeActualSlot(task.actualStartSlot, "AM");
+    const actualFinishSlot = normalizeActualSlot(task.actualFinishSlot, "PM");
+    const changed = current.actualStartDate !== task.actualStartDate
+      || current.actualEndDate !== task.actualEndDate
+      || normalizeActualSlot(current.actualStartSlot, "AM") !== actualStartSlot
+      || normalizeActualSlot(current.actualFinishSlot, "PM") !== actualFinishSlot
+      || Math.abs(Number(current.actualWorkHours) - Number(task.actualWorkHours)) > 0.001
+      || Number(current.progress) !== Number(task.progress);
+    return changed ? [{
+      id: task.id,
+      actualStartDate: task.actualStartDate,
+      actualEndDate: task.actualEndDate,
+      actualStartSlot,
+      actualFinishSlot,
+      actualWorkHours: Math.round(Number(task.actualWorkHours) * 100) / 100,
+      progress: Math.round(Number(task.progress)),
+    }] : [];
+  });
+
+  await Promise.all([
+    bulkUpdateGanttSchedule(client, updates, new Date(), options),
+    bulkUpdateGanttActualRollups(client, actualRollupUpdates),
+  ]);
   return mode;
 };
 
@@ -324,11 +674,19 @@ export const replaceGanttTaskDependencies = async (
   successorTaskId: string,
   dependencies: Array<{ predecessorTaskId: string; type?: number; lag?: number; lagFormat?: number }>,
 ) => {
+  if (dependencies.some((dependency) => dependency.predecessorTaskId === successorTaskId)) {
+    throw new Error("任务不能将自身设为紧前任务");
+  }
   const uniqueDependencies = [...new Map(
     dependencies
-      .filter((dependency) => dependency.predecessorTaskId && dependency.predecessorTaskId !== successorTaskId)
+      .filter((dependency) => dependency.predecessorTaskId)
       .map((dependency) => [dependency.predecessorTaskId, dependency]),
   ).values()];
+
+  const unsupported = validateFsDependencies(uniqueDependencies);
+  if (unsupported.length > 0) {
+    throw new Error(`${unsupported[0].message}。新建或修改依赖时仅允许 FS。`);
+  }
 
   if (uniqueDependencies.length > 0) {
     const validCount = await tx.projectGanttTask.count({
@@ -342,6 +700,41 @@ export const replaceGanttTaskDependencies = async (
     }
   }
 
+  // Validate the graph before replacing rows. A dependency cycle cannot be
+  // scheduled deterministically, and previous versions otherwise allowed it
+  // to reach the scheduler as a silent date-ordering error.
+  const existingDependencies = await tx.projectGanttDependency.findMany({
+    where: { projectId },
+    select: { predecessorTaskId: true, successorTaskId: true },
+  });
+  const nextDependencies = [
+    ...existingDependencies.filter((dependency) => dependency.successorTaskId !== successorTaskId),
+    ...uniqueDependencies.map((dependency) => ({
+      predecessorTaskId: dependency.predecessorTaskId,
+      successorTaskId,
+    })),
+  ];
+  const successorsByPredecessor = new Map<string, string[]>();
+  nextDependencies.forEach((dependency) => {
+    successorsByPredecessor.set(dependency.predecessorTaskId, [
+      ...(successorsByPredecessor.get(dependency.predecessorTaskId) ?? []),
+      dependency.successorTaskId,
+    ]);
+  });
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (taskId: string): boolean => {
+    if (visiting.has(taskId)) return true;
+    if (visited.has(taskId)) return false;
+    visiting.add(taskId);
+    const hasCycle = (successorsByPredecessor.get(taskId) ?? []).some(visit);
+    visiting.delete(taskId);
+    visited.add(taskId);
+    return hasCycle;
+  };
+  const hasCycle = [...successorsByPredecessor.keys()].some(visit);
+  if (hasCycle) throw new Error("紧前任务不能形成循环依赖");
+
   await tx.projectGanttDependency.deleteMany({ where: { successorTaskId } });
   if (uniqueDependencies.length === 0) return;
 
@@ -350,9 +743,10 @@ export const replaceGanttTaskDependencies = async (
       projectId,
       successorTaskId,
       predecessorTaskId: dependency.predecessorTaskId,
-      type: Number.isInteger(dependency.type) ? dependency.type! : 1,
+      type: GANTT_FS_DEPENDENCY_TYPE,
       lag: Number.isInteger(dependency.lag) ? dependency.lag! : 0,
       lagFormat: Number.isInteger(dependency.lagFormat) ? dependency.lagFormat! : 7,
+      unsupportedReason: "",
     })),
   });
 };
@@ -579,7 +973,7 @@ const taskScalarSelect = {
   ownerMemberId: true,
   ownerLinks: {
     orderBy: { createdAt: "asc" },
-    select: { projectMemberId: true },
+    select: { projectMemberId: true, unitsPercent: true, plannedWorkHours: true, assignmentRole: true },
   },
   taskCode: true,
   taskCategory: true,
@@ -597,6 +991,16 @@ const taskScalarSelect = {
   progress: true,
   predecessorTask: true,
   taskMode: true,
+  startSlot: true,
+  finishSlot: true,
+  actualStartSlot: true,
+  actualFinishSlot: true,
+  parentBoundaryMode: true,
+  schedulePriority: true,
+  userPriority: true,
+  effectivePriority: true,
+  effortDriven: true,
+  parallelizable: true,
   isMilestone: true,
   externalUid: true,
   wbsCode: true,
@@ -631,9 +1035,27 @@ export const ganttSnapshotOwnerMemberIds = (task: Record<string, unknown>) => {
 export const ganttSnapshotOwnerLinkRows = (
   tasks: Array<Record<string, unknown>>,
   validOwnerIds: ReadonlySet<string>,
-) => tasks.flatMap((task) => ganttSnapshotOwnerMemberIds(task)
-  .filter((projectMemberId) => validOwnerIds.has(projectMemberId))
-  .map((projectMemberId) => ({ taskId: String(task.id), projectMemberId })));
+) => tasks.flatMap((task) => {
+  const ownerLinks = Array.isArray(task.ownerLinks) ? task.ownerLinks : [];
+  const linkByOwnerId = new Map(ownerLinks.flatMap((link) => {
+    if (!link || typeof link !== "object" || !("projectMemberId" in link)) return [];
+    const value = link as Record<string, unknown>;
+    const projectMemberId = String(value.projectMemberId ?? "").trim();
+    return projectMemberId ? [[projectMemberId, value] as const] : [];
+  }));
+  return ganttSnapshotOwnerMemberIds(task)
+    .filter((projectMemberId) => validOwnerIds.has(projectMemberId))
+    .map((projectMemberId) => {
+      const link = linkByOwnerId.get(projectMemberId);
+      return {
+        taskId: String(task.id),
+        projectMemberId,
+        unitsPercent: Math.max(1, Math.min(100, Math.round(Number(link?.unitsPercent ?? 100) || 100))),
+        plannedWorkHours: Math.max(0, Number(link?.plannedWorkHours ?? 0) || 0),
+        assignmentRole: String(link?.assignmentRole ?? "EXECUTOR").trim() || "EXECUTOR",
+      };
+    });
+});
 
 const dependencyScalarSelect = {
   id: true,
@@ -645,6 +1067,7 @@ const dependencyScalarSelect = {
   type: true,
   lag: true,
   lagFormat: true,
+  unsupportedReason: true,
 } satisfies Prisma.ProjectGanttDependencySelect;
 
 const scheduleMetadataScalarSelect = {
@@ -705,6 +1128,22 @@ const taskSnapshotCreateData = (
     progress: Number(rawTask.progress ?? 0),
     predecessorTask: String(rawTask.predecessorTask ?? ""),
     taskMode: String(rawTask.taskMode ?? "AUTO"),
+    startSlot: String(rawTask.startSlot ?? "AM").toUpperCase() === "PM" ? "PM" : "AM",
+    finishSlot: String(rawTask.finishSlot ?? "PM").toUpperCase() === "AM" ? "AM" : "PM",
+    actualStartSlot: String(rawTask.actualStartSlot ?? "AM").toUpperCase() === "PM" ? "PM" : "AM",
+    actualFinishSlot: String(rawTask.actualFinishSlot ?? "PM").toUpperCase() === "AM" ? "AM" : "PM",
+    parentBoundaryMode: ["ROLLUP", "TARGET", "LOCKED"].includes(String(rawTask.parentBoundaryMode))
+      ? String(rawTask.parentBoundaryMode)
+      : "ROLLUP",
+    schedulePriority: Math.max(0, Math.min(1000, Math.round(Number(rawTask.schedulePriority ?? 500) || 500))),
+    userPriority: ["LOW", "MEDIUM", "HIGH"].includes(String(rawTask.userPriority).toUpperCase())
+      ? String(rawTask.userPriority).toUpperCase()
+      : "MEDIUM",
+    effectivePriority: ["LOW", "MEDIUM", "HIGH", "HIGHEST"].includes(String(rawTask.effectivePriority).toUpperCase())
+      ? String(rawTask.effectivePriority).toUpperCase()
+      : "MEDIUM",
+    effortDriven: Boolean(rawTask.effortDriven ?? false),
+    parallelizable: Boolean(rawTask.parallelizable ?? false),
     isMilestone: Boolean(rawTask.isMilestone ?? false),
     externalUid: String(rawTask.externalUid ?? ""),
     wbsCode: String(rawTask.wbsCode ?? ""),
@@ -1421,6 +1860,22 @@ export const restoreGanttTaskDeletionBatch = async (params: {
           progress: Number(rawTask.progress ?? 0),
           predecessorTask: String(rawTask.predecessorTask ?? ""),
           taskMode: String(rawTask.taskMode ?? "AUTO"),
+          startSlot: String(rawTask.startSlot ?? "AM").toUpperCase() === "PM" ? "PM" : "AM",
+          finishSlot: String(rawTask.finishSlot ?? "PM").toUpperCase() === "AM" ? "AM" : "PM",
+          actualStartSlot: String(rawTask.actualStartSlot ?? "AM").toUpperCase() === "PM" ? "PM" : "AM",
+          actualFinishSlot: String(rawTask.actualFinishSlot ?? "PM").toUpperCase() === "AM" ? "AM" : "PM",
+          parentBoundaryMode: ["ROLLUP", "TARGET", "LOCKED"].includes(String(rawTask.parentBoundaryMode))
+            ? String(rawTask.parentBoundaryMode)
+            : "ROLLUP",
+          schedulePriority: Math.max(0, Math.min(1000, Math.round(Number(rawTask.schedulePriority ?? 500) || 500))),
+          userPriority: ["LOW", "MEDIUM", "HIGH"].includes(String(rawTask.userPriority).toUpperCase())
+            ? String(rawTask.userPriority).toUpperCase()
+            : "MEDIUM",
+          effectivePriority: ["LOW", "MEDIUM", "HIGH", "HIGHEST"].includes(String(rawTask.effectivePriority).toUpperCase())
+            ? String(rawTask.effectivePriority).toUpperCase()
+            : "MEDIUM",
+          effortDriven: Boolean(rawTask.effortDriven ?? false),
+          parallelizable: Boolean(rawTask.parallelizable ?? false),
           isMilestone: Boolean(rawTask.isMilestone ?? false),
           externalUid: String(rawTask.externalUid ?? ""),
           wbsCode: String(rawTask.wbsCode ?? ""),
@@ -1428,6 +1883,7 @@ export const restoreGanttTaskDeletionBatch = async (params: {
           calendarUid: String(rawTask.calendarUid ?? ""),
           constraintType: rawTask.constraintType === null || rawTask.constraintType === undefined ? null : Number(rawTask.constraintType),
           constraintDate: String(rawTask.constraintDate ?? ""),
+          resourceNotBeforeDate: String(rawTask.resourceNotBeforeDate ?? ""),
           baselineStartDate: String(rawTask.baselineStartDate ?? ""),
           baselineFinishDate: String(rawTask.baselineFinishDate ?? ""),
           baselineCost: Number(rawTask.baselineCost ?? 0),
@@ -1460,6 +1916,7 @@ export const restoreGanttTaskDeletionBatch = async (params: {
         type: Number(dependency.type ?? 1),
         lag: Number(dependency.lag ?? 0),
         lagFormat: Number(dependency.lagFormat ?? 7),
+        unsupportedReason: String(dependency.unsupportedReason ?? ""),
       }));
     const skippedDependencyCount = snapshot.dependencies.length - dependencyRows.length;
     if (skippedDependencyCount > 0) warnings.push(`${skippedDependencyCount} 条依赖因关联任务不存在而未恢复`);
@@ -1675,10 +2132,11 @@ const cloneGanttTaskData = (
   task: Prisma.ProjectGanttTaskGetPayload<{ select: typeof taskScalarSelect }>,
   parentId: string | null,
   sortOrder: number,
+  ownerMemberId: string | null,
 ): Prisma.ProjectGanttTaskUncheckedCreateInput => ({
   projectId: task.projectId,
   parentId,
-  ownerMemberId: task.ownerMemberId,
+  ownerMemberId,
   taskCode: "",
   taskCategory: task.taskCategory,
   taskName: task.taskName,
@@ -1695,6 +2153,16 @@ const cloneGanttTaskData = (
   progress: task.progress,
   predecessorTask: "",
   taskMode: task.taskMode,
+  startSlot: task.startSlot,
+  finishSlot: task.finishSlot,
+  actualStartSlot: task.actualStartSlot,
+  actualFinishSlot: task.actualFinishSlot,
+  parentBoundaryMode: task.parentBoundaryMode,
+  schedulePriority: task.schedulePriority,
+  userPriority: task.userPriority,
+  effectivePriority: task.effectivePriority,
+  effortDriven: task.effortDriven,
+  parallelizable: task.parallelizable,
   isMilestone: task.isMilestone,
   externalUid: "",
   wbsCode: "",
@@ -1812,6 +2280,7 @@ export const copyProjectGanttTasks = async (params: {
     const selectedSet = new Set(sourceTaskIds);
     const sourceById = new Map(selectedTasks.map((task) => [task.id, task]));
     const orderedSource = orderGanttTasksByHierarchy(allTasks).filter((task) => selectedSet.has(task.id)).map((task) => sourceById.get(task.id)!);
+    const sourceParentIds = new Set(allTasks.map((task) => task.parentId).filter((taskId): taskId is string => Boolean(taskId)));
     const roots = selectedStructureRoots(allTasks, sourceTaskIds);
     const rootSet = new Set(roots);
     const targetParentId = anchor.parentId;
@@ -1823,16 +2292,37 @@ export const copyProjectGanttTasks = async (params: {
     const childCursor = new Map<string, number>();
     for (const source of orderedSource) {
       const copiedParentId = source.parentId && selectedSet.has(source.parentId) ? newIdByOldId.get(source.parentId) ?? null : targetParentId;
+      // Parent ownership is a derived rollup. Copying a parent alone must not
+      // turn its aggregate owners into direct assignments on a new leaf.
+      const sourceIsParent = sourceParentIds.has(source.id);
+      const directOwnerMemberId = sourceIsParent ? null : source.ownerMemberId;
       const rootIndex = rootSet.has(source.id) ? rootIds.length : 0;
       const nextChildOrder = copiedParentId && !rootSet.has(source.id) ? (childCursor.get(copiedParentId) ?? 0) + 1 : 0;
       if (copiedParentId && !rootSet.has(source.id)) childCursor.set(copiedParentId, nextChildOrder);
       const created = await tx.projectGanttTask.create({
-        data: cloneGanttTaskData(source, copiedParentId, rootSet.has(source.id) ? insertIndex + rootIndex + 1 : nextChildOrder),
+        data: cloneGanttTaskData(
+          source,
+          copiedParentId,
+          rootSet.has(source.id) ? insertIndex + rootIndex + 1 : nextChildOrder,
+          directOwnerMemberId,
+        ),
       });
-      const copiedOwnerMemberIds = ganttSnapshotOwnerMemberIds(source as unknown as Record<string, unknown>);
+      const copiedOwnerMemberIds = sourceIsParent
+        ? []
+        : ganttSnapshotOwnerMemberIds(source as unknown as Record<string, unknown>).slice(0, 1);
       if (copiedOwnerMemberIds.length > 0) {
+        const ownerLinkByMemberId = new Map(source.ownerLinks.map((link) => [link.projectMemberId, link]));
         await tx.projectGanttTaskOwner.createMany({
-          data: copiedOwnerMemberIds.map((projectMemberId) => ({ taskId: created.id, projectMemberId })),
+          data: copiedOwnerMemberIds.map((projectMemberId) => {
+            const link = ownerLinkByMemberId.get(projectMemberId);
+            return {
+              taskId: created.id,
+              projectMemberId,
+              unitsPercent: Math.max(1, Math.min(100, Math.round(Number(link?.unitsPercent ?? 100) || 100))),
+              plannedWorkHours: Math.max(0, Number(link?.plannedWorkHours ?? 0) || 0),
+              assignmentRole: String(link?.assignmentRole ?? "EXECUTOR").trim() || "EXECUTOR",
+            };
+          }),
           skipDuplicates: true,
         });
       }
@@ -1848,6 +2338,7 @@ export const copyProjectGanttTasks = async (params: {
       type: dependency.type,
       lag: dependency.lag,
       lagFormat: dependency.lagFormat,
+      unsupportedReason: dependency.unsupportedReason,
     })).filter((dependency) => dependency.successorTaskId && dependency.predecessorTaskId !== dependency.successorTaskId);
     if (dependencyRows.length > 0) await tx.projectGanttDependency.createMany({ data: dependencyRows, skipDuplicates: true });
     const ids = orderedSource.map((task) => newIdByOldId.get(task.id)!).filter(Boolean);

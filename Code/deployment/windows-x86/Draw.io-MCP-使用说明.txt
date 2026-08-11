@@ -1,0 +1,35 @@
+Ceastar PMS Draw.io MCP 使用说明
+
+一、用途
+项目进度管理可以导出“单代号网络图（AON）”和“双代号网络图（AOA）”的 .drawio 文件。
+该文件是可编辑的 Draw.io 文件：AON 用任务节点表达工作，AOA 用活动箭线和事件节点表达工作。
+
+二、MCP 的边界
+Draw.io MCP 仅供支持 MCP 的桌面客户端调用，用来打开和编辑已经导出的 .drawio 文件。
+PMS 服务不会调用 Windows 桌面浏览器，也不会替用户操作 Draw.io。
+没有 MCP 时，仍可双击 .drawio 文件，使用 draw.io Desktop 或 diagrams.net 打开。
+
+三、准备条件
+1. 安装 Node.js LTS（18 或更高版本），安装后在命令提示符运行：npx.cmd --version
+2. 安装 draw.io Desktop，或确保客户端可访问 diagrams.net。
+3. 使用 Ceastar PMS 完整部署包或更新包后，系统会自动将 drawio-mcp.ps1 和配置模板写入：C:\ProgramData\Ceastar-PMS\。
+
+四、首次验证
+在 PowerShell 中运行：
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\Ceastar-PMS\drawio-mcp.ps1 -Install
+
+该命令通过 npx.cmd 下载并验证官方 @drawio/mcp@1.5.0。首次下载需要能访问 npm；后续启动通常使用本机缓存。
+
+五、配置 MCP 客户端
+将 drawio-mcp-config.json 中的 drawio 配置合并到所使用 MCP 客户端的配置文件。
+该配置通过 PowerShell 调用 drawio-mcp.ps1，脚本再执行：npx.cmd -y @drawio/mcp@1.5.0。
+
+六、导出与编辑
+1. 在 PMS 项目进度管理中选择导出单代号或双代号网络图。
+2. 保存下载的 .drawio 文件。
+3. 在 Draw.io 或已配置 Draw.io MCP 的客户端中打开文件。
+4. 可以调整布局、添加批注和打印；任务、依赖和关系标签来自导出时的项目数据。
+
+七、说明
+网络图只使用甘特叶子任务。连接到汇总任务或已不存在任务的依赖不会被绘制，并会在图内显示说明。
+如果项目存在循环依赖，文件仍会生成以便排查，但布局无法代表正常的前后顺序。

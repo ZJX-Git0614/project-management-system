@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 
 import { ensureMutableProject, err, notFound, ok } from "@/lib/api-utils";
+import { getGanttPlanMutationBlockReasonForActor } from "@/lib/gantt-baseline-service";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import {
   applyProjectResourceScheduleCandidate,
@@ -10,7 +11,7 @@ import {
   serializeResourceCandidate,
   serializeResourceConflict,
 } from "@/lib/gantt-resource-service";
-import type { ResourceScheduleCandidateKind } from "@/lib/gantt-resource-schedule";
+import type { ResourceScheduleCandidateKind, ResourceScheduleModeOverride } from "@/lib/gantt-resource-schedule";
 
 const candidateKinds = new Set<ResourceScheduleCandidateKind>(RESOURCE_SCHEDULE_CANDIDATE_KINDS);
 
@@ -24,18 +25,30 @@ export async function GET(
   if (!(await userHasPermission(user, "project-gantt:view"))) return err("权限不足", 403);
   try {
     const includeCandidates = req.nextUrl.searchParams.get("includeCandidates") === "1";
-    const { context, result } = includeCandidates
-      ? await resourceScheduleAnalysis(id)
-      : await resourceConflictAnalysis(id);
-    const candidates = includeCandidates
-      ? (result as Awaited<ReturnType<typeof resourceScheduleAnalysis>>["result"]).candidates
-      : [];
     const isAdmin = user.assignedRoleNames.includes("管理员");
+    if (includeCandidates) {
+      const modeOverride = String(req.nextUrl.searchParams.get("modeOverride") ?? "PRESERVE") as ResourceScheduleModeOverride;
+      if (!["PRESERVE", "AUTO", "DURATION_FORWARD", "DURATION_BACKWARD"].includes(modeOverride)) {
+        return err("子任务排期方式覆盖无效");
+      }
+      const scopeRootTaskIds = req.nextUrl.searchParams.getAll("scopeRootTaskId").map((value) => value.trim()).filter(Boolean);
+      const { context, result, scope } = await resourceScheduleAnalysis(id, { scopeRootTaskIds, modeOverride });
+      return ok({
+        revision: context.currentProject.ganttRevision,
+        snapshotHash: result.snapshotHash,
+        scope,
+        conflicts: result.conflicts.map((conflict) => serializeResourceConflict(conflict, context.summaries, isAdmin)),
+        issues: result.issues ?? [],
+        candidates: result.candidates.map((candidate) => serializeResourceCandidate(candidate, context.summaries, isAdmin)),
+      });
+    }
+    const { context, result } = await resourceConflictAnalysis(id);
     return ok({
       revision: context.currentProject.ganttRevision,
       snapshotHash: result.snapshotHash,
       conflicts: result.conflicts.map((conflict) => serializeResourceConflict(conflict, context.summaries, isAdmin)),
-      candidates: candidates.map((candidate) => serializeResourceCandidate(candidate, context.summaries, isAdmin)),
+      issues: result.issues ?? [],
+      candidates: [],
     });
   } catch (error) {
     return notFound(error instanceof Error ? error.message : "项目");
@@ -52,11 +65,24 @@ export async function POST(
   if (!(await userHasPermission(user, "project-gantt:edit"))) return err("权限不足", 403);
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
+  const baselineLockReason = await getGanttPlanMutationBlockReasonForActor({
+    projectId: id,
+    userId: user.userId,
+    isAdministrator: user.assignedRoleNames.includes("管理员"),
+  });
+  if (baselineLockReason) return err(baselineLockReason, 409, "GANTT_BASELINE_LOCKED");
   const body = await req.json() as Record<string, unknown>;
   const candidateKind = String(body.candidateKind ?? "") as ResourceScheduleCandidateKind;
   if (!candidateKinds.has(candidateKind)) return err("优化排期方案无效");
   const requestedRevision = Number(body.revision);
   const requestedSnapshotHash = String(body.snapshotHash ?? "");
+  const modeOverride = String(body.modeOverride ?? "PRESERVE") as ResourceScheduleModeOverride;
+  if (!["PRESERVE", "AUTO", "DURATION_FORWARD", "DURATION_BACKWARD"].includes(modeOverride)) {
+    return err("子任务排期方式覆盖无效");
+  }
+  const scopeRootTaskIds = Array.isArray(body.scopeRootTaskIds)
+    ? body.scopeRootTaskIds.map((value) => String(value).trim()).filter(Boolean)
+    : [];
   try {
     return ok(await applyProjectResourceScheduleCandidate({
       projectId: id,
@@ -64,6 +90,8 @@ export async function POST(
       expectedRevision: requestedRevision,
       expectedSnapshotHash: requestedSnapshotHash,
       operator: user.displayName,
+      scopeRootTaskIds,
+      modeOverride,
     }));
   } catch (error) {
     return err(error instanceof Error ? error.message : "优化排期应用失败", 409, "RESOURCE_SCHEDULE_APPLY_FAILED");

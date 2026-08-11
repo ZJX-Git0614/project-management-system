@@ -112,6 +112,8 @@ export const PERMISSION_TREE = [
           { key: "project-gantt:create", label: "新增甘特任务", type: "action" },
           { key: "project-gantt:edit", label: "编辑甘特任务", type: "action" },
           { key: "project-gantt:delete", label: "删除甘特任务", type: "action" },
+          { key: "project-gantt:baseline-draft", label: "维护 WBS 基线草案", type: "action" },
+          { key: "project-gantt:baseline-publish", label: "发布或变更 WBS 基线", type: "action" },
           { key: "project-gantt:baseline-request", label: "申请发布 WBS 基线", type: "action" },
         ],
       },

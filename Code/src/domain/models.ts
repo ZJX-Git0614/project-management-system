@@ -17,7 +17,12 @@ export interface Project extends BaseEntity {
   expectedEndDate: string;
   status: ProjectStatus;
   ganttCalendarMode?: "CALENDAR_DAYS" | "WORKING_DAYS";
+  ganttHardFinishDate?: string;
   ganttRevision?: number;
+  ganttBaselineVersion?: number;
+  ganttBaselineState?: "DRAFT" | "PUBLISHED" | "CHANGE_DRAFT" | string;
+  ganttBaselinePublishedAt?: string | null;
+  ganttBaselinePublishedBy?: string;
 }
 
 export interface ProjectGanttTask extends BaseEntity {
@@ -55,6 +60,16 @@ export interface ProjectGanttTask extends BaseEntity {
   predecessorTaskIds?: string[];
   predecessorDependencies?: ProjectGanttDependency[];
   taskMode?: string;
+  startSlot?: "AM" | "PM" | string;
+  finishSlot?: "AM" | "PM" | string;
+  actualStartSlot?: "AM" | "PM" | string;
+  actualFinishSlot?: "AM" | "PM" | string;
+  parentBoundaryMode?: "ROLLUP" | "TARGET" | "LOCKED" | string;
+  schedulePriority?: number;
+  userPriority?: "LOW" | "MEDIUM" | "HIGH" | string;
+  effectivePriority?: "LOW" | "MEDIUM" | "HIGH" | "HIGHEST" | string;
+  effortDriven?: boolean;
+  parallelizable?: boolean;
   isMilestone?: boolean;
   externalUid?: string;
   wbsCode?: string;
@@ -81,6 +96,7 @@ export interface ProjectGanttDependency extends BaseEntity {
   type: number;
   lag: number;
   lagFormat: number;
+  unsupportedReason?: string;
   predecessorTask?: Pick<ProjectGanttTask, "id" | "taskCode" | "taskName">;
 }
 
@@ -186,6 +202,9 @@ export interface ProjectMember extends BaseEntity {
   roleName: string;
   roleNames?: string[];
   personName: string;
+  capacityHoursPerDay?: number;
+  productivityRate?: number;
+  maxConcurrentAssignments?: number;
 }
 
 export interface ProjectDocumentFile extends BaseEntity {

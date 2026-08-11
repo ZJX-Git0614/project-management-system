@@ -4,12 +4,23 @@ import { prisma } from "@/lib/prisma";
 import { ensureMutableProject, err, notFound, ok } from "@/lib/api-utils";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import {
-  calculateTaskFinishDate,
+  getGanttPlanMutationBlockReasonForActor,
+  hasGanttTaskPlanningMutation,
+  isProjectGanttManager,
+} from "@/lib/gantt-baseline-service";
+import {
   estimatedHoursForDuration,
   isValidGanttDurationDays,
-  normalizeTaskStartDate,
   roundGanttHours,
 } from "@/lib/gantt-calendar";
+import {
+  deriveGanttPriority,
+  ganttSchedulePriorityFor,
+  normalizeGanttCompletion,
+  normalizeGanttHalfDay,
+  normalizeGanttUserPriority,
+  resolveGanttTaskPlan,
+} from "@/lib/gantt-planning-rules";
 import {
   deleteGanttTaskSubtrees,
   GanttRevisionConflictError,
@@ -21,7 +32,15 @@ import {
   serializeGanttTaskList,
 } from "@/lib/gantt-task-service";
 import { synchronizeGanttTaskCategoriesAfterNameChange } from "@/lib/gantt-hierarchy";
-import { applyGanttOwnerChange, applyGanttOwnerSet, GanttOwnerReadOnlyError } from "@/lib/gantt-owner-service";
+import {
+  applyGanttOwnerChange,
+  applyGanttOwnerSet,
+  GanttOwnerReadOnlyError,
+  hasGanttOwnerSetChange,
+} from "@/lib/gantt-owner-service";
+import { previewProjectManualScheduleImpact, resourceConflictAnalysis } from "@/lib/gantt-resource-service";
+
+const PARENT_BOUNDARY_MODES = new Set(["ROLLUP", "TARGET", "LOCKED"]);
 
 export async function PUT(
   req: NextRequest,
@@ -37,11 +56,28 @@ export async function PUT(
 
   const existing = await prisma.projectGanttTask.findFirst({
     where: { id: taskId, projectId: id },
-    include: { ownerLinks: { select: { projectMemberId: true } } },
+    include: {
+      ownerLinks: { select: { projectMemberId: true } },
+      predecessorDependencies: {
+        select: { predecessorTaskId: true, type: true, lag: true, lagFormat: true },
+      },
+    },
   });
   if (!existing) return notFound("甘特任务");
 
   const body = await req.json() as Record<string, unknown>;
+  // Parent owners are derived from their leaves. The inline grid submits a
+  // full draft for every edit, so parent owner ids must be ignored here
+  // instead of treating the derived multi-owner value as an invalid leaf edit.
+  const childCount = await prisma.projectGanttTask.count({ where: { projectId: id, parentId: taskId } });
+  const isParentTask = childCount > 0;
+  const planningMutation = hasGanttTaskPlanningMutation(existing, body);
+  const baselineLockReason = await getGanttPlanMutationBlockReasonForActor({
+    projectId: id,
+    userId: user.userId,
+    isAdministrator: user.assignedRoleNames.includes("管理员"),
+  });
+  if (baselineLockReason && planningMutation) return err(baselineLockReason, 409, "GANTT_BASELINE_LOCKED");
   const requestedTaskCategory = "taskCategory" in body
     ? String(body.taskCategory ?? "").trim()
     : existing.taskCategory;
@@ -51,20 +87,65 @@ export async function PUT(
   const taskName = String("taskName" in body ? body.taskName ?? "" : existing.taskName).trim();
   const taskDescription = String(body.taskDescription ?? existing.taskDescription ?? "").trim() || "无";
   const requestedStartDate = String("startDate" in body ? body.startDate ?? "" : existing.startDate).trim();
+  const requestedFinishDate = String("finishDate" in body ? body.finishDate ?? "" : existing.finishDate ?? "").trim();
+  const requestedStartSlot = normalizeGanttHalfDay("startSlot" in body ? body.startSlot : existing.startSlot);
+  const requestedFinishSlot = normalizeGanttHalfDay("finishSlot" in body ? body.finishSlot : existing.finishSlot, "PM");
   const durationDays = Number("durationDays" in body ? body.durationDays ?? 0 : existing.durationDays);
-  if (requestedStartDate && !/^\d{4}-\d{2}-\d{2}$/.test(requestedStartDate)) return err("计划开始时间格式应为 YYYY-MM-DD");
   if (!isValidGanttDurationDays(durationDays)) return err("工期只能为空或以 0.5 天为单位填写");
-  if (!requestedStartDate && durationDays > 0) return err("填写工期时需要计划开始时间");
   const calendarMode = await getProjectGanttCalendarMode(id);
-  const startDate = requestedStartDate ? normalizeTaskStartDate(requestedStartDate, calendarMode) : "";
-  const finishDate = startDate ? calculateTaskFinishDate(startDate, durationDays, calendarMode) : "";
+  const plan = resolveGanttTaskPlan({
+    taskMode: "taskMode" in body ? body.taskMode : existing.taskMode,
+    startDate: requestedStartDate,
+    startSlot: requestedStartSlot,
+    finishDate: requestedFinishDate,
+    finishSlot: requestedFinishSlot,
+    durationDays,
+    mode: calendarMode,
+  });
+  if (plan.error) return err(plan.error);
+  const persistedPlan = planningMutation ? plan : {
+    taskMode: existing.taskMode,
+    startDate: existing.startDate,
+    startSlot: normalizeGanttHalfDay(existing.startSlot),
+    finishDate: existing.finishDate,
+    finishSlot: normalizeGanttHalfDay(existing.finishSlot, "PM"),
+    durationDays: existing.durationDays,
+  };
   const actualStartDate = String("actualStartDate" in body ? body.actualStartDate ?? "" : existing.actualStartDate).trim();
   const actualEndDate = String("actualEndDate" in body ? body.actualEndDate ?? "" : existing.actualEndDate).trim();
-  const estimatedWorkHours = estimatedHoursForDuration(durationDays);
+  const actualStartSlot = normalizeGanttHalfDay("actualStartSlot" in body ? body.actualStartSlot : existing.actualStartSlot);
+  const actualFinishSlot = normalizeGanttHalfDay("actualFinishSlot" in body ? body.actualFinishSlot : existing.actualFinishSlot, "PM");
+  const estimatedWorkHours = planningMutation
+    ? estimatedHoursForDuration(persistedPlan.durationDays)
+    : existing.estimatedWorkHours;
   const requestedActualWorkHours = Number(body.actualWorkHours ?? existing.actualWorkHours);
   const actualWorkHours = roundGanttHours(requestedActualWorkHours);
-  const progress = Number("progress" in body ? body.progress ?? 0 : existing.progress);
+  const completion = normalizeGanttCompletion({
+    progress: Number("progress" in body ? body.progress ?? 0 : existing.progress),
+    actualStartDate,
+    actualEndDate,
+    previousProgress: existing.progress,
+    today: new Date().toISOString().slice(0, 10),
+  });
   const isMilestone = "isMilestone" in body ? Boolean(body.isMilestone) : existing.isMilestone;
+  const parentBoundaryMode = "parentBoundaryMode" in body
+    ? String(body.parentBoundaryMode ?? "").trim().toUpperCase()
+    : existing.parentBoundaryMode;
+  if (!PARENT_BOUNDARY_MODES.has(parentBoundaryMode)) return err("父任务边界方式无效");
+  // `schedulePriority` is an effective, system-derived value. The inline
+  // editor sends a complete draft, so retain the current stored value here
+  // and let the project-wide recalculation update it after the mutation.
+  // This prevents callers from bypassing the readonly priority rules by
+  // submitting a handcrafted numeric priority.
+  if ("schedulePriority" in body && Number(body.schedulePriority) !== Number(existing.schedulePriority)) {
+    return err("排期优先级由关键路径、依赖关系和子任务自动计算，不允许直接修改");
+  }
+  const schedulePriority = existing.schedulePriority;
+  const userPriority = "userPriority" in body
+    ? normalizeGanttUserPriority(body.userPriority)
+    : normalizeGanttUserPriority(existing.userPriority);
+  const effortDriven = "effortDriven" in body ? body.effortDriven === true : existing.effortDriven;
+  const parallelizable = "parallelizable" in body ? body.parallelizable === true : existing.parallelizable;
   const predecessorTask = String("predecessorTask" in body ? body.predecessorTask ?? "" : existing.predecessorTask).trim();
   const remark = String(body.remark ?? existing.remark ?? "").trim();
   const dependencies = parseGanttDependencyInput(body);
@@ -83,24 +164,117 @@ export async function PUT(
   const ownerMemberId = ownerMemberIds === null
     ? existing.ownerMemberId
     : ownerMemberIds.length === 1 ? ownerMemberIds[0] : null;
-  const ownerChanged = hasOwnerIdsInput && (
-    JSON.stringify([...(ownerMemberIds ?? existingOwnerMemberIds)].sort()) !== JSON.stringify([...existingOwnerMemberIds].sort())
-    || body.ownerChangeMode === "BRANCH_REASSIGN"
-  );
+  const ownerChanged = !isParentTask && hasGanttOwnerSetChange({
+    hasOwnerInput: hasOwnerIdsInput,
+    currentOwnerMemberIds: existingOwnerMemberIds,
+    nextOwnerMemberIds: ownerMemberIds,
+    ownerChangeMode: body.ownerChangeMode,
+  });
+  const nextDependencies = hasDependencyInput ? dependencies : existing.predecessorDependencies;
+  const userPriorityChanged = "userPriority" in body
+    && userPriority !== normalizeGanttUserPriority(existing.userPriority);
+  const needsDependencyRoleCheck = userPriorityChanged || body.previewScheduleImpact === true;
+  const outgoingFsDependencyCount = needsDependencyRoleCheck
+    ? await prisma.projectGanttDependency.count({
+      where: { projectId: id, predecessorTaskId: taskId, type: 1 },
+    })
+    : 0;
 
-  if (durationDays > 0 && !/^\d{4}-\d{2}-\d{2}$/.test(finishDate)) return err("计划完成时间格式应为 YYYY-MM-DD");
-  if (finishDate && finishDate < startDate) return err("计划完成时间不能早于计划开始时间");
   if (actualStartDate && !/^\d{4}-\d{2}-\d{2}$/.test(actualStartDate)) return err("实际开始时间格式应为 YYYY-MM-DD");
-  if (actualEndDate && !/^\d{4}-\d{2}-\d{2}$/.test(actualEndDate)) return err("实际完成时间格式应为 YYYY-MM-DD");
+  if (completion.error) return err(completion.error);
   if (!Number.isFinite(requestedActualWorkHours) || requestedActualWorkHours < 0) return err("实际工时必须为大于或等于 0 的数字");
-  if (!Number.isInteger(progress) || progress < 0 || progress > 100) return err("当前进度必须为 0-100 的整数");
   if (budgetItemId) {
     const budgetItem = await prisma.projectBudgetItem.findFirst({ where: { id: budgetItemId, projectId: id }, select: { id: true } });
     if (!budgetItem) return notFound("预算条目");
   }
-  if (ownerMemberIds && ownerMemberIds.length > 0) {
-    const owners = await prisma.projectMember.findMany({ where: { id: { in: ownerMemberIds }, projectId: id }, select: { id: true } });
-    if (owners.length !== ownerMemberIds.length) return err("负责人必须来自当前项目组成员");
+  const requestedOwners = ownerChanged && ownerMemberIds && ownerMemberIds.length > 0
+    ? await prisma.projectMember.findMany({
+      where: { id: { in: ownerMemberIds }, projectId: id },
+      select: {
+        id: true,
+        accountId: true,
+        personName: true,
+        capacityHoursPerDay: true,
+        productivityRate: true,
+        maxConcurrentAssignments: true,
+      },
+    })
+    : [];
+  if (ownerChanged && ownerMemberIds && ownerMemberIds.length > 1) {
+    return err("末级任务只能指定一名负责人；父级负责人由子任务自动汇总");
+  }
+  if (ownerChanged && ownerMemberIds && requestedOwners.length !== ownerMemberIds.length) return err("负责人必须来自当前项目组成员");
+
+  const actualMutation = ("progress" in body && Number(body.progress) !== existing.progress)
+    || ("actualStartDate" in body && actualStartDate !== existing.actualStartDate)
+    || ("actualEndDate" in body && actualEndDate !== existing.actualEndDate)
+    || ("actualStartSlot" in body && actualStartSlot !== normalizeGanttHalfDay(existing.actualStartSlot))
+    || ("actualFinishSlot" in body && actualFinishSlot !== normalizeGanttHalfDay(existing.actualFinishSlot, "PM"))
+    || ("actualWorkHours" in body && Math.abs(actualWorkHours - existing.actualWorkHours) > 0.001);
+  if (userPriorityChanged) {
+    const priorityIsSystemDerived = childCount > 0
+      || existing.effectivePriority === "HIGHEST"
+      || outgoingFsDependencyCount > 0
+      || nextDependencies.some((dependency) => Number(dependency.type ?? 1) === 1);
+    if (priorityIsSystemDerived) {
+      return err("当前任务优先级由关键路径、FS 关系或子任务自动计算，不允许手动修改");
+    }
+  }
+  if (existing.progress === 100 && actualMutation) {
+    if (childCount === 0) {
+      const project = await prisma.project.findUnique({
+        where: { id },
+        select: { ganttBaselineState: true },
+      });
+      const reopening = completion.progress < 100 && completion.actualEndDate === "";
+      const canReopen = reopening
+        && project?.ganttBaselineState === "CHANGE_DRAFT"
+        && await isProjectGanttManager(id, user.userId);
+      if (!canReopen) {
+        return err("已完成的末级任务已只读。仅项目经理在变更基线草案中将进度改回未完成后，才能重新打开任务。", 409, "GANTT_TASK_COMPLETED");
+      }
+    }
+  }
+  if (actualMutation && childCount > 0) {
+    return err("父级汇总任务的实际开始、实际完成、实际工时和当前进度由子任务自动汇总，请更新末级任务");
+  }
+
+  if (body.previewScheduleImpact === true) {
+    const proposedPriority = deriveGanttPriority({
+      userPriority,
+      // The CPM calculation persists the effective priority, which is the
+      // durable critical-path result available before this preview reruns the
+      // entire project schedule.
+      isCritical: existing.effectivePriority === "HIGHEST",
+      hasSupportedDependency: outgoingFsDependencyCount > 0
+        || nextDependencies.some((dependency) => Number(dependency.type ?? 1) === 1),
+    });
+    const impact = await previewProjectManualScheduleImpact({
+      projectId: id,
+      taskId,
+      patch: {
+        startDate: plan.startDate,
+        finishDate: plan.finishDate,
+        durationDays: plan.durationDays,
+        taskMode: plan.taskMode,
+        parentBoundaryMode,
+        schedulePriority: ganttSchedulePriorityFor(proposedPriority.effectivePriority),
+        effortDriven,
+        parallelizable,
+        ...(ownerChanged ? {
+          ownerAssignments: requestedOwners.map((owner) => ({
+            ownerKey: owner.accountId ? `account:${owner.accountId}` : `person:${owner.personName}`,
+            unitsPercent: 100,
+            plannedWorkHours: 0,
+            capacityHoursPerDay: owner.capacityHoursPerDay,
+            productivityRate: owner.productivityRate,
+            maxConcurrentAssignments: owner.maxConcurrentAssignments,
+          })),
+        } : {}),
+        ...(hasDependencyInput ? { predecessorDependencies: dependencies } : {}),
+      },
+    });
+    return ok(impact);
   }
 
   try {
@@ -108,23 +282,32 @@ export async function PUT(
       const baseData = {
         taskName,
         taskDescription,
-        startDate,
-        finishDate,
-        durationDays,
-        durationMinutes: Math.round(durationDays * 450),
-        actualStartDate,
-        actualEndDate,
+        startDate: persistedPlan.startDate,
+        finishDate: persistedPlan.finishDate,
+        durationDays: persistedPlan.durationDays,
+        durationMinutes: Math.round(persistedPlan.durationDays * 450),
+        actualStartDate: completion.actualStartDate,
+        actualEndDate: completion.actualEndDate,
+        startSlot: persistedPlan.startSlot,
+        finishSlot: persistedPlan.finishSlot,
+        actualStartSlot,
+        actualFinishSlot,
         estimatedWorkHours,
         actualWorkHours,
-        progress,
+        progress: completion.progress,
+        taskMode: persistedPlan.taskMode,
+        parentBoundaryMode,
+        schedulePriority,
+        userPriority,
+        effortDriven,
+        parallelizable,
         isMilestone,
         budgetItemId,
         predecessorTask,
         remark,
-        ...(("startDate" in body || "durationDays" in body || ownerChanged || hasDependencyInput)
+        ...(("startDate" in body || "finishDate" in body || "durationDays" in body || "taskMode" in body || ownerChanged || hasDependencyInput)
           ? { resourceNotBeforeDate: "" }
           : {}),
-        ...(!ownerChanged ? { ownerMemberId } : {}),
       };
 
       const updated = await tx.projectGanttTask.update({
@@ -172,15 +355,31 @@ export async function PUT(
         }
       }
       if (hasDependencyInput) await replaceGanttTaskDependencies(tx, id, taskId, dependencies);
+      await tx.project.update({ where: { id }, data: { ganttRevision: { increment: 1 } } });
       return updated;
     }, { timeout: 30_000, maxWait: 10_000 });
   } catch (error) {
     if (error instanceof GanttOwnerReadOnlyError) return err(error.message, 409);
     throw error;
   }
-  await recalculateProjectGanttSchedule(id, calendarMode);
+  await recalculateProjectGanttSchedule(id, calendarMode, prisma, {
+    // Editing a parent date establishes or changes its boundary. It must never
+    // silently reschedule already-entered child work; conflicts are surfaced
+    // through the manual impact preview instead.
+    preservePlannedDates: Boolean(baselineLockReason) || (isParentTask && planningMutation),
+  });
   const normalizedTask = serializeGanttTaskList(await getOrderedGanttTasks(id)).find((item) => item.id === taskId);
-  return normalizedTask ? ok(normalizedTask) : notFound("甘特任务");
+  if (!normalizedTask) return notFound("甘特任务");
+  const conflictAnalysis = await resourceConflictAnalysis(id);
+  const scheduleWarnings = [
+    ...conflictAnalysis.result.conflicts
+      .filter((conflict) => conflict.taskIds.includes(taskId))
+      .map((conflict) => `${conflict.startDate} 至 ${conflict.finishDate} 存在负责人${conflict.reason === "CAPACITY_EXCEEDED" ? "容量" : "并发"}冲突`),
+    ...conflictAnalysis.result.issues
+      .filter((issue) => issue.taskIds.includes(taskId))
+      .map((issue) => issue.message),
+  ];
+  return ok({ ...normalizedTask, scheduleWarnings: [...new Set(scheduleWarnings)] });
 }
 
 export async function DELETE(
@@ -194,6 +393,12 @@ export async function DELETE(
 
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
+  const baselineLockReason = await getGanttPlanMutationBlockReasonForActor({
+    projectId: id,
+    userId: user.userId,
+    isAdministrator: user.assignedRoleNames.includes("管理员"),
+  });
+  if (baselineLockReason) return err(baselineLockReason, 409, "GANTT_BASELINE_LOCKED");
 
   const existing = await prisma.projectGanttTask.findFirst({ where: { id: taskId, projectId: id } });
   if (!existing) return notFound("甘特任务");

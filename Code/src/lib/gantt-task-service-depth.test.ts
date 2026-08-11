@@ -4,6 +4,7 @@ import {
   ganttSnapshotOwnerLinkRows,
   ganttSnapshotOwnerMemberIds,
   ganttTaskIdsAtOrBeyondDepth,
+  rollupGanttParentActuals,
   serializeGanttTaskList,
 } from "@/lib/gantt-task-service";
 
@@ -81,8 +82,116 @@ describe("gantt owner snapshots", () => {
       { id: "task-1", ownerLinks: [{ projectMemberId: "member-a" }, { projectMemberId: "missing" }] },
       { id: "task-2", ownerMemberId: "member-b" },
     ], new Set(["member-a", "member-b"]))).toEqual([
-      { taskId: "task-1", projectMemberId: "member-a" },
-      { taskId: "task-2", projectMemberId: "member-b" },
+      {
+        taskId: "task-1",
+        projectMemberId: "member-a",
+        unitsPercent: 100,
+        plannedWorkHours: 0,
+        assignmentRole: "EXECUTOR",
+      },
+      {
+        taskId: "task-2",
+        projectMemberId: "member-b",
+        unitsPercent: 100,
+        plannedWorkHours: 0,
+        assignmentRole: "EXECUTOR",
+      },
     ]);
+  });
+});
+
+describe("gantt parent actual rollups", () => {
+  it("derives parent progress, work and dates from nested leaf actuals", () => {
+    const rows = rollupGanttParentActuals([
+      {
+        id: "parent",
+        parentId: null,
+        actualStartDate: "stale",
+        actualEndDate: "stale",
+        actualStartSlot: "PM",
+        actualFinishSlot: "AM",
+        actualWorkHours: 999,
+        progress: 100,
+        estimatedWorkHours: 0,
+        durationDays: 0,
+      },
+      {
+        id: "child-a",
+        parentId: "parent",
+        actualStartDate: "2026-08-01",
+        actualEndDate: "2026-08-02",
+        actualStartSlot: "PM",
+        actualFinishSlot: "AM",
+        actualWorkHours: 7.5,
+        progress: 100,
+        estimatedWorkHours: 15,
+        durationDays: 2,
+      },
+      {
+        id: "child-b",
+        parentId: "parent",
+        actualStartDate: "2026-08-02",
+        actualEndDate: "",
+        actualStartSlot: "AM",
+        actualFinishSlot: "PM",
+        actualWorkHours: 3.75,
+        progress: 50,
+        estimatedWorkHours: 15,
+        durationDays: 2,
+      },
+    ]);
+
+    expect(rows.find((row) => row.id === "parent")).toMatchObject({
+      actualStartDate: "2026-08-01",
+      actualStartSlot: "PM",
+      actualEndDate: "",
+      actualFinishSlot: "PM",
+      actualWorkHours: 11.25,
+      progress: 75,
+    });
+  });
+
+  it("only marks a parent complete when all children have completed actuals", () => {
+    const rows = rollupGanttParentActuals([
+      {
+        id: "parent",
+        parentId: null,
+        actualStartDate: "",
+        actualEndDate: "",
+        actualWorkHours: 0,
+        progress: 0,
+        estimatedWorkHours: 0,
+        durationDays: 0,
+      },
+      {
+        id: "done-a",
+        parentId: "parent",
+        actualStartDate: "2026-08-01",
+        actualEndDate: "2026-08-01",
+        actualWorkHours: 7.5,
+        progress: 100,
+        estimatedWorkHours: 7.5,
+        durationDays: 1,
+      },
+      {
+        id: "done-b",
+        parentId: "parent",
+        actualStartDate: "2026-08-02",
+        actualEndDate: "2026-08-03",
+        actualFinishSlot: "PM",
+        actualWorkHours: 7.5,
+        progress: 100,
+        estimatedWorkHours: 7.5,
+        durationDays: 1,
+      },
+    ]);
+
+    expect(rows.find((row) => row.id === "parent")).toMatchObject({
+      actualStartDate: "2026-08-01",
+      actualEndDate: "2026-08-03",
+      actualFinishSlot: "PM",
+      actualWorkHours: 15,
+      progress: 100,
+    });
   });
 });

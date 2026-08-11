@@ -108,4 +108,22 @@ describe("gantt CPM", () => {
     expect(result.metricsByTaskId.get("a")?.earlyFinishDate).toBe("2026-02-14");
     expect(result.metricsByTaskId.get("b")?.earlyStartDate).toBe("2026-02-24");
   });
+
+  it("uses an actual late completion window for CPM without treating progress alone as schedule work", () => {
+    const result = calculateGanttCpm([
+      task("completed", 2, [], {
+        startDate: "2026-07-01",
+        actualStartDate: "2026-07-01",
+        actualEndDate: "2026-07-05",
+        progress: 100,
+      }),
+      task("successor", 1, ["completed"], { startDate: "2026-07-01" }),
+    ], "CALENDAR_DAYS");
+
+    expect(result.metricsByTaskId.get("completed")).toMatchObject({
+      earlyFinishDate: "2026-07-05",
+      isCritical: true,
+    });
+    expect(result.metricsByTaskId.get("successor")?.earlyStartDate).toBe("2026-07-06");
+  });
 });

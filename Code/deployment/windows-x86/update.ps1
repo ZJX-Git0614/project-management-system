@@ -135,7 +135,7 @@ function Find-DeploymentDirectory {
   throw "未找到 Ceastar PMS 部署目录。请将整个更新包文件夹直接放入已安装的 Ceastar PMS 目录后再运行。"
 }
 
-function Wait-ForApplication([string]$Url = "http://localhost:3000/login") {
+function Wait-ForApplication([string]$Url = "http://localhost:3000/login", [string]$DiagnosticContainer = "") {
   Write-Host "  正在等待 Ceastar PMS 健康检查通过：$Url" -ForegroundColor DarkCyan
   for ($attempt = 1; $attempt -le 90; $attempt++) {
     try {
@@ -144,7 +144,30 @@ function Wait-ForApplication([string]$Url = "http://localhost:3000/login") {
         return
       }
     } catch {
+      # Continue waiting below. The candidate may still be applying an additive schema migration.
+    }
+
+    if ($attempt -eq 1 -or $attempt % 5 -eq 0) {
+      $containerSuffix = ""
+      if ($DiagnosticContainer) {
+        $candidateStatus = (docker inspect $DiagnosticContainer --format "{{.State.Status}}" 2>$null).Trim()
+        if ($candidateStatus) {
+          $containerSuffix = "；候选容器状态：$candidateStatus"
+        }
+      }
+      Write-Host "  健康检查仍未通过（第 $attempt/90 次，已等待约 $($attempt * 2) 秒$containerSuffix）" -ForegroundColor DarkYellow
+    }
+
+    if ($attempt -lt 90) {
       Start-Sleep -Seconds 2
+    }
+  }
+
+  if ($DiagnosticContainer) {
+    $candidateLogs = @(& docker logs --tail 80 $DiagnosticContainer 2>&1 | ForEach-Object { $_.ToString() })
+    $candidateLogText = ($candidateLogs -join "`n").Trim()
+    if ($candidateLogText) {
+      throw "Ceastar PMS 在 180 秒内未就绪。候选容器最近日志：`n$candidateLogText"
     }
   }
   throw "Ceastar PMS 在 180 秒内未就绪，请检查 Docker 容器日志。"
@@ -206,7 +229,16 @@ function Start-GreenCandidate([string]$ReleaseId, [int]$Port, [string]$Candidate
   }
   $publish = "127.0.0.1:${Port}:3000"
   $script:CandidateContainer = $candidateName
-  Invoke-DockerCommand -Arguments @("compose", "run", "--detach", "--no-deps", "--name", $candidateName, "--publish", $publish, "--env", "PMS_WEB_WORKERS=1", "--env", "DATABASE_URL=$CandidateDatabaseUrl", "pms") -FailureMessage "绿色候选容器启动失败。"
+  # The production compose service skips schema pushes after deployment. A cloned candidate database
+  # must explicitly enable the additive migration path or the new application cannot validate it.
+  Invoke-DockerCommand -Arguments @("compose", "run", "--detach", "--no-deps", "--name", $candidateName, "--publish", $publish, "--env", "PMS_WEB_WORKERS=1", "--env", "SKIP_PRISMA_DB_PUSH=false", "--env", "SKIP_PRISMA_SEED=true", "--env", "DATABASE_URL=$CandidateDatabaseUrl", "pms") -FailureMessage "绿色候选容器启动失败。"
+}
+
+function Upgrade-ProductionDatabase {
+  Write-Host "  正在将已验证的安全结构迁移应用到正式数据库..." -ForegroundColor DarkCyan
+  # The image entrypoint runs pre-schema and manual migrations before executing this no-op command.
+  # It contains no destructive data-loss override and runs only after the cloned candidate is healthy.
+  Invoke-DockerCommand -Arguments @("compose", "run", "--rm", "--no-deps", "--env", "SKIP_PRISMA_DB_PUSH=false", "--env", "SKIP_PRISMA_SEED=true", "pms", "sh", "-c", "exit 0") -FailureMessage "正式数据库结构同步失败，未切换 3000 端口。"
 }
 
 function Assert-VerifiedBackup([string]$BackupDirectory) {
@@ -445,8 +477,14 @@ if (-not (Test-Path $assistantBridgeInstaller)) {
   throw "更新包中缺少 install-assistant-service-bridge.ps1。"
 }
 & $assistantBridgeInstaller -DeploymentDirectory $deploymentDirectory -SourceDirectory $PSScriptRoot
+$drawioMcpInstaller = Join-Path $PSScriptRoot "install-drawio-mcp.ps1"
+if (-not (Test-Path $drawioMcpInstaller)) {
+  throw "更新包中缺少 install-drawio-mcp.ps1。"
+}
+& $drawioMcpInstaller -SourceDirectory $PSScriptRoot
 Write-Success "docker-compose.yml 兼容性检查通过"
 Write-Success "Ollama/RAGLite 主机服务管理桥接已安装"
+Write-Success "Draw.io MCP 启动器和配置已安装"
 
 Write-Host "  [说明] 本次更新不自动修复 MPP 导出服务。如需二进制 MPP 导出，更新完成后以管理员身份运行 repair-mpp-export-service.bat。" -ForegroundColor DarkYellow
 
@@ -475,10 +513,12 @@ Start-GreenCandidate $releaseId $candidatePort $candidateDatabaseUrl
 Write-Success "绿色候选环境已启动，蓝色旧版本继续在 3000 端口提供服务"
 
 Write-Step 8 10 "验证绿色候选环境"
-Wait-ForApplication "http://127.0.0.1:$candidatePort/api/health/ready"
+Wait-ForApplication "http://127.0.0.1:$candidatePort/api/health/ready" $script:CandidateContainer
 Write-Success "绿色候选环境健康检查通过"
 Remove-CandidateContainer
 Remove-CandidateDatabase
+Upgrade-ProductionDatabase
+Write-Success "正式数据库已完成已验证的安全结构同步"
 
 Write-Step 9 10 "切换 3000 端口到绿色版本"
 $script:CutoverStarted = $true

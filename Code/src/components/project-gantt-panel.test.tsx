@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ProjectGanttPanel } from "@/components/project-gantt-panel";
+import type { GanttTaskDraft } from "@/components/gantt-timeline";
 import { ProjectStatus } from "@/domain/enums";
 import type { ProjectGanttTask } from "@/domain/models";
 
@@ -36,6 +37,7 @@ vi.mock("@/components/gantt-timeline", () => ({
     onDeleteSelected,
     onCreateTask,
     onInsertTasks,
+    onUpdateTask,
     projectMembers,
     tasks,
   }: {
@@ -43,6 +45,7 @@ vi.mock("@/components/gantt-timeline", () => ({
     onDeleteSelected?: (taskIds: string[]) => void | Promise<void>;
     onCreateTask?: (parentTask?: ProjectGanttTask) => void;
     onInsertTasks?: (anchorTaskId: string, placement: "SIBLING_AFTER", count: number) => void | Promise<void>;
+    onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft, columnKey?: string) => void | Promise<void>;
     projectMembers: Array<{ id: string }>;
     tasks: ProjectGanttTask[];
   }) => (
@@ -61,6 +64,39 @@ vi.mock("@/components/gantt-timeline", () => ({
       </button>
       <button type="button" onClick={() => void onInsertTasks?.(tasks[0].id, "SIBLING_AFTER", 2)}>
         测试批量插入任务
+      </button>
+      <button
+        type="button"
+        onClick={() => void onUpdateTask?.(tasks[0], {
+          taskCategory: tasks[0].taskCategory,
+          taskName: tasks[0].taskName,
+          taskDescription: tasks[0].taskDescription || "无",
+          startDate: "2026-08-01",
+          startSlot: "AM",
+          endDate: "2026-08-10",
+          finishSlot: "PM",
+          durationDays: 10,
+          actualStartDate: tasks[0].actualStartDate ?? "",
+          actualStartSlot: "AM",
+          actualEndDate: tasks[0].actualEndDate ?? "",
+          actualFinishSlot: "PM",
+          estimatedWorkHours: 75,
+          actualWorkHours: tasks[0].actualWorkHours ?? 0,
+          progress: tasks[0].progress ?? 0,
+          taskMode: "AUTO",
+          parentBoundaryMode: "ROLLUP",
+          schedulePriority: 500,
+          userPriority: "MEDIUM",
+          effortDriven: false,
+          parallelizable: false,
+          isMilestone: false,
+          ownerMemberId: tasks[0].ownerMemberId ?? null,
+          ownerMemberIds: [],
+          predecessorTaskIds: [],
+          remark: tasks[0].remark ?? "",
+        }, "startDate")}
+      >
+        测试编辑父任务计划
       </button>
     </div>
   ),
@@ -95,6 +131,41 @@ const childTask: ProjectGanttTask = {
   sortOrder: 2,
 };
 
+const backgroundGanttGet = (url: string) => {
+  if (url.endsWith("/gantt-tasks/baseline")) {
+    return Promise.resolve({
+      project: {
+        ganttBaselineVersion: 0,
+        ganttBaselineState: "DRAFT",
+        ganttBaselinePublishedAt: null,
+        ganttBaselinePublishedBy: "",
+      },
+      baseline: null,
+      draft: null,
+      validation: { projectId: "project-1", taskCount: 0, valid: true, blockers: [] },
+      permissions: {
+        canPrepareDraft: false,
+        canPublish: true,
+        canEditPlanning: true,
+        canEditActuals: true,
+        planningMutationBlocker: null,
+      },
+      blockers: [],
+    });
+  }
+  if (url.includes("/gantt-tasks/resource-schedule")) {
+    return Promise.resolve({
+      revision: 0,
+      snapshotHash: "test",
+      conflicts: [],
+      issues: [],
+      candidates: [],
+      resourceConstrainedTaskIds: [],
+    });
+  }
+  return null;
+};
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((resolvePromise) => {
@@ -119,6 +190,8 @@ describe("ProjectGanttPanel", () => {
     const refresh = deferred<ProjectGanttTask[]>();
     let taskRequestCount = 0;
     mocks.get.mockImplementation((url: string) => {
+      const backgroundResponse = backgroundGanttGet(url);
+      if (backgroundResponse) return backgroundResponse;
       if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
       if (url.endsWith("/members")) return Promise.resolve([]);
       if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
@@ -158,6 +231,8 @@ describe("ProjectGanttPanel", () => {
   it("deletes only the selected root task and refreshes after cascade deletion", async () => {
     let taskRequestCount = 0;
     mocks.get.mockImplementation((url: string) => {
+      const backgroundResponse = backgroundGanttGet(url);
+      if (backgroundResponse) return backgroundResponse;
       if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
       if (url.endsWith("/members")) return Promise.resolve([]);
       if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
@@ -192,6 +267,8 @@ describe("ProjectGanttPanel", () => {
 
   it("loads project members and applies the project-wide working-day mode", async () => {
     mocks.get.mockImplementation((url: string) => {
+      const backgroundResponse = backgroundGanttGet(url);
+      if (backgroundResponse) return backgroundResponse;
       if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
       if (url.endsWith("/members")) return Promise.resolve([{ id: "member-1", personName: "张三", roleName: "项目经理" }]);
       if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
@@ -230,8 +307,51 @@ describe("ProjectGanttPanel", () => {
     await waitFor(() => expect(workingDayButton).toHaveAttribute("aria-pressed", "true"));
   });
 
+  it("keeps a manually edited parent schedule as a locked boundary instead of rolling it back", async () => {
+    mocks.get.mockImplementation((url: string) => {
+      const backgroundResponse = backgroundGanttGet(url);
+      if (backgroundResponse) return backgroundResponse;
+      if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      if (url.endsWith("/deletions")) return Promise.resolve([]);
+      return Promise.resolve([rootTask, childTask]);
+    });
+    mocks.post.mockResolvedValue({ snapshotId: "parent-plan-snapshot" });
+    mocks.put.mockImplementation((_url: string, body: Record<string, unknown>) => {
+      if (body.previewScheduleImpact) {
+        return Promise.resolve({
+          requiresConfirmation: false,
+          affectedTaskIds: [rootTask.id],
+          affectedTasks: [],
+          issues: [],
+          conflicts: [],
+        });
+      }
+      return Promise.resolve({ ...rootTask, parentBoundaryMode: "LOCKED", taskMode: "DURATION_FORWARD" });
+    });
+
+    render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
+
+    const user = userEvent.setup();
+    await screen.findByTestId("gantt-timeline");
+    await user.click(screen.getByRole("button", { name: "测试编辑父任务计划" }));
+
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith(
+      "/api/projects/project-1/gantt-tasks/task-1",
+      expect.objectContaining({
+        startDate: "2026-08-01",
+        endDate: "2026-08-10",
+        taskMode: "DURATION_FORWARD",
+        parentBoundaryMode: "LOCKED",
+      }),
+    ));
+  });
+
   it("records structure changes as snapshots and restores the before snapshot on undo", async () => {
     mocks.get.mockImplementation((url: string) => {
+      const backgroundResponse = backgroundGanttGet(url);
+      if (backgroundResponse) return backgroundResponse;
       if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
       if (url.endsWith("/members")) return Promise.resolve([]);
       if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
@@ -290,6 +410,8 @@ describe("ProjectGanttPanel", () => {
       cursor: 0,
     }));
     mocks.get.mockImplementation((url: string) => {
+      const backgroundResponse = backgroundGanttGet(url);
+      if (backgroundResponse) return backgroundResponse;
       if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
       if (url.endsWith("/members")) return Promise.resolve([]);
       if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });

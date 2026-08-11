@@ -7,6 +7,9 @@ const mocks = vi.hoisted(() => {
       updateMany: vi.fn(),
       create: vi.fn(),
     },
+    project: {
+      update: vi.fn(),
+    },
   };
   return {
     getAuthenticatedUser: vi.fn(),
@@ -64,7 +67,11 @@ vi.mock("@/lib/gantt-owner-service", () => ({
 describe("POST /api/projects/:id/gantt-tasks", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.getAuthenticatedUser.mockResolvedValue({ displayName: "管理员" });
+    mocks.getAuthenticatedUser.mockResolvedValue({
+      userId: "user-1",
+      displayName: "管理员",
+      assignedRoleNames: ["管理员"],
+    });
     mocks.userHasPermission.mockResolvedValue(true);
     mocks.projectFindUnique.mockResolvedValue({ id: "project-1", status: "IN_PROGRESS" });
     mocks.taskFindFirst.mockResolvedValue({ id: "parent-1", taskCategory: "设计", taskName: "设计" });
@@ -72,6 +79,7 @@ describe("POST /api/projects/:id/gantt-tasks", () => {
     mocks.transaction.mockImplementation(async (callback) => callback(mocks.tx));
     mocks.tx.projectGanttTask.updateMany.mockResolvedValue({ count: 0 });
     mocks.tx.projectGanttTask.create.mockResolvedValue({ id: "created-1" });
+    mocks.tx.project.update.mockResolvedValue({});
     mocks.getProjectGanttCalendarMode.mockResolvedValue("NATURAL_DAY");
     mocks.parseGanttDependencyInput.mockReturnValue([]);
     mocks.resolveEffectiveGanttOwnerMemberIds.mockResolvedValue(["member-parent", "member-parent-2"]);
@@ -80,7 +88,7 @@ describe("POST /api/projects/:id/gantt-tasks", () => {
     mocks.serializeGanttTaskList.mockReturnValue([{ id: "created-1", ownerMemberId: "member-parent" }]);
   });
 
-  it("inherits the effective parent owner and normalizes the hierarchy in the create transaction", async () => {
+  it("does not copy multiple aggregated parent owners onto a new leaf task", async () => {
     const { POST } = await import("./route");
     const response = await POST(new NextRequest("http://localhost/api/projects/project-1/gantt-tasks", {
       method: "POST",
@@ -103,14 +111,7 @@ describe("POST /api/projects/:id/gantt-tasks", () => {
       data: expect.objectContaining({
         parentId: "parent-1",
         ownerMemberId: null,
-        ownerLinks: {
-          createMany: {
-            data: [
-              { projectMemberId: "member-parent" },
-              { projectMemberId: "member-parent-2" },
-            ],
-          },
-        },
+        ownerLinks: undefined,
       }),
     }));
     expect(mocks.synchronizeGanttOwnerHierarchy).toHaveBeenCalledWith({

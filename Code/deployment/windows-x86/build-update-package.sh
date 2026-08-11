@@ -93,6 +93,7 @@ docker run --rm --platform linux/amd64 --entrypoint sh "$IMAGE_NAME" -c '
   test -d /app/.next
   test -f /app/prisma/schema.prisma
   test -f /app/prisma/pre-schema-migrations/20260804_unique_project_members.sql
+  test -f /app/prisma/pre-schema-migrations/20260806_approval_workflow_compat.sql
   test -f /app/prisma/manual-migrations/20260803_module_history_snapshots.sql
   test -f /app/prisma/manual-migrations/20260804_role_reference_integrity.sql
   test -f /app/prisma/manual-migrations/20260804_multi_relation_links.sql
@@ -102,6 +103,8 @@ docker run --rm --platform linux/amd64 --entrypoint sh "$IMAGE_NAME" -c '
   test -f /app/prisma/manual-migrations/20260804_unique_project_members.sql
   test -f /app/prisma/manual-migrations/20260804_wbs_resource_scheduling.sql
   test -f /app/prisma/manual-migrations/20260805_wbs_resource_optimization.sql
+  test -f /app/prisma/manual-migrations/20260807_gantt_auto_manual_scheduling.sql
+  test -f /app/prisma/manual-migrations/20260810_wbs_baseline_constraint_schedule.sql
   test -f /opt/ceastar/mpp-converter.jar
   pg_dump --version | grep "PostgreSQL) 16\."
   pg_restore --version | grep "PostgreSQL) 16\."
@@ -133,6 +136,9 @@ assistant-services.ps1
 assistant-service-watchdog.ps1
 assistant-service-bridge.ps1
 install-assistant-service-bridge.ps1
+drawio-mcp.ps1
+drawio-mcp-config.json
+install-drawio-mcp.ps1
 "
 
 for relative_file in $PACKAGE_FILES; do
@@ -147,6 +153,8 @@ cp "$SCRIPT_DIR/更新手册.txt" "$PACKAGE_DIR/Windows-Update-Guide-CN.txt"
 cp "$SCRIPT_DIR/数据库迁移说明.txt" "$PACKAGE_DIR/Database-Migration-Guide-CN.txt"
 cp "$SCRIPT_DIR/数据安全说明.txt" "$PACKAGE_DIR/Data-Security-Guide-CN.txt"
 cp "$SCRIPT_DIR/智能助手服务说明.txt" "$PACKAGE_DIR/Assistant-Services-Guide-CN.txt"
+[ -f "$SCRIPT_DIR/Draw.io-MCP-使用说明.txt" ] || fail "Required package file is missing: Draw.io-MCP-使用说明.txt"
+cp "$SCRIPT_DIR/Draw.io-MCP-使用说明.txt" "$PACKAGE_DIR/Draw.io-MCP-Guide-CN.txt"
 
 SOURCE_BRANCH="$(git -C "$REPO_DIR" branch --show-current)"
 SOURCE_COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
@@ -178,6 +186,19 @@ printf '\n[5/6] Normalizing Windows line endings and creating ZIP...\n'
 for windows_file in "$PACKAGE_DIR"/*.ps1 "$PACKAGE_DIR"/*.bat "$PACKAGE_DIR"/*.txt "$PACKAGE_DIR"/*.sha256; do
   [ -f "$windows_file" ] || continue
   perl -pi -e 's/\r?\n/\r\n/g' "$windows_file"
+done
+
+# Windows PowerShell 5.1 treats UTF-8 files without a BOM as the system ANSI
+# code page. Chinese text can then corrupt nearby quotes/backticks while the
+# script is parsed. Keep every packaged PowerShell script explicitly UTF-8 BOM.
+for powershell_file in "$PACKAGE_DIR"/*.ps1; do
+  [ -f "$powershell_file" ] || continue
+  perl -0777 -i -pe 's/\A(?:\xEF\xBB\xBF)?/\xEF\xBB\xBF/' "$powershell_file"
+  perl -e '
+    open my $fh, "<:raw", $ARGV[0] or die "cannot read $ARGV[0]: $!";
+    read($fh, my $bom, 3) == 3 or exit 1;
+    exit($bom eq "\xEF\xBB\xBF" ? 0 : 1);
+  ' "$powershell_file" || fail "PowerShell script is missing the UTF-8 BOM: $powershell_file"
 done
 
 TAR_COUNT="$(find "$IMAGE_DIR" -maxdepth 1 -type f -name '*.tar' | wc -l | tr -d ' ')"

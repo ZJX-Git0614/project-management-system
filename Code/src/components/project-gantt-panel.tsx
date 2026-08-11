@@ -2,15 +2,18 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { BriefcaseBusiness, CalendarDays, ChevronDown, Download, FileSpreadsheet, FileType2, FlagTriangleRight, Maximize2, Minimize2, Redo2, TriangleAlert, Undo2, Upload, WandSparkles } from "lucide-react";
+import { BriefcaseBusiness, CalendarDays, ChevronDown, Download, FileSpreadsheet, FileType2, FlagTriangleRight, Maximize2, Minimize2, Network, Redo2, TriangleAlert, Undo2, Upload, WandSparkles } from "lucide-react";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -68,6 +71,7 @@ interface GanttTransferCapabilities {
 interface GanttSettings {
   calendarMode: GanttCalendarMode;
   hoursPerDay: number;
+  hardFinishDate: string;
 }
 
 interface GanttDeleteResult {
@@ -176,7 +180,7 @@ type ResourceConflictView = {
 
 type ResourceScheduleCandidateView = {
   id: string;
-  kind: "MINIMAL_CHANGE" | "EARLIEST_FINISH" | "ON_TIME";
+  kind: "MINIMAL_CHANGE" | "EARLIEST_FINISH" | "ON_TIME" | "RESOURCE_SMOOTHING";
   title: string;
   explanation: string;
   applicable: boolean;
@@ -184,9 +188,19 @@ type ResourceScheduleCandidateView = {
     taskId: string;
     startDate: string;
     finishDate: string;
+    taskMode?: "AUTO" | "DURATION_FORWARD" | "DURATION_BACKWARD";
     task: ResourceConflictTask | null;
   }>;
   remainingConflicts: ResourceConflictView[];
+  issues: Array<{
+    id: string;
+    code: string;
+    severity: "WARNING" | "ERROR";
+    taskIds: string[];
+    message: string;
+    suggestion: string;
+  }>;
+  resourceConstrainedTaskIds: string[];
   metrics: {
     completionDate: string;
     delayedDays: number;
@@ -199,7 +213,148 @@ type ResourceScheduleAnalysisView = {
   revision: number;
   snapshotHash: string;
   conflicts: ResourceConflictView[];
+  issues: Array<{
+    id: string;
+    code: string;
+    severity: "WARNING" | "ERROR";
+    taskIds: string[];
+    message: string;
+    suggestion: string;
+  }>;
   candidates: ResourceScheduleCandidateView[];
+  scope?: {
+    rootTaskIds: string[];
+    taskIds: string[];
+    modeOverride: ResourceScheduleModeOverride;
+  };
+};
+
+type ResourceScheduleModeOverride = "PRESERVE" | "AUTO" | "DURATION_FORWARD" | "DURATION_BACKWARD";
+
+type ResourceScheduleRequest = {
+  scopeRootTaskIds: string[];
+  modeOverride: ResourceScheduleModeOverride;
+  scopeLabel: string;
+};
+
+const DEFAULT_RESOURCE_SCHEDULE_REQUEST: ResourceScheduleRequest = {
+  scopeRootTaskIds: [],
+  modeOverride: "PRESERVE",
+  scopeLabel: "全部项目叶子任务",
+};
+
+/**
+ * A scheduling scope is always a non-overlapping parent branch. A parent with
+ * direct leaf children is the smallest useful group; otherwise we continue
+ * down until reaching such parents. This avoids selecting both an ancestor and
+ * descendant and accidentally scheduling the same leaf twice.
+ */
+const collectAutoScheduleScopeParents = (tasks: ProjectGanttTask[], rootTaskId: string) => {
+  const taskById = new Map(tasks.map((task) => [task.id, task] as const));
+  const childrenByParentId = new Map<string, string[]>();
+  tasks.forEach((task) => {
+    if (!task.parentId || !taskById.has(task.parentId)) return;
+    childrenByParentId.set(task.parentId, [...(childrenByParentId.get(task.parentId) ?? []), task.id]);
+  });
+  const visit = (parentId: string, visited = new Set<string>()): string[] => {
+    if (visited.has(parentId)) return [];
+    visited.add(parentId);
+    const childIds = childrenByParentId.get(parentId) ?? [];
+    if (childIds.length === 0) return [];
+    // If this parent owns any direct leaf, selecting the parent is the only
+    // non-overlapping way to include that leaf together with its siblings.
+    if (childIds.some((childId) => (childrenByParentId.get(childId) ?? []).length === 0)) return [parentId];
+    return childIds.flatMap((childId) => visit(childId, new Set(visited)));
+  };
+  return [...new Set(visit(rootTaskId))]
+    .map((taskId) => taskById.get(taskId))
+    .filter((task): task is ProjectGanttTask => Boolean(task));
+};
+
+type ManualScheduleImpactView = {
+  requiresConfirmation: boolean;
+  affectedTaskIds: string[];
+  affectedTasks: Array<{
+    id: string;
+    projectId: string;
+    projectName: string;
+    taskCode: string;
+    taskName: string;
+    startDate: string;
+    finishDate: string;
+    isCurrentProject: boolean;
+  }>;
+  issues: Array<{
+    id: string;
+    code: string;
+    severity: "WARNING" | "ERROR";
+    taskIds: string[];
+    message: string;
+    suggestion: string;
+  }>;
+  conflicts: Array<{
+    id: string;
+    ownerKey: string;
+    taskIds: string[];
+    startDate: string;
+    finishDate: string;
+    severity: "WARNING" | "ERROR";
+    reason: "CAPACITY_EXCEEDED" | "CONCURRENCY_EXCEEDED";
+  }>;
+};
+
+type PendingScheduleUpdate = {
+  task: ProjectGanttTask;
+  draft: GanttTaskDraft;
+  columnKey?: string;
+  impact: ManualScheduleImpactView;
+};
+
+type GanttBaselineBlockerView = {
+  code: string;
+  message: string;
+  taskIds: string[];
+};
+
+type GanttBaselineOverviewView = {
+  project: {
+    ganttBaselineVersion: number;
+    ganttBaselineState: "DRAFT" | "PUBLISHED" | "CHANGE_DRAFT" | string;
+    ganttBaselinePublishedAt: string | null;
+    ganttBaselinePublishedBy: string;
+  };
+  baseline: {
+    id: string;
+    version: number;
+    status: string;
+    sourceRevision: number;
+    reason: string;
+    createdAt: string;
+    createdByName: string;
+  } | null;
+  draft: {
+    id: string;
+    baseVersion: number;
+    sourceRevision: number;
+    status: string;
+    reason: string;
+    updatedAt: string;
+    updatedByName: string;
+  } | null;
+  validation: {
+    projectId: string;
+    taskCount: number;
+    valid: boolean;
+    blockers: GanttBaselineBlockerView[];
+  };
+  permissions: {
+    canPrepareDraft: boolean;
+    canPublish: boolean;
+    canEditPlanning: boolean;
+    canEditActuals: boolean;
+    planningMutationBlocker: string | null;
+  };
+  blockers: GanttBaselineBlockerView[];
 };
 
 export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPanelProps) => {
@@ -207,6 +362,8 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([]);
   const [calendarMode, setCalendarMode] = useState<GanttCalendarMode>("CALENDAR_DAYS");
   const [savingCalendarMode, setSavingCalendarMode] = useState(false);
+  const [hardFinishDate, setHardFinishDate] = useState("");
+  const [savingHardFinishDate, setSavingHardFinishDate] = useState(false);
   const [loading, setLoading] = useState(true);
   const [creatingParentId, setCreatingParentId] = useState<string | null>(null);
   const [savingTaskId, setSavingTaskId] = useState<string | null>(null);
@@ -227,6 +384,15 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const [resourceDialogOpen, setResourceDialogOpen] = useState(false);
   const [resourceAnalysisLoading, setResourceAnalysisLoading] = useState(false);
   const [resourceApplyingKind, setResourceApplyingKind] = useState<ResourceScheduleCandidateView["kind"] | null>(null);
+  const [resourceScheduleRequest, setResourceScheduleRequest] = useState<ResourceScheduleRequest>(DEFAULT_RESOURCE_SCHEDULE_REQUEST);
+  const [autoScheduleScopeTask, setAutoScheduleScopeTask] = useState<ProjectGanttTask | null>(null);
+  const [autoScheduleScopeIds, setAutoScheduleScopeIds] = useState<string[]>([]);
+  const [autoScheduleModeOverride, setAutoScheduleModeOverride] = useState<ResourceScheduleModeOverride>("PRESERVE");
+  const [pendingScheduleUpdate, setPendingScheduleUpdate] = useState<PendingScheduleUpdate | null>(null);
+  const [baselineOverview, setBaselineOverview] = useState<GanttBaselineOverviewView | null>(null);
+  const [baselineDialogOpen, setBaselineDialogOpen] = useState(false);
+  const [baselineReason, setBaselineReason] = useState("");
+  const [baselineBusy, setBaselineBusy] = useState(false);
   const historyFocusRequestIdRef = useRef(0);
   const importInputRef = useRef<HTMLInputElement>(null);
   const processedAssistantAttachmentId = useRef<string | null>(null);
@@ -242,15 +408,45 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
 
   const readOnly = projectStatus === ProjectStatus.COMPLETED || projectStatus === ProjectStatus.VOIDED;
   const canView = can("project-gantt:view");
-  const canCreate = can("project-gantt:create") && !readOnly;
-  const canEdit = can("project-gantt:edit") && !readOnly;
-  const canDelete = can("project-gantt:delete") && !readOnly;
-  const canViewBaselineControl = can("project-gantt:baseline-request");
+  const canEditPlanning = can("project-gantt:edit")
+    && !readOnly
+    && (baselineOverview?.permissions.canEditPlanning ?? true);
+  const canEditActuals = can("project-gantt:edit")
+    && !readOnly
+    && (baselineOverview?.permissions.canEditActuals ?? true);
+  const canCreate = can("project-gantt:create") && !readOnly && canEditPlanning;
+  const canEdit = canEditPlanning;
+  const canDelete = can("project-gantt:delete") && !readOnly && canEditPlanning;
+  const canViewBaselineControl = canView;
 
-  const fetchResourceAnalysis = useCallback(async (includeCandidates = false) => {
+  const fetchBaselineOverview = useCallback(async () => {
     try {
+      const overview = await api.get<GanttBaselineOverviewView>(`/api/projects/${projectId}/gantt-tasks/baseline`);
+      if (!overview?.project || !overview.permissions || !overview.validation) {
+        setBaselineOverview(null);
+        return null;
+      }
+      setBaselineOverview(overview);
+      return overview;
+    } catch {
+      setBaselineOverview(null);
+      return null;
+    }
+  }, [projectId]);
+
+  const fetchResourceAnalysis = useCallback(async (
+    includeCandidates = false,
+    request: ResourceScheduleRequest = DEFAULT_RESOURCE_SCHEDULE_REQUEST,
+  ) => {
+    try {
+      const query = new URLSearchParams();
+      if (includeCandidates) query.set("includeCandidates", "1");
+      request.scopeRootTaskIds.forEach((taskId) => query.append("scopeRootTaskId", taskId));
+      if (includeCandidates && request.modeOverride !== "PRESERVE") {
+        query.set("modeOverride", request.modeOverride);
+      }
       const data = await api.get<ResourceScheduleAnalysisView>(
-        `/api/projects/${projectId}/gantt-tasks/resource-schedule${includeCandidates ? "?includeCandidates=1" : ""}`,
+        `/api/projects/${projectId}/gantt-tasks/resource-schedule${query.size > 0 ? `?${query.toString()}` : ""}`,
       );
       setResourceAnalysis(data);
       return data;
@@ -302,12 +498,17 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     if (!projectId) return;
     void Promise.all([
       api.get<ProjectMember[]>(`/api/projects/${projectId}/members`).then(setProjectMembers),
-      api.get<GanttSettings>(`/api/projects/${projectId}/gantt-settings`).then((settings) => setCalendarMode(settings.calendarMode)),
+      api.get<GanttSettings>(`/api/projects/${projectId}/gantt-settings`).then((settings) => {
+        setCalendarMode(settings.calendarMode);
+        setHardFinishDate(settings.hardFinishDate || "");
+      }),
+      fetchBaselineOverview(),
     ]).catch(() => {
       setProjectMembers([]);
       setCalendarMode("CALENDAR_DAYS");
+      setHardFinishDate("");
     });
-  }, [projectId]);
+  }, [fetchBaselineOverview, projectId]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -350,10 +551,69 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
         }
       });
     });
+    (resourceAnalysis?.issues ?? []).forEach((issue) => {
+      issue.taskIds.forEach((taskId) => {
+        let currentTaskId: string | null = taskId;
+        const visited = new Set<string>();
+        while (currentTaskId && !visited.has(currentTaskId)) {
+          visited.add(currentTaskId);
+          append(currentTaskId, issue.message);
+          currentTaskId = taskById.get(currentTaskId)?.parentId ?? null;
+        }
+      });
+    });
     return Object.fromEntries(
       Array.from(messagesByTaskId.entries()).map(([taskId, messages]) => [taskId, Array.from(messages)]),
     );
-  }, [projectMembers, resourceAnalysis?.conflicts, tasks]);
+  }, [projectMembers, resourceAnalysis?.conflicts, resourceAnalysis?.issues, tasks]);
+  const autoScheduleScopeCandidates = useMemo(() => (
+    autoScheduleScopeTask
+      ? collectAutoScheduleScopeParents(tasks, autoScheduleScopeTask.id)
+      : []
+  ), [autoScheduleScopeTask, tasks]);
+  const startAutoSchedule = (parentTask: ProjectGanttTask) => {
+    const candidates = collectAutoScheduleScopeParents(tasks, parentTask.id);
+    if (candidates.length === 0) {
+      setOperationError({
+        title: "自动排期范围无效",
+        message: "只能对包含末级任务的父级任务进行自动排期。",
+      });
+      return;
+    }
+    const defaultRequest = (scopeRootTaskIds: string[], scopeLabel: string): ResourceScheduleRequest => ({
+      scopeRootTaskIds,
+      modeOverride: "PRESERVE",
+      scopeLabel,
+    });
+    if (candidates.length === 1) {
+      const scopeTask = candidates[0];
+      void openResourceScheduleDialog(defaultRequest(
+        [scopeTask.id],
+        `${scopeTask.taskCode || "父任务"} · ${scopeTask.taskName || "未命名任务"}及其子任务`,
+      ));
+      return;
+    }
+    setAutoScheduleScopeTask(parentTask);
+    setAutoScheduleScopeIds(candidates.map((task) => task.id));
+    setAutoScheduleModeOverride("PRESERVE");
+  };
+  const toggleAutoScheduleScopeTask = (taskId: string) => {
+    setAutoScheduleScopeIds((current) => current.includes(taskId)
+      ? current.filter((id) => id !== taskId)
+      : [...current, taskId]);
+  };
+  const confirmAutoScheduleScope = () => {
+    const parentTask = autoScheduleScopeTask;
+    if (!parentTask || autoScheduleScopeIds.length === 0) return;
+    const selected = autoScheduleScopeCandidates.filter((task) => autoScheduleScopeIds.includes(task.id));
+    if (selected.length === 0) return;
+    setAutoScheduleScopeTask(null);
+    void openResourceScheduleDialog({
+      scopeRootTaskIds: selected.map((task) => task.id),
+      modeOverride: autoScheduleModeOverride,
+      scopeLabel: `${parentTask.taskCode || "父任务"} · ${parentTask.taskName || "未命名任务"}下 ${selected.length} 个末级父任务`,
+    });
+  };
   const importPreviewDepthById = useMemo(
     () => ganttTaskDepths(importPreview?.previewTasks ?? []),
     [importPreview?.previewTasks],
@@ -418,10 +678,13 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     return result;
   };
 
-  const openResourceScheduleDialog = async () => {
+  const openResourceScheduleDialog = async (
+    request: ResourceScheduleRequest = DEFAULT_RESOURCE_SCHEDULE_REQUEST,
+  ) => {
+    setResourceScheduleRequest(request);
     setResourceDialogOpen(true);
     setResourceAnalysisLoading(true);
-    const analysis = await fetchResourceAnalysis(true);
+    const analysis = await fetchResourceAnalysis(true, request);
     setResourceAnalysisLoading(false);
     if (!analysis) {
       setResourceDialogOpen(false);
@@ -430,7 +693,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   };
 
   const applyResourceScheduleCandidate = async (candidate: ResourceScheduleCandidateView) => {
-    if (!resourceAnalysis || resourceApplyingKind) return;
+    if (!resourceAnalysis || resourceApplyingKind || !canEditPlanning) return;
     setResourceApplyingKind(candidate.kind);
     try {
       await runWithSnapshotHistory(
@@ -441,6 +704,8 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
             candidateKind: candidate.kind,
             revision: resourceAnalysis.revision,
             snapshotHash: resourceAnalysis.snapshotHash,
+            scopeRootTaskIds: resourceScheduleRequest.scopeRootTaskIds,
+            modeOverride: resourceScheduleRequest.modeOverride,
           });
           await fetchTasks();
         },
@@ -451,7 +716,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
         title: "应用资源排期失败",
         message: error instanceof Error ? error.message : "资源排期方案应用失败",
       });
-      await fetchResourceAnalysis(true);
+      await fetchResourceAnalysis(true, resourceScheduleRequest);
     } finally {
       setResourceApplyingKind(null);
     }
@@ -558,18 +823,45 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     }
   };
 
+  const handleNetworkDiagramExport = async (kind: "AON" | "AOA") => {
+    setExportingFormat(`network-${kind}`);
+    try {
+      const response = await fetch(`/api/projects/${projectId}/gantt-tasks/network-diagram?diagram=${kind}`, {
+        headers: api.getToken() ? { Authorization: `Bearer ${api.getToken()}` } : {},
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || "网络图导出失败");
+      }
+      const blob = await response.blob();
+      const contentDisposition = response.headers.get("Content-Disposition") || "";
+      const encodedName = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+      const fileName = encodedName ? decodeURIComponent(encodedName) : `${kind === "AON" ? "单代号" : "双代号"}网络图.drawio`;
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = fileName;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setOperationError({ title: "网络图导出失败", message: error instanceof Error ? error.message : "导出失败" });
+    } finally {
+      setExportingFormat(null);
+    }
+  };
+
   const startCreate = async (parentTask?: ProjectGanttTask) => {
     const parentId = parentTask?.id ?? null;
     setCreatingParentId(parentId ?? "root");
     try {
-      const startDate = parentTask?.startDate || new Date().toISOString().slice(0, 10);
       await runWithSnapshotHistory("新增任务", { taskIds: [], anchorTaskId: parentTask?.id }, async () => {
         const created = await api.post<ProjectGanttTask>(`/api/projects/${projectId}/gantt-tasks`, {
           parentId,
           taskName: "",
           taskDescription: "无",
-          startDate,
+          startDate: "",
           durationDays: 0,
+          taskMode: "AUTO",
           ownerMemberId: null,
           actualStartDate: "",
           actualEndDate: "",
@@ -590,27 +882,103 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     }
   };
 
+  const toTaskUpdatePayload = (draft: GanttTaskDraft) => ({
+    ...draft,
+    // The editor uses `endDate` consistently, while the API and import/export
+    // contract use `finishDate`. Send the canonical API key explicitly so a
+    // planned-finish edit can never be silently ignored.
+    finishDate: draft.endDate,
+  });
+
+  const saveTaskUpdate = async (task: ProjectGanttTask, draft: GanttTaskDraft, columnKey?: string) => {
+    setSavingTaskId(task.id);
+    try {
+      let scheduleWarnings: string[] = [];
+      await runWithSnapshotHistory("编辑任务字段", { taskIds: [task.id], columnKey }, async () => {
+        const saved = await api.put<ProjectGanttTask & { scheduleWarnings?: string[] }>(
+          `/api/projects/${projectId}/gantt-tasks/${task.id}`,
+          toTaskUpdatePayload(draft),
+        );
+        scheduleWarnings = saved.scheduleWarnings ?? [];
+        await fetchTasks();
+      });
+      if (draft.taskMode !== "AUTO" && scheduleWarnings.length > 0) {
+        setOperationError({
+          title: "固定排期干涉提醒",
+          message: scheduleWarnings.join("\n"),
+        });
+      }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "保存失败");
+      await fetchTasks();
+    } finally {
+      setSavingTaskId(null);
+    }
+  };
+
   const handleUpdateTask = async (task: ProjectGanttTask, draft: GanttTaskDraft, columnKey?: string) => {
-    if (!isValidGanttDurationDays(draft.durationDays) || (!draft.startDate && draft.durationDays > 0)) {
-      alert("工期留空或按 0.5 天为单位填写；填写工期时需要计划开始时间");
+    const planColumns = new Set(["startDate", "endDate", "durationDays", "priority", "owner", "predecessor"]);
+    const isPlanEdit = Boolean(columnKey && planColumns.has(columnKey));
+    const hasChildTasks = tasks.some((candidate) => candidate.parentId === task.id);
+    // A direct plan edit establishes a deterministic task mode. Editing a
+    // summary date also creates a locked boundary, rather than letting the
+    // next roll-up overwrite the project manager's explicit window.
+    const nextDraft: GanttTaskDraft = isPlanEdit
+      ? {
+        ...draft,
+        taskMode: draft.taskMode === "AUTO"
+          ? columnKey === "durationDays"
+            ? (draft.startDate ? "DURATION_FORWARD" : draft.endDate ? "DURATION_BACKWARD" : "AUTO")
+            : columnKey === "startDate"
+              ? (draft.durationDays > 0 ? "DURATION_FORWARD" : draft.endDate ? "DATES_FIXED" : "AUTO")
+              : columnKey === "endDate"
+                ? (draft.startDate ? "DATES_FIXED" : draft.durationDays > 0 ? "DURATION_BACKWARD" : "AUTO")
+                : "AUTO"
+          : draft.taskMode,
+        parentBoundaryMode: hasChildTasks && draft.parentBoundaryMode === "ROLLUP"
+          ? "LOCKED"
+          : draft.parentBoundaryMode,
+      }
+      : draft;
+    if (!isValidGanttDurationDays(nextDraft.durationDays) || (
+      !nextDraft.startDate
+      && nextDraft.durationDays > 0
+      && nextDraft.taskMode === "DURATION_FORWARD"
+    )) {
+      alert("工期留空或按 0.5 天为单位填写；工期固定正排需要计划开始时间");
       return;
     }
-    if (draft.progress < 0 || draft.progress > 100) {
+    if (nextDraft.taskMode === "DURATION_BACKWARD" && nextDraft.durationDays > 0 && !nextDraft.endDate) {
+      alert("工期固定倒排需要计划完成时间");
+      return;
+    }
+    if (nextDraft.taskMode === "DATES_FIXED" && Boolean(nextDraft.startDate) !== Boolean(nextDraft.endDate)) {
+      alert("日期固定需要同时填写计划开始和计划完成时间");
+      return;
+    }
+    if (nextDraft.progress < 0 || nextDraft.progress > 100) {
       alert("当前进度必须在 0-100 之间");
       return;
     }
-    if (draft.estimatedWorkHours < 0 || draft.actualWorkHours < 0) {
+    if (nextDraft.estimatedWorkHours < 0 || nextDraft.actualWorkHours < 0) {
       alert("预计工时和实际工时不能小于 0");
       return;
     }
-    setSavingTaskId(task.id);
     try {
-      await runWithSnapshotHistory("编辑任务字段", { taskIds: [task.id], columnKey }, async () => {
-        await api.put<ProjectGanttTask>(`/api/projects/${projectId}/gantt-tasks/${task.id}`, draft);
-        await fetchTasks();
-      });
+      if (isPlanEdit) {
+        setSavingTaskId(task.id);
+        const impact = await api.put<ManualScheduleImpactView>(
+          `/api/projects/${projectId}/gantt-tasks/${task.id}`,
+          { ...toTaskUpdatePayload(nextDraft), previewScheduleImpact: true },
+        );
+        if (impact.requiresConfirmation) {
+          setPendingScheduleUpdate({ task, draft: nextDraft, columnKey, impact });
+          return;
+        }
+      }
+      await saveTaskUpdate(task, nextDraft, columnKey);
     } catch (error) {
-      alert(error instanceof Error ? error.message : "保存失败");
+      alert(error instanceof Error ? error.message : "排期影响分析失败");
       await fetchTasks();
     } finally {
       setSavingTaskId(null);
@@ -787,6 +1155,56 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     }
   };
 
+  const changeHardFinishDate = async (nextValue: string) => {
+    if (savingHardFinishDate || !canEdit) return;
+    const normalized = nextValue.trim();
+    setSavingHardFinishDate(true);
+    try {
+      await runWithSnapshotHistory("修改项目硬完成时间", { taskIds: [] }, async () => {
+        const settings = await api.put<GanttSettings>(`/api/projects/${projectId}/gantt-settings`, {
+          hardFinishDate: normalized,
+        });
+        setCalendarMode(settings.calendarMode);
+        setHardFinishDate(settings.hardFinishDate || "");
+        await fetchTasks();
+      });
+    } catch (error) {
+      setOperationError({
+        title: "项目硬完成时间保存失败",
+        message: error instanceof Error ? error.message : "保存失败",
+      });
+      const settings = await api.get<GanttSettings>(`/api/projects/${projectId}/gantt-settings`).catch(() => null);
+      if (settings) setHardFinishDate(settings.hardFinishDate || "");
+    } finally {
+      setSavingHardFinishDate(false);
+    }
+  };
+
+  const performBaselineAction = async (
+    action: "VALIDATE" | "BEGIN_CHANGE" | "PUBLISH" | "REQUEST_APPROVAL",
+  ) => {
+    if (baselineBusy) return;
+    setBaselineBusy(true);
+    try {
+      await api.post(`/api/projects/${projectId}/gantt-tasks/baseline`, {
+        action,
+        reason: baselineReason.trim(),
+      });
+      await Promise.all([fetchTasks(), fetchBaselineOverview()]);
+      if (action === "PUBLISH") {
+        setBaselineDialogOpen(false);
+        setBaselineReason("");
+      }
+    } catch (error) {
+      setOperationError({
+        title: action === "PUBLISH" ? "发布 WBS 基线失败" : "WBS 基线操作失败",
+        message: error instanceof Error ? error.message : "请稍后重试",
+      });
+    } finally {
+      setBaselineBusy(false);
+    }
+  };
+
   const handleUndo = async () => {
     const entry = currentHistory.entries[currentHistory.cursor];
     if (!entry || historyBusy) return;
@@ -882,6 +1300,14 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const criticalCount = buildGanttRows(tasks).filter((row) => row.isCritical).length;
   const undoEntry = currentHistory.entries[currentHistory.cursor];
   const redoEntry = currentHistory.entries[currentHistory.cursor + 1];
+  const resourceAttentionCount = (resourceAnalysis?.conflicts?.length ?? 0) + (resourceAnalysis?.issues?.length ?? 0);
+  const baselineState = baselineOverview?.project.ganttBaselineState ?? "DRAFT";
+  const baselineStateLabel = baselineState === "PUBLISHED"
+    ? `已发布 V${baselineOverview?.project.ganttBaselineVersion ?? 0}`
+    : baselineState === "CHANGE_DRAFT"
+      ? `变更草案 V${(baselineOverview?.project.ganttBaselineVersion ?? 0) + 1}`
+      : "未发布";
+  const baselineBlockers = baselineOverview?.validation.blockers ?? [];
 
   return (
     <div className="space-y-4">
@@ -919,14 +1345,14 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                 variant="ghost"
                 className={cn(
                   "h-8 text-xs",
-                  (resourceAnalysis?.conflicts?.length ?? 0) > 0 && "text-destructive hover:bg-destructive/8 hover:text-destructive",
+                  resourceAttentionCount > 0 && "text-destructive hover:bg-destructive/8 hover:text-destructive",
                 )}
-                disabled={resourceAnalysisLoading || (resourceAnalysis?.conflicts?.length ?? 0) === 0}
+                disabled={resourceAnalysisLoading}
                 onClick={() => void openResourceScheduleDialog()}
-                title={(resourceAnalysis?.conflicts?.length ?? 0) > 0 ? "查看资源冲突并选择优化排期方案" : "当前没有资源冲突"}
+                title={resourceAttentionCount > 0 ? "查看资源冲突、排期约束并选择优化方案" : "检查资源容量和排期约束"}
               >
                 <WandSparkles className="size-3.5" />
-                资源优化 {resourceAnalysis?.conflicts?.length ?? 0}
+                资源优化 {resourceAttentionCount}
               </Button>
               {(canCreate || canEdit || canDelete) && (
                 <div className="flex items-center gap-2" role="group" aria-label="撤销与重做">
@@ -995,6 +1421,27 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   <BriefcaseBusiness className="size-3.5" />工作日
                 </Button>
               </div>
+              <label className="flex h-8 items-center gap-2 rounded-md border border-border/70 bg-background/35 px-2 text-xs text-muted-foreground" title="设置后，任何任务及其子任务都不能超过该完成日期；存在冲突时不能发布基线">
+                <span className="whitespace-nowrap">项目硬完成</span>
+                <Input
+                  type="date"
+                  value={hardFinishDate}
+                  onChange={(event) => setHardFinishDate(event.target.value)}
+                  onBlur={(event) => void changeHardFinishDate(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      void api.get<GanttSettings>(`/api/projects/${projectId}/gantt-settings`)
+                        .then((settings) => setHardFinishDate(settings.hardFinishDate || ""));
+                      event.currentTarget.blur();
+                    }
+                  }}
+                  className="h-6 w-[132px] border-0 bg-transparent px-0 text-xs shadow-none focus-visible:ring-0"
+                  disabled={!canEdit || savingHardFinishDate}
+                  aria-label="项目硬完成时间"
+                />
+              </label>
               {canCreate && (
                 <>
                   <input
@@ -1034,10 +1481,14 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   size="sm"
                   variant="outline"
                   className="h-8 text-xs"
-                  disabled
-                  title="发布基线功能暂未启用"
+                  disabled={baselineBusy}
+                  onClick={() => {
+                    setBaselineDialogOpen(true);
+                    void fetchBaselineOverview();
+                  }}
+                  title="查看 WBS 基线校验结果、发布状态和变更权限"
                 >
-                  <FlagTriangleRight className="size-3.5" /> 发布基线
+                  <FlagTriangleRight className="size-3.5" /> {baselineState === "PUBLISHED" ? `基线 V${baselineOverview?.project.ganttBaselineVersion ?? 0}` : "发布基线"}
                 </Button>
               )}
               <DropdownMenu>
@@ -1055,6 +1506,14 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   </DropdownMenuItem>
                   <DropdownMenuItem disabled={!mppExportAvailable} onClick={() => void handleExport("mpp")}>
                     <FileType2 className="size-4" /> MPP 文件{mppExportAvailable ? "" : "（需安装 Microsoft Project 转换服务）"}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel>网络图（Draw.io）</DropdownMenuLabel>
+                  <DropdownMenuItem onClick={() => void handleNetworkDiagramExport("AON")}>
+                    <Network className="size-4" /> 单代号网络图（活动节点）
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => void handleNetworkDiagramExport("AOA")}>
+                    <Network className="size-4" /> 双代号网络图（活动箭线）
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -1077,6 +1536,8 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
             canCreate={canCreate}
             canDelete={canDelete}
             canEdit={canEdit}
+            canEditActuals={canEditActuals}
+            allowCompletedTaskReopen={canEditPlanning && baselineState === "CHANGE_DRAFT"}
             creatingParentId={creatingParentId}
             deletingSelected={deletingSelected}
             fullScreen={fullScreen}
@@ -1085,6 +1546,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
             hierarchyChanging={hierarchyChanging}
             historyFocusRequest={historyFocusRequest}
             onChangeHierarchy={handleChangeHierarchy}
+            onAutoSchedule={startAutoSchedule}
             onCreateTask={startCreate}
             onDeleteSelected={handleDeleteSelected}
             onInsertTasks={handleInsertTasks}
@@ -1102,12 +1564,292 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
           />
         </CardContent>
       </Card>
+      <Dialog
+        open={baselineDialogOpen}
+        onOpenChange={(open) => {
+          if (!baselineBusy) setBaselineDialogOpen(open);
+        }}
+      >
+        <DialogContent container={fullScreen ? ganttPortalContainer : undefined} className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>WBS 基线管理</DialogTitle>
+            <DialogDescription>
+              基线发布前可自由调整计划。发布后任务结构、计划日期、工期、负责人、依赖关系和项目硬完成时间将锁定；实际工时、实际日期和进度仍可持续更新。
+            </DialogDescription>
+          </DialogHeader>
+          {!baselineOverview ? (
+            <div className="rounded-md border border-destructive/35 bg-destructive/5 px-3 py-4 text-sm">
+              未能读取当前 WBS 基线状态。请重新打开此窗口或检查“项目 WBS 管理”查看权限。
+            </div>
+          ) : (
+            <div className="max-h-[58vh] space-y-3 overflow-y-auto pr-1 text-sm">
+              <section className="grid gap-3 rounded-md border border-border/70 p-3 sm:grid-cols-3">
+                <div>
+                  <div className="text-xs text-muted-foreground">当前状态</div>
+                  <div className="mt-1 font-medium">{baselineStateLabel}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted-foreground">当前计划修订</div>
+                  <div className="mt-1 font-medium">{baselineOverview.baseline?.sourceRevision ?? baselineOverview.draft?.sourceRevision ?? "尚未发布"}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted-foreground">计划编辑权限</div>
+                  <div className="mt-1 font-medium">{baselineOverview.permissions.canEditPlanning ? "允许编辑" : "已锁定"}</div>
+                </div>
+                {baselineOverview.project.ganttBaselinePublishedAt && (
+                  <div className="sm:col-span-3 text-xs text-muted-foreground">
+                    最近发布：{new Date(baselineOverview.project.ganttBaselinePublishedAt).toLocaleString("zh-CN")} · {baselineOverview.project.ganttBaselinePublishedBy || "系统"}
+                  </div>
+                )}
+              </section>
+              {baselineOverview.permissions.planningMutationBlocker && (
+                <section className="rounded-md border border-amber-500/35 bg-amber-500/5 px-3 py-2.5 text-xs leading-5 text-amber-700 dark:text-amber-300">
+                  {baselineOverview.permissions.planningMutationBlocker}
+                </section>
+              )}
+              <section className={cn(
+                "rounded-md border p-3",
+                baselineBlockers.length > 0 ? "border-destructive/35 bg-destructive/5" : "border-emerald-500/30 bg-emerald-500/5",
+              )}>
+                <div className={cn("font-medium", baselineBlockers.length > 0 ? "text-destructive" : "text-emerald-600 dark:text-emerald-400")}>
+                  发布校验 {baselineBlockers.length > 0 ? `未通过：${baselineBlockers.length} 项阻断` : "已通过"}
+                </div>
+                {baselineBlockers.length > 0 ? (
+                  <ul className="mt-2 space-y-2 text-xs leading-5">
+                    {baselineBlockers.map((blocker) => (
+                      <li key={`${blocker.code}-${blocker.taskIds.join("-")}`}>
+                        <div>{blocker.message}</div>
+                        {blocker.taskIds.length > 0 && <div className="text-muted-foreground">涉及 {blocker.taskIds.length} 个任务</div>}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-1 text-xs text-muted-foreground">当前 WBS 满足支持的依赖关系和硬边界规则，可以发布为新的基线版本。</p>
+                )}
+              </section>
+              {(baselineOverview.permissions.canPrepareDraft || baselineOverview.permissions.canPublish) && (
+                <label className="block space-y-1.5">
+                  <span className="text-xs font-medium">基线说明</span>
+                  <Input
+                    value={baselineReason}
+                    onChange={(event) => setBaselineReason(event.target.value)}
+                    placeholder={baselineState === "PUBLISHED" ? "说明此次变更原因" : "说明本次基线范围或版本说明（可选）"}
+                    className="h-8 text-xs"
+                    disabled={baselineBusy}
+                  />
+                </label>
+              )}
+              {baselineOverview.draft && (
+                <section className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2.5 text-xs leading-5">
+                  <div className="font-medium">变更草案</div>
+                  <div className="mt-1 text-muted-foreground">
+                    基于 V{baselineOverview.draft.baseVersion}，由 {baselineOverview.draft.updatedByName || "项目经理"} 维护。
+                    {baselineOverview.draft.reason ? ` ${baselineOverview.draft.reason}` : ""}
+                  </div>
+                </section>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={baselineBusy}
+              onClick={() => void performBaselineAction("VALIDATE")}
+            >
+              重新校验
+            </Button>
+            {baselineOverview?.permissions.canPrepareDraft && baselineState === "PUBLISHED" && (
+              <Button
+                type="button"
+                variant="outline"
+                disabled={baselineBusy}
+                onClick={() => void performBaselineAction("BEGIN_CHANGE")}
+              >
+                创建变更草案
+              </Button>
+            )}
+            {baselineOverview && !baselineOverview.permissions.canPublish && can("project-gantt:baseline-request") && (
+              <Button
+                type="button"
+                variant="outline"
+                disabled={baselineBusy}
+                onClick={() => void performBaselineAction("REQUEST_APPROVAL")}
+              >
+                申请发布审批
+              </Button>
+            )}
+            {baselineOverview?.permissions.canPublish && baselineState !== "PUBLISHED" && (
+              <Button
+                type="button"
+                disabled={baselineBusy || baselineBlockers.length > 0}
+                onClick={() => void performBaselineAction("PUBLISH")}
+              >
+                {baselineState === "CHANGE_DRAFT" ? "发布变更基线" : "发布基线"}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={Boolean(pendingScheduleUpdate)}
+        onOpenChange={(open) => {
+          if (open || !pendingScheduleUpdate) return;
+          setPendingScheduleUpdate(null);
+          void fetchTasks();
+        }}
+      >
+        <DialogContent container={fullScreen ? ganttPortalContainer : undefined} className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>确认手动排期影响</DialogTitle>
+            <DialogDescription>
+              此次修改会作为手动排期约束保留。系统不会替换您输入的日期，但会按紧前关系重新计算后续自动任务，并保留冲突提示。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-[52vh] space-y-3 overflow-y-auto pr-1 text-sm">
+            {(pendingScheduleUpdate?.impact.affectedTasks.length ?? 0) > 1 && (
+              <section className="rounded-md border border-border/70 p-3">
+                <div className="font-medium">可能受影响的后续任务</div>
+                <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+                  {pendingScheduleUpdate?.impact.affectedTasks
+                    .filter((item) => item.id !== pendingScheduleUpdate?.task.id)
+                    .slice(0, 8)
+                    .map((item) => (
+                      <li key={item.id}>{item.taskCode || "任务"} · {item.taskName || "未命名任务"}</li>
+                    ))}
+                  {(pendingScheduleUpdate?.impact.affectedTasks.length ?? 0) > 9 && (
+                    <li>另有 {(pendingScheduleUpdate?.impact.affectedTasks.length ?? 0) - 9} 个后续任务</li>
+                  )}
+                </ul>
+              </section>
+            )}
+            {(pendingScheduleUpdate?.impact.issues.length ?? 0) > 0 && (
+              <section className="rounded-md border border-amber-500/35 bg-amber-500/5 p-3">
+                <div className="font-medium text-amber-700 dark:text-amber-400">排期约束</div>
+                <ul className="mt-2 space-y-2 text-xs leading-5">
+                  {pendingScheduleUpdate?.impact.issues.slice(0, 6).map((issue) => (
+                    <li key={issue.id}>
+                      <div>{issue.message}</div>
+                      <div className="text-muted-foreground">{issue.suggestion}</div>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+            {(pendingScheduleUpdate?.impact.conflicts.length ?? 0) > 0 && (
+              <section className="rounded-md border border-destructive/35 bg-destructive/5 p-3">
+                <div className="font-medium text-destructive">负责人容量或并发冲突</div>
+                <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+                  {pendingScheduleUpdate?.impact.conflicts.slice(0, 6).map((conflict) => (
+                    <li key={conflict.id}>{conflict.startDate} 至 {conflict.finishDate} · {conflict.reason === "CAPACITY_EXCEEDED" ? "容量超限" : "并发超限"}</li>
+                  ))}
+                </ul>
+              </section>
+            )}
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => {
+              setPendingScheduleUpdate(null);
+              void fetchTasks();
+            }}>取消修改</Button>
+            <Button
+              type="button"
+              disabled={Boolean(savingTaskId)}
+              onClick={() => {
+                const pending = pendingScheduleUpdate;
+                if (!pending) return;
+                setPendingScheduleUpdate(null);
+                void saveTaskUpdate(pending.task, pending.draft, pending.columnKey);
+              }}
+            >
+              仍按此日期保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={Boolean(autoScheduleScopeTask)}
+        onOpenChange={(open) => {
+          if (!open) setAutoScheduleScopeTask(null);
+        }}
+      >
+        <DialogContent container={fullScreen ? ganttPortalContainer : undefined} className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>选择自动排期范围</DialogTitle>
+            <DialogDescription>
+              只会计算所选末级父任务下的叶子任务。未选分支保留当前日期并继续占用负责人容量，不会被本次自动排期移动。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <section className="rounded-md border border-border/70 p-3">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <span className="text-sm font-medium">影响范围</span>
+                <div className="flex items-center gap-2 text-xs">
+                  <button
+                    type="button"
+                    className="text-primary hover:underline"
+                    onClick={() => setAutoScheduleScopeIds(autoScheduleScopeCandidates.map((task) => task.id))}
+                  >
+                    全选
+                  </button>
+                  <button
+                    type="button"
+                    className="text-muted-foreground hover:text-foreground"
+                    onClick={() => setAutoScheduleScopeIds([])}
+                  >
+                    清空
+                  </button>
+                </div>
+              </div>
+              <div className="max-h-64 space-y-1 overflow-y-auto pr-1">
+                {autoScheduleScopeCandidates.map((task) => (
+                  <label
+                    key={task.id}
+                    className="flex cursor-pointer items-center gap-2 rounded px-2 py-2 text-sm transition-colors hover:bg-muted/40"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={autoScheduleScopeIds.includes(task.id)}
+                      onChange={() => toggleAutoScheduleScopeTask(task.id)}
+                      className="size-4 accent-primary"
+                    />
+                    <span className="min-w-0 truncate" title={`${task.taskCode} · ${task.taskName}`}>
+                      <span className="font-mono text-xs text-muted-foreground">{task.taskCode}</span>
+                      <span className="mx-1 text-muted-foreground">·</span>
+                      <span>{task.taskName || "未命名任务"}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+              <div className="mt-2 text-xs text-muted-foreground">已选择 {autoScheduleScopeIds.length} 个末级父任务</div>
+            </section>
+            <label className="block space-y-1.5">
+              <span className="text-sm font-medium">子任务排期方式</span>
+              <Select
+                value={autoScheduleModeOverride}
+                onChange={(event) => setAutoScheduleModeOverride(event.target.value as ResourceScheduleModeOverride)}
+                className="h-9 text-sm"
+              >
+                <option value="PRESERVE">保留现有方式，仅排期自动任务</option>
+                <option value="AUTO">覆盖为自动排期</option>
+                <option value="DURATION_FORWARD">覆盖为工期固定 · 正排</option>
+                <option value="DURATION_BACKWARD">覆盖为工期固定 · 倒排</option>
+              </Select>
+              <span className="block text-xs leading-5 text-muted-foreground">日期固定、已经开始和已完成任务始终保留，不会被覆盖。</span>
+            </label>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setAutoScheduleScopeTask(null)}>取消</Button>
+            <Button type="button" disabled={autoScheduleScopeIds.length === 0} onClick={confirmAutoScheduleScope}>计算方案</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={resourceDialogOpen} onOpenChange={(open) => !resourceApplyingKind && setResourceDialogOpen(open)}>
         <DialogContent container={fullScreen ? ganttPortalContainer : undefined} className="max-w-4xl">
           <DialogHeader>
             <DialogTitle>资源冲突与优化排期</DialogTitle>
             <DialogDescription>
-              系统只调整当前项目未开始的可排程叶子任务，不修改负责人、手工排程任务、进行中或已完成任务，也不会移动其他项目任务。历史升级保护的固定任务仅在你选择方案后调整日期，并继续保持固定；应用后可通过 WBS 顶部撤销按钮恢复。
+              排期范围：{resourceScheduleRequest.scopeLabel}。自动排期只移动当前项目尚未开始的范围内叶子任务；日期固定、进行中和已完成任务不会移动，范围外任务会继续占用负责人容量。系统会先校验负责人、工期、计划锚点、紧前关系和父级硬边界，再给出可应用方案；应用后可通过 WBS 顶部撤销按钮恢复。
             </DialogDescription>
           </DialogHeader>
           {resourceAnalysisLoading ? (
@@ -1115,10 +1857,25 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
           ) : (
             <div className="max-h-[65vh] space-y-4 overflow-y-auto pr-1">
               <div className="flex items-center gap-2 border-b border-border/70 pb-3 text-sm">
-                <TriangleAlert className="size-4 text-destructive" />
-                <span>检测到 {resourceAnalysis?.conflicts?.length ?? 0} 组资源冲突</span>
+                <TriangleAlert className={cn("size-4", resourceAttentionCount > 0 ? "text-destructive" : "text-muted-foreground")} />
+                <span>
+                  资源冲突 {resourceAnalysis?.conflicts?.length ?? 0} 组，排期约束告警 {resourceAnalysis?.issues?.length ?? 0} 条
+                </span>
               </div>
-              <div className="grid gap-3 md:grid-cols-3">
+              {(resourceAnalysis?.issues?.length ?? 0) > 0 && (
+                <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-xs">
+                  {resourceAnalysis?.issues.slice(0, 8).map((issue) => (
+                    <div key={issue.id} className="flex gap-2">
+                      <TriangleAlert className={cn("mt-0.5 size-3.5 shrink-0", issue.severity === "ERROR" ? "text-destructive" : "text-amber-500")} />
+                      <div>
+                        <div>{issue.message}</div>
+                        <div className="mt-0.5 text-muted-foreground">{issue.suggestion}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 {(resourceAnalysis?.candidates ?? []).map((candidate) => (
                   <section key={candidate.kind} className="flex min-h-[220px] flex-col rounded-md border border-border/70 p-4">
                     <div className="text-sm font-semibold">{candidate.title}</div>
@@ -1132,6 +1889,8 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                       <dd className="text-right font-medium">{candidate.metrics.completionDate || "-"}</dd>
                       <dt className="text-muted-foreground">剩余冲突</dt>
                       <dd className="text-right font-medium text-destructive">{candidate.remainingConflicts.length}</dd>
+                      <dt className="text-muted-foreground">资源约束链</dt>
+                      <dd className="text-right font-medium">{candidate.resourceConstrainedTaskIds.length}</dd>
                     </dl>
                     {candidate.changes.length > 0 && (
                       <div className="mt-3 border-t border-border/60 pt-3">
@@ -1149,6 +1908,12 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                         </ul>
                       </div>
                     )}
+                    {candidate.issues.length > 0 && (
+                      <div className="mt-3 text-[11px] leading-4 text-amber-600 dark:text-amber-400">
+                        {candidate.issues.find((issue) => issue.severity === "ERROR")?.message
+                          ?? candidate.issues[0]?.message}
+                      </div>
+                    )}
                     {!candidate.applicable && (
                       <p className="mt-3 text-xs leading-5 text-amber-500">
                         手工排程、进行中任务或其他项目占用使此方案无法减少冲突，请先调整这些约束。
@@ -1158,7 +1923,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                       type="button"
                       size="sm"
                       className="mt-auto w-full"
-                      disabled={!candidate.applicable || Boolean(resourceApplyingKind)}
+                      disabled={!candidate.applicable || Boolean(resourceApplyingKind) || !canEditPlanning}
                       onClick={() => void applyResourceScheduleCandidate(candidate)}
                     >
                       {resourceApplyingKind === candidate.kind ? "应用中..." : "应用此方案"}

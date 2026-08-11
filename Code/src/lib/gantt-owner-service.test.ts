@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   applyGanttOwnerChange,
+  applyGanttOwnerSet,
+  hasGanttOwnerSetChange,
   replaceGanttOwnerMember,
   resolveEffectiveGanttOwnerMemberId,
   synchronizeGanttOwnerHierarchy,
@@ -122,6 +124,41 @@ describe("gantt owner service", () => {
       nextOwnerMemberId: "member-b",
     })).rejects.toThrow("只读");
     expect(mocks.taskUpdate).not.toHaveBeenCalled();
+  });
+
+  it("rejects multiple direct owners so only parent rollups can be multi-owner", async () => {
+    mocks.taskFindMany.mockResolvedValue([
+      { id: "leaf", parentId: null, ownerMemberId: null, ownerLinks: [] },
+    ]);
+    mocks.memberFindMany.mockResolvedValue([
+      { id: "member-a", accountId: "account-1", personName: "张三" },
+      { id: "member-b", accountId: "account-2", personName: "李四" },
+    ]);
+
+    await expect(applyGanttOwnerSet({
+      tx: tx as never,
+      projectId: "project-1",
+      taskId: "leaf",
+      nextOwnerMemberIds: ["member-a", "member-b"],
+    })).rejects.toThrow("末级任务只能指定一名负责人");
+    expect(mocks.taskUpdate).not.toHaveBeenCalled();
+  });
+
+  it("does not treat an unchanged parent owner rollup as a direct owner edit", () => {
+    expect(hasGanttOwnerSetChange({
+      hasOwnerInput: true,
+      currentOwnerMemberIds: ["member-a", "member-b"],
+      nextOwnerMemberIds: ["member-b", "member-a"],
+    })).toBe(false);
+  });
+
+  it("recognizes an explicit branch reassignment even when the owner ids match", () => {
+    expect(hasGanttOwnerSetChange({
+      hasOwnerInput: true,
+      currentOwnerMemberIds: ["member-a"],
+      nextOwnerMemberIds: ["member-a"],
+      ownerChangeMode: "BRANCH_REASSIGN",
+    })).toBe(true);
   });
 
   it("does not retain a soon-to-be-deleted role membership as the canonical parent owner", async () => {

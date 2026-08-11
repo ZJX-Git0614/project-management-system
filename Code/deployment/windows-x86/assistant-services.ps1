@@ -1,4 +1,4 @@
-param(
+﻿param(
   [ValidateSet("Menu", "Status", "StatusJson", "Start", "Stop", "Restart", "Ensure", "EnableAutoStart", "DisableAutoStart", "ConfigureRagLite")]
   [string]$Action = "Menu",
   [ValidateSet("All", "Ollama", "RagLite")]

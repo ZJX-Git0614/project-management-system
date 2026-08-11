@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronRight as MenuChevronRight, ClipboardPaste, Columns3, Copy, Filter, GripVertical, IndentDecrease, IndentIncrease, ListTree, Plus, Scissors, Star, Trash2, TriangleAlert, UserRoundCog, ZoomIn, ZoomOut } from "lucide-react";
+import { ArrowDown, ArrowUp, CalendarClock, ChevronDown, ChevronLeft, ChevronRight, ChevronRight as MenuChevronRight, ClipboardPaste, Columns3, Copy, Filter, GripVertical, IndentDecrease, IndentIncrease, ListTree, Plus, Scissors, Star, Trash2, TriangleAlert, UserRoundCog, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { GanttDateField } from "@/components/gantt-date-field";
@@ -50,7 +50,6 @@ import {
   type GanttFilterState,
 } from "@/lib/gantt-filters";
 import {
-  calculateTaskDurationDays,
   calculateTaskFinishDate,
   estimatedHoursForDuration,
   normalizeGanttDurationDays,
@@ -58,6 +57,15 @@ import {
   shiftTaskDate,
   type GanttCalendarMode,
 } from "@/lib/gantt-calendar";
+import {
+  normalizeGanttHalfDay,
+  normalizeGanttScheduleMode,
+  normalizeGanttUserPriority,
+  resolveGanttTaskPlan,
+  type GanttHalfDay,
+  type GanttScheduleMode,
+  type GanttUserPriority,
+} from "@/lib/gantt-planning-rules";
 import { cn } from "@/lib/utils";
 
 interface GanttTimelineProps {
@@ -69,6 +77,8 @@ interface GanttTimelineProps {
   emptyText?: string;
   canCreate?: boolean;
   canEdit?: boolean;
+  canEditActuals?: boolean;
+  allowCompletedTaskReopen?: boolean;
   canDelete?: boolean;
   creatingParentId?: string | null;
   savingTaskId?: string | null;
@@ -79,6 +89,8 @@ interface GanttTimelineProps {
   portalContainer?: HTMLElement | null;
   resourceConflictMessagesByTaskId?: Record<string, string[]>;
   onCreateTask?: (parentTask?: ProjectGanttTask) => void;
+  /** Opens automatic scheduling for the selected parent scope. */
+  onAutoSchedule?: (parentTask: ProjectGanttTask) => void;
   historyFocusRequest?: GanttHistoryFocusRequest | null;
   onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft, columnKey?: string) => void | Promise<void>;
   onDeleteSelected?: (taskIds: string[]) => void | Promise<void>;
@@ -124,13 +136,23 @@ export type GanttTaskDraft = {
   taskName: string;
   taskDescription: string;
   startDate: string;
+  startSlot: GanttHalfDay;
   endDate: string;
+  finishSlot: GanttHalfDay;
   durationDays: number;
   actualStartDate: string;
+  actualStartSlot: GanttHalfDay;
   actualEndDate: string;
+  actualFinishSlot: GanttHalfDay;
   estimatedWorkHours: number;
   actualWorkHours: number;
   progress: number;
+  taskMode: GanttScheduleMode;
+  parentBoundaryMode: "ROLLUP" | "TARGET" | "LOCKED";
+  schedulePriority: number;
+  userPriority: GanttUserPriority;
+  effortDriven: boolean;
+  parallelizable: boolean;
   isMilestone: boolean;
   predecessorTaskIds: string[];
   remark: string;
@@ -152,6 +174,10 @@ const GANTT_FILTER_KEYS: GanttFilterKey[] = [
 ];
 const ZOOM_LABELS = ["60天", "30天", "15天", "5天", "1天"];
 const DEFAULT_ZOOM_INDEX = 2;
+const normalizeTaskMode = (value: unknown): GanttTaskDraft["taskMode"] => normalizeGanttScheduleMode(value);
+const normalizeParentBoundaryMode = (value: unknown): GanttTaskDraft["parentBoundaryMode"] => (
+  value === "TARGET" || value === "LOCKED" ? value : "ROLLUP"
+);
 const SCHEDULE_STATUS_LABELS: Record<GanttScheduleStatus, string> = {
   UNSCHEDULED: "未排程",
   INVALID_DEPENDENCY: "依赖异常",
@@ -368,25 +394,40 @@ const durationFieldClass = cn(
   "px-1 text-center font-mono tabular-nums"
 );
 
+const directOwnerMemberIds = (task: Pick<ProjectGanttTask, "ownerMemberId" | "ownerMemberIds">) => (
+  task.ownerMemberIds?.length
+    ? [...task.ownerMemberIds]
+    : task.ownerMemberId ? [task.ownerMemberId] : []
+);
+
 const toTaskDraft = (task: ProjectGanttTask, calendarMode: GanttCalendarMode): GanttTaskDraft => ({
   parentId: task.parentId ?? null,
   ownerMemberId: task.ownerMemberId ?? null,
-  ownerMemberIds: task.ownerMemberIds?.length
-    ? [...task.ownerMemberIds]
-    : task.ownerMembers?.length
-      ? task.ownerMembers.map((owner) => owner.id)
-      : task.ownerMemberId ? [task.ownerMemberId] : [],
+  // Parent `ownerMembers` is a display-only rollup of descendant owners.
+  // Saving it as a direct owner set would turn an unrelated date edit into
+  // an invalid multi-owner mutation.
+  ownerMemberIds: directOwnerMemberIds(task),
   taskCategory: task.taskCategory,
   taskName: task.taskName,
   taskDescription: task.taskDescription?.trim() || "无",
   startDate: task.startDate,
-  endDate: task.finishDate || calculateTaskFinishDate(task.startDate, task.durationDays, calendarMode),
+  startSlot: normalizeGanttHalfDay(task.startSlot),
+  endDate: task.finishDate || (task.startDate ? calculateTaskFinishDate(task.startDate, task.durationDays, calendarMode) : ""),
+  finishSlot: normalizeGanttHalfDay(task.finishSlot, "PM"),
   durationDays: task.durationDays,
   actualStartDate: task.actualStartDate ?? "",
+  actualStartSlot: normalizeGanttHalfDay(task.actualStartSlot),
   actualEndDate: task.actualEndDate ?? "",
+  actualFinishSlot: normalizeGanttHalfDay(task.actualFinishSlot, "PM"),
   estimatedWorkHours: estimatedHoursForDuration(task.durationDays),
   actualWorkHours: roundGanttHours(task.actualWorkHours ?? 0),
   progress: Math.min(100, Math.max(0, task.progress ?? 0)),
+  taskMode: normalizeTaskMode(task.taskMode),
+  parentBoundaryMode: normalizeParentBoundaryMode(task.parentBoundaryMode),
+  schedulePriority: Math.max(0, Math.min(1000, Math.round(Number(task.schedulePriority ?? 500) || 500))),
+  userPriority: normalizeGanttUserPriority(task.userPriority),
+  effortDriven: Boolean(task.effortDriven),
+  parallelizable: Boolean(task.parallelizable),
   isMilestone: Boolean(task.isMilestone),
   predecessorTaskIds: task.predecessorTaskIds ?? [],
   remark: task.remark ?? "",
@@ -397,22 +438,28 @@ const taskDraftEquals = (task: ProjectGanttTask, draft: GanttTaskDraft, calendar
     && task.taskName === draft.taskName
     && (task.taskDescription?.trim() || "无") === draft.taskDescription
     && task.startDate === draft.startDate
-    && (task.finishDate || calculateTaskFinishDate(task.startDate, task.durationDays, calendarMode)) === draft.endDate
+    && normalizeGanttHalfDay(task.startSlot) === draft.startSlot
+    && (task.finishDate || (task.startDate ? calculateTaskFinishDate(task.startDate, task.durationDays, calendarMode) : "")) === draft.endDate
+    && normalizeGanttHalfDay(task.finishSlot, "PM") === draft.finishSlot
     && task.durationDays === draft.durationDays
     && (task.actualStartDate ?? "") === draft.actualStartDate
+    && normalizeGanttHalfDay(task.actualStartSlot) === draft.actualStartSlot
     && (task.actualEndDate ?? "") === draft.actualEndDate
+    && normalizeGanttHalfDay(task.actualFinishSlot, "PM") === draft.actualFinishSlot
     && estimatedHoursForDuration(task.durationDays) === draft.estimatedWorkHours
     && roundGanttHours(task.actualWorkHours ?? 0) === draft.actualWorkHours
     && (task.progress ?? 0) === draft.progress
+    && normalizeTaskMode(task.taskMode) === draft.taskMode
+    && normalizeParentBoundaryMode(task.parentBoundaryMode) === draft.parentBoundaryMode
+    && Math.max(0, Math.min(1000, Math.round(Number(task.schedulePriority ?? 500) || 500))) === draft.schedulePriority
+    && normalizeGanttUserPriority(task.userPriority) === draft.userPriority
+    && Boolean(task.effortDriven) === draft.effortDriven
+    && Boolean(task.parallelizable) === draft.parallelizable
     && Boolean(task.isMilestone) === draft.isMilestone
     && JSON.stringify(task.predecessorTaskIds ?? []) === JSON.stringify(draft.predecessorTaskIds)
     && (task.remark ?? "") === draft.remark
     && (task.parentId ?? null) === (draft.parentId ?? null)
-    && JSON.stringify([...(task.ownerMemberIds?.length
-      ? task.ownerMemberIds
-      : task.ownerMembers?.length
-        ? task.ownerMembers.map((owner) => owner.id)
-        : task.ownerMemberId ? [task.ownerMemberId] : [])].sort())
+    && JSON.stringify([...directOwnerMemberIds(task)].sort())
       === JSON.stringify([...(draft.ownerMemberIds ?? (draft.ownerMemberId ? [draft.ownerMemberId] : []))].sort())
 );
 
@@ -424,6 +471,8 @@ const GanttTimelineContent = ({
   emptyText = "暂无甘特任务",
   canCreate = false,
   canEdit = false,
+  canEditActuals = canEdit,
+  allowCompletedTaskReopen = false,
   canDelete = false,
   creatingParentId = null,
   savingTaskId = null,
@@ -435,6 +484,7 @@ const GanttTimelineContent = ({
   resourceConflictMessagesByTaskId = {},
   historyFocusRequest,
   onCreateTask,
+  onAutoSchedule,
   onUpdateTask,
   onDeleteSelected,
   onChangeHierarchy,
@@ -462,7 +512,7 @@ const GanttTimelineContent = ({
   );
   const [columnFilters, setColumnFilters] = useState<GanttFilterState>({});
   const [contextMenu, setContextMenu] = useState<{ taskId: string; x: number; y: number } | null>(null);
-  const [contextSubmenu, setContextSubmenu] = useState<"paste" | "insert" | "owner" | null>(null);
+  const [contextSubmenu, setContextSubmenu] = useState<"paste" | "insert" | "owner" | "schedule" | null>(null);
   const [insertCount, setInsertCount] = useState(1);
   const visibleColumnKeys = useMemo(
     () => ganttVisibleColumnKeys(detailsCollapsed, hiddenColumnKeys),
@@ -502,6 +552,16 @@ const GanttTimelineContent = ({
     [rows],
   );
   const taskDepthById = useMemo(() => ganttTaskDepths(rows), [rows]);
+  const taskIdsWithFsDependencies = useMemo(() => {
+    const taskIds = new Set<string>();
+    rows.forEach((row) => {
+      (row.predecessorTaskIds ?? []).forEach((predecessorTaskId) => {
+        taskIds.add(row.id);
+        taskIds.add(predecessorTaskId);
+      });
+    });
+    return taskIds;
+  }, [rows]);
   const visibleRows = useMemo(() => filteredRows.filter((row) => {
     let parentId = row.parentId ?? null;
     while (parentId) {
@@ -558,6 +618,16 @@ const GanttTimelineContent = ({
   });
   const contextTask = contextMenu ? rowByTaskId.get(contextMenu.taskId) : null;
   const contextTaskHasChildren = Boolean(contextTask && (childIdsByParentId.get(contextTask.id)?.length ?? 0) > 0);
+  const contextPriorityReadOnly = Boolean(contextTask && (
+    contextTaskHasChildren
+    || contextTask.isCritical
+    || taskIdsWithFsDependencies.has(contextTask.id)
+  ));
+  const contextPriorityReadOnlyLabel = contextTask?.isCritical
+    ? "最高（关键路径）"
+    : contextTaskHasChildren
+      ? "由子任务自动汇总"
+      : "高（存在 FS 关系）";
   const movedClipboardTaskIds = useMemo(() => {
     if (!clipboard || clipboard.mode !== "MOVE" || clipboard.projectId !== projectId) return new Set<string>();
     const moved = new Set<string>();
@@ -824,7 +894,9 @@ const GanttTimelineContent = ({
       setSelectionAnchorTaskId(taskId);
     }
     const menuWidth = 286;
-    const menuHeight = 430;
+    // The schedule submenu is taller than the base menu. Reserve the larger
+    // footprint so the first-level menu never opens below the viewport.
+    const menuHeight = 620;
     const offset = 6;
     setInsertCount(1);
     setContextSubmenu(null);
@@ -865,6 +937,15 @@ const GanttTimelineContent = ({
     const nextDraft = { ...toTaskDraft(contextTask, calendarMode), isMilestone: !contextTask.isMilestone };
     closeContextMenu();
     await onUpdateTask(contextTask, nextDraft, "isMilestone");
+  };
+
+  const updateContextSchedule = async (changes: Partial<Pick<GanttTaskDraft,
+    "taskMode" | "parentBoundaryMode" | "schedulePriority" | "userPriority" | "effortDriven" | "parallelizable"
+  >>) => {
+    if (!contextTask || !canEdit || !onUpdateTask) return;
+    const nextDraft = { ...toTaskDraft(contextTask, calendarMode), ...changes };
+    closeContextMenu();
+    await onUpdateTask(contextTask, nextDraft, "taskMode");
   };
 
   const selectTaskRange = useCallback((fromTaskId: string, toTaskId: string) => {
@@ -1269,6 +1350,8 @@ const GanttTimelineContent = ({
                 <EditableTaskRow
                   key={row.id}
                   canEdit={canEdit}
+                  canEditActuals={canEditActuals}
+                  allowCompletedTaskReopen={allowCompletedTaskReopen}
                   dragged={draggedTaskId === row.id}
                   dropPosition={taskDropTarget?.id === row.id && draggedTaskId !== row.id ? taskDropTarget.position : null}
                   flashing={flashingTaskId === row.id}
@@ -1297,6 +1380,7 @@ const GanttTimelineContent = ({
                   calendarMode={calendarMode}
                   predecessorOptions={tasks}
                   row={row}
+                  priorityReadOnly={childIdsByParentId.has(row.id) || row.isCritical || taskIdsWithFsDependencies.has(row.id)}
                   resourceConflictMessages={resourceConflictMessagesByTaskId[row.id] ?? []}
                   unassignedLeafTasks={unassignedLeafTasksByParentId.get(row.id) ?? []}
                   taskDepth={taskDepthById.get(row.id) ?? 0}
@@ -1451,7 +1535,10 @@ const GanttTimelineContent = ({
             style={{ left: contextMenu.x, top: contextMenu.y }}
             onClick={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
-            onContextMenu={(event) => event.preventDefault()}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+            }}
           >
             <div className="gantt-context-menu-header">
               <div className="truncate font-medium text-foreground">{contextTask.taskCode || "未编号"} · {contextTask.taskName || "未命名任务"}</div>
@@ -1482,7 +1569,6 @@ const GanttTimelineContent = ({
             <div
               className="gantt-context-menu-submenu-anchor"
               onMouseEnter={() => setContextSubmenu("paste")}
-              onMouseLeave={() => setContextSubmenu((current) => current === "paste" ? null : current)}
             >
               <button
                 type="button"
@@ -1511,7 +1597,6 @@ const GanttTimelineContent = ({
                   if (contextSubmenu !== "insert") setInsertCount(1);
                   setContextSubmenu("insert");
                 }}
-                onMouseLeave={() => setContextSubmenu((current) => current === "insert" ? null : current)}
               >
                 <button
                   type="button"
@@ -1567,7 +1652,6 @@ const GanttTimelineContent = ({
                   <div
                     className="gantt-context-menu-submenu-anchor"
                     onMouseEnter={() => setContextSubmenu("owner")}
-                    onMouseLeave={() => setContextSubmenu((current) => current === "owner" ? null : current)}
                   >
                     <button
                       type="button"
@@ -1591,6 +1675,108 @@ const GanttTimelineContent = ({
                     )}
                   </div>
                 )}
+                {contextTaskHasChildren && onAutoSchedule && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="gantt-context-menu-item"
+                    onClick={() => {
+                      const task = contextTask;
+                      closeContextMenu();
+                      onAutoSchedule(task);
+                    }}
+                  >
+                    <CalendarClock className="size-4 shrink-0" />
+                    <span>自动排期</span>
+                  </button>
+                )}
+                <div
+                  className="gantt-context-menu-submenu-anchor"
+                  onMouseEnter={() => setContextSubmenu("schedule")}
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="gantt-context-menu-item"
+                    onClick={() => setContextSubmenu("schedule")}
+                  >
+                    <CalendarClock className="size-4 shrink-0" />
+                    <span>排期设置</span>
+                    <MenuChevronRight className="ml-auto size-3.5" />
+                  </button>
+                  {contextSubmenu === "schedule" && (
+                    <div className="gantt-context-submenu min-w-52" role="menu" aria-label="排期设置">
+                      <div className="px-3 py-1.5 text-[11px] text-muted-foreground">任务排期方式</div>
+                      {([
+                        ["AUTO", "自动排期", "由依赖、资源和父级边界计算"],
+                        ["DURATION_FORWARD", "工期固定 · 正排", "可修改开始时间和工期，计划完成自动计算"],
+                        ["DURATION_BACKWARD", "工期固定 · 倒排", "可修改计划完成和工期，计划开始自动计算"],
+                        ["DATES_FIXED", "日期固定", "可修改计划开始和计划完成，工期自动计算"],
+                      ] as const).map(([taskMode, label, description]) => (
+                        <button
+                          key={taskMode}
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={normalizeTaskMode(contextTask.taskMode) === taskMode}
+                          className="gantt-context-menu-item flex-col items-start gap-0.5 py-2"
+                          onClick={() => void updateContextSchedule({ taskMode })}
+                        >
+                          <span className="flex w-full items-center gap-2">
+                            <span>{normalizeTaskMode(contextTask.taskMode) === taskMode ? "✓" : ""}</span>
+                            {label}
+                          </span>
+                          <span className="pl-5 text-[11px] font-normal text-muted-foreground">{description}</span>
+                        </button>
+                      ))}
+                      <div className="gantt-context-menu-separator" />
+                      <div className="px-3 py-1.5 text-[11px] text-muted-foreground">任务优先级</div>
+                      {contextPriorityReadOnly ? (
+                        <div className="px-3 py-2 text-sm text-muted-foreground" aria-label={`任务优先级只读：${contextPriorityReadOnlyLabel}`}>
+                          {contextPriorityReadOnlyLabel}
+                        </div>
+                      ) : ([
+                        ["HIGH", "高"],
+                        ["MEDIUM", "中"],
+                        ["LOW", "低"],
+                      ] as const).map(([userPriority, label]) => (
+                        <button
+                          key={userPriority}
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={normalizeGanttUserPriority(contextTask.userPriority) === userPriority}
+                          className="gantt-context-menu-item"
+                          onClick={() => void updateContextSchedule({ userPriority })}
+                        >
+                          <span>{normalizeGanttUserPriority(contextTask.userPriority) === userPriority ? "✓" : ""}</span>
+                          <span>{label}</span>
+                        </button>
+                      ))}
+                      {contextTaskHasChildren && (
+                        <>
+                          <div className="gantt-context-menu-separator" />
+                          <div className="px-3 py-1.5 text-[11px] text-muted-foreground">父任务边界</div>
+                          {([
+                            ["ROLLUP", "自动汇总子任务"],
+                            ["TARGET", "作为计划目标边界"],
+                            ["LOCKED", "锁定父任务边界"],
+                          ] as const).map(([parentBoundaryMode, label]) => (
+                            <button
+                              key={parentBoundaryMode}
+                              type="button"
+                              role="menuitemradio"
+                              aria-checked={normalizeParentBoundaryMode(contextTask.parentBoundaryMode) === parentBoundaryMode}
+                              className="gantt-context-menu-item"
+                              onClick={() => void updateContextSchedule({ parentBoundaryMode })}
+                            >
+                              <span>{normalizeParentBoundaryMode(contextTask.parentBoundaryMode) === parentBoundaryMode ? "✓" : ""}</span>
+                              <span>{label}</span>
+                            </button>
+                          ))}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
                 <button
                   type="button"
                   role="menuitem"
@@ -2005,7 +2191,9 @@ const DurationDaysInput = ({
       onBlur={commit}
       onKeyDown={(event) => {
         if (event.key === "Enter") event.currentTarget.blur();
-        if ((event.key === "Backspace" || event.key === "Delete") && !text) {
+        // The focus handler intentionally ghosts the old value. Mark either deletion
+        // key as an edit even when React has not committed that cleared draft yet.
+        if (event.key === "Backspace" || event.key === "Delete") {
           editedRef.current = true;
         }
         if (event.key === "Escape") {
@@ -2074,9 +2262,57 @@ const ActualWorkHoursInput = ({
   );
 };
 
+const GanttHalfDaySlotControl = ({
+  disabled,
+  label,
+  onChange,
+  value,
+}: {
+  disabled: boolean;
+  label: string;
+  onChange: (value: GanttHalfDay) => void;
+  value: GanttHalfDay;
+}) => (
+  <div
+    className="ml-0.5 flex h-6 w-3 shrink-0 flex-col text-muted-foreground/70"
+    aria-label={`${label}${value === "AM" ? "上半日" : "下半日"}`}
+  >
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => onChange("AM")}
+      className={cn(
+        "flex h-3 min-h-0 items-center justify-center bg-transparent p-0 transition-colors hover:text-foreground disabled:cursor-default disabled:opacity-45",
+        value === "AM" && "text-foreground",
+      )}
+      title={`${label}：上半日`}
+      aria-label={`${label}：上半日`}
+      aria-pressed={value === "AM"}
+    >
+      <ArrowUp className="size-2.5" strokeWidth={2} />
+    </button>
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => onChange("PM")}
+      className={cn(
+        "flex h-3 min-h-0 items-center justify-center bg-transparent p-0 transition-colors hover:text-foreground disabled:cursor-default disabled:opacity-45",
+        value === "PM" && "text-foreground",
+      )}
+      title={`${label}：下半日`}
+      aria-label={`${label}：下半日`}
+      aria-pressed={value === "PM"}
+    >
+      <ArrowDown className="size-2.5" strokeWidth={2} />
+    </button>
+  </div>
+);
+
 const EditableTaskRow = ({
   calendarMode,
   canEdit,
+  canEditActuals,
+  allowCompletedTaskReopen,
   dragged,
   dropPosition,
   flashing,
@@ -2095,6 +2331,7 @@ const EditableTaskRow = ({
   onUpdateTask,
   predecessorOptions,
   projectMembers,
+  priorityReadOnly,
   row,
   resourceConflictMessages,
   unassignedLeafTasks,
@@ -2110,6 +2347,8 @@ const EditableTaskRow = ({
 }: {
   calendarMode: GanttCalendarMode;
   canEdit: boolean;
+  canEditActuals: boolean;
+  allowCompletedTaskReopen: boolean;
   dragged: boolean;
   dropPosition: DropPosition | null;
   flashing: boolean;
@@ -2128,6 +2367,7 @@ const EditableTaskRow = ({
   onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft, columnKey?: string) => void | Promise<void>;
   predecessorOptions: ProjectGanttTask[];
   projectMembers: ProjectMember[];
+  priorityReadOnly: boolean;
   row: ReturnType<typeof buildGanttRows>[number];
   resourceConflictMessages: string[];
   unassignedLeafTasks: Array<ReturnType<typeof buildGanttRows>[number]>;
@@ -2146,7 +2386,10 @@ const EditableTaskRow = ({
   const isChildTask = taskDepth > 0;
   const ownerMembers = row.ownerMembers ?? (row.ownerMember ? [row.ownerMember] : []);
   const ownerNames = ownerMembers.map((owner) => owner.personName);
-  const ownerSelectValue = draft.ownerMemberIds?.length
+  const ownerReadOnly = Boolean(row.ownerReadOnly);
+  const ownerSelectValue = ownerReadOnly && ownerMembers.length > 0
+    ? ownerMembers.map((owner) => owner.id)
+    : draft.ownerMemberIds?.length
     ? draft.ownerMemberIds
     : ownerMembers.length > 0
       ? ownerMembers.map((owner) => owner.id)
@@ -2157,7 +2400,16 @@ const EditableTaskRow = ({
     secondaryLabel: member.roleNames?.length ? member.roleNames.join("、") : member.roleName,
     searchText: [member.personName, ...(member.roleNames ?? [member.roleName])].filter(Boolean).join(" "),
   }));
-  const ownerReadOnly = Boolean(row.ownerReadOnly);
+  const completedLeaf = !hasChildren && draft.progress >= 100;
+  const taskMode = normalizeTaskMode(draft.taskMode);
+  const planReadOnly = !canEdit || isSaving || completedLeaf;
+  // Summary rows are derived from descendant actuals. Keeping their controls
+  // disabled prevents a parent from presenting a progress or work figure that
+  // conflicts with the leaf tasks that actually consume the resource.
+  const actualReadOnly = !canEditActuals || isSaving || hasChildren || (completedLeaf && !allowCompletedTaskReopen);
+  const durationReadOnly = planReadOnly || taskMode === "DATES_FIXED";
+  const startDateReadOnly = planReadOnly || taskMode === "DURATION_BACKWARD";
+  const endDateReadOnly = planReadOnly || taskMode === "DURATION_FORWARD";
   const hasUnassignedLeafTasks = unassignedLeafTasks.length > 0;
   const hasResourceConflict = resourceConflictMessages.length > 0;
   const levelColor = GANTT_DEPTH_COLORS[taskDepth % GANTT_DEPTH_COLORS.length];
@@ -2177,27 +2429,44 @@ const EditableTaskRow = ({
     updateDraft("taskName", value.replace(/【关键路径】/g, "").replace(/【关键路径/g, "").replace(/关键路径】/g, ""));
   };
 
-  const commitDraft = (columnKey?: GanttColumnKey) => {
-    if (!canEdit || taskDraftEquals(row, draft, calendarMode)) return;
+  const resolvePlanDraft = (
+    current: GanttTaskDraft,
+    changes: Partial<Pick<GanttTaskDraft, "taskMode" | "startDate" | "startSlot" | "endDate" | "finishSlot" | "durationDays">>,
+  ): GanttTaskDraft => {
+    const next = { ...current, ...changes };
+    const resolved = resolveGanttTaskPlan({
+      taskMode: next.taskMode,
+      startDate: next.startDate,
+      startSlot: next.startSlot,
+      finishDate: next.endDate,
+      finishSlot: next.finishSlot,
+      durationDays: next.durationDays,
+      mode: calendarMode,
+    });
+    return {
+      ...next,
+      taskMode: resolved.taskMode,
+      startDate: resolved.startDate,
+      startSlot: resolved.startSlot,
+      endDate: resolved.finishDate,
+      finishSlot: resolved.finishSlot,
+      durationDays: resolved.durationDays,
+      estimatedWorkHours: estimatedHoursForDuration(resolved.durationDays),
+    };
+  };
+
+  const commitDraft = (columnKey?: GanttColumnKey, actualField = false) => {
+    if (!(actualField ? canEditActuals : canEdit) || taskDraftEquals(row, draft, calendarMode)) return;
     void onUpdateTask?.(row, draft, columnKey);
   };
 
-  const withPlannedStart = (current: GanttTaskDraft, value: string): GanttTaskDraft => ({
-    ...current,
-    startDate: value,
-    endDate: value ? calculateTaskFinishDate(value, current.durationDays, calendarMode) : current.endDate,
-  });
+  const withPlannedStart = (current: GanttTaskDraft, value: string): GanttTaskDraft => (
+    resolvePlanDraft(current, { startDate: value })
+  );
 
-  const withPlannedEnd = (current: GanttTaskDraft, value: string): GanttTaskDraft => ({
-    ...current,
-    endDate: value,
-    durationDays: current.startDate && value
-      ? calculateTaskDurationDays(current.startDate, value, calendarMode)
-      : current.durationDays,
-    estimatedWorkHours: current.startDate && value
-      ? estimatedHoursForDuration(calculateTaskDurationDays(current.startDate, value, calendarMode))
-      : current.estimatedWorkHours,
-  });
+  const withPlannedEnd = (current: GanttTaskDraft, value: string): GanttTaskDraft => (
+    resolvePlanDraft(current, { endDate: value })
+  );
 
   const withActualStart = (current: GanttTaskDraft, value: string): GanttTaskDraft => ({
     ...current,
@@ -2220,10 +2489,11 @@ const EditableTaskRow = ({
     builder: (current: GanttTaskDraft, value: string) => GanttTaskDraft,
     value: string,
     columnKey: GanttColumnKey,
+    actualField = false,
   ) => {
     const nextDraft = builder(draft, value);
     setDraft(nextDraft);
-    if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
+    if ((actualField ? canEditActuals : canEdit) && !taskDraftEquals(row, nextDraft, calendarMode)) {
       void onUpdateTask?.(row, nextDraft, columnKey);
     }
   };
@@ -2474,6 +2744,7 @@ const EditableTaskRow = ({
             <HierarchicalMultiSelect
               options={ownerSelectOptions}
               value={ownerSelectValue}
+              multiple={false}
               ariaLabel="负责人"
               searchPlaceholder="搜索项目成员或角色"
               emptyText="没有可选择的项目成员"
@@ -2521,18 +2792,46 @@ const EditableTaskRow = ({
           )}
         </div>
       )}
+      {isColumnVisible("priority") && (
+        <div data-gantt-column-key="priority" className="min-w-0 px-1">
+          <select
+            value={priorityReadOnly ? (row.effectivePriority === "HIGHEST" ? "HIGHEST" : row.effectivePriority || draft.userPriority) : draft.userPriority}
+            className={cn(inlineSelectClass, "text-center")}
+            disabled={!canEdit || isSaving || priorityReadOnly || completedLeaf}
+            onChange={(event) => {
+              const nextDraft = { ...draft, userPriority: normalizeGanttUserPriority(event.target.value) };
+              setDraft(nextDraft);
+              if (!taskDraftEquals(row, nextDraft, calendarMode)) {
+                void onUpdateTask?.(row, nextDraft, "priority");
+              }
+            }}
+            aria-label="任务优先级"
+            title={priorityReadOnly
+              ? row.isCritical ? "关键路径任务优先级为最高，不可修改" : "存在紧前关系或子任务，优先级由系统自动计算"
+              : "低、中、高会参与同负责人任务的自动排期"}
+          >
+            <option value="LOW">低</option>
+            <option value="MEDIUM">中</option>
+            <option value="HIGH">高</option>
+            {row.effectivePriority === "HIGHEST" && <option value="HIGHEST">最高</option>}
+          </select>
+        </div>
+      )}
       {isColumnVisible("durationDays") && (
         <div data-gantt-column-key="durationDays">
           <DurationDaysInput
             value={draft.durationDays}
-            disabled={!canEdit || isSaving}
+            disabled={durationReadOnly}
             onCommit={(durationDays) => {
-              const nextDraft = {
-                ...draft,
-                durationDays,
-                endDate: draft.startDate ? calculateTaskFinishDate(draft.startDate, durationDays, calendarMode) : "",
-                estimatedWorkHours: estimatedHoursForDuration(durationDays),
-              };
+              // In AUTO / forward mode, a cleared duration means the task is
+              // intentionally unscheduled. Do not infer a one-day duration
+              // again from the formerly retained start/finish dates.
+              const nextDraft = resolvePlanDraft(draft, durationDays > 0
+                ? { durationDays }
+                : {
+                  durationDays,
+                  endDate: taskMode === "AUTO" || taskMode === "DURATION_FORWARD" ? "" : draft.endDate,
+                });
               setDraft(nextDraft);
               if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
                 void onUpdateTask?.(row, nextDraft, "durationDays");
@@ -2542,51 +2841,115 @@ const EditableTaskRow = ({
         </div>
       )}
       {isColumnVisible("startDate") && (
-        <div data-gantt-column-key="startDate">
-          <GanttDateField
-            value={draft.startDate}
-            onChange={(value) => updateDateDraft(withPlannedStart, value)}
-            onCommit={(value) => commitDateDraft(withPlannedStart, value, "startDate")}
-            disabled={!canEdit || isSaving}
-            ariaLabel="计划开始"
-            required
-          />
+        <div data-gantt-column-key="startDate" className="flex min-w-0 items-center">
+          <div className="min-w-0 flex-1">
+            <GanttDateField
+              value={draft.startDate}
+              onChange={(value) => updateDateDraft(withPlannedStart, value)}
+              onCommit={(value) => commitDateDraft(withPlannedStart, value, "startDate")}
+              disabled={startDateReadOnly}
+              readOnly={startDateReadOnly}
+              slot={draft.startSlot}
+              ariaLabel="计划开始"
+              required
+            />
+          </div>
+          {!startDateReadOnly && draft.startDate && (
+            <GanttHalfDaySlotControl
+              disabled={false}
+              label="计划开始"
+              value={draft.startSlot}
+              onChange={(startSlot) => {
+                const nextDraft = resolvePlanDraft(draft, { startSlot });
+                setDraft(nextDraft);
+                if (!taskDraftEquals(row, nextDraft, calendarMode)) void onUpdateTask?.(row, nextDraft, "startDate");
+              }}
+            />
+          )}
         </div>
       )}
       {isColumnVisible("endDate") && (
-        <div data-gantt-column-key="endDate">
-          <GanttDateField
-            value={draft.endDate}
-            onChange={(value) => updateDateDraft(withPlannedEnd, value)}
-            onCommit={(value) => commitDateDraft(withPlannedEnd, value, "endDate")}
-            disabled={!canEdit || isSaving}
-            ariaLabel="计划完成"
-            min={draft.startDate}
-            required={draft.durationDays > 0}
-          />
+        <div data-gantt-column-key="endDate" className="flex min-w-0 items-center">
+          <div className="min-w-0 flex-1">
+            <GanttDateField
+              value={draft.endDate}
+              onChange={(value) => updateDateDraft(withPlannedEnd, value)}
+              onCommit={(value) => commitDateDraft(withPlannedEnd, value, "endDate")}
+              disabled={endDateReadOnly}
+              readOnly={endDateReadOnly}
+              slot={draft.finishSlot}
+              ariaLabel="计划完成"
+              min={draft.startDate}
+              required={draft.durationDays > 0}
+            />
+          </div>
+          {!endDateReadOnly && draft.endDate && (
+            <GanttHalfDaySlotControl
+              disabled={false}
+              label="计划完成"
+              value={draft.finishSlot}
+              onChange={(finishSlot) => {
+                const nextDraft = resolvePlanDraft(draft, { finishSlot });
+                setDraft(nextDraft);
+                if (!taskDraftEquals(row, nextDraft, calendarMode)) void onUpdateTask?.(row, nextDraft, "endDate");
+              }}
+            />
+          )}
         </div>
       )}
       {isColumnVisible("actualStartDate") && (
-        <div data-gantt-column-key="actualStartDate">
-          <GanttDateField
-            value={draft.actualStartDate}
-            onChange={(value) => updateDateDraft(withActualStart, value)}
-            onCommit={(value) => commitDateDraft(withActualStart, value, "actualStartDate")}
-            disabled={!canEdit || isSaving}
-            ariaLabel="实际开始"
-          />
+        <div data-gantt-column-key="actualStartDate" className="flex min-w-0 items-center">
+          <div className="min-w-0 flex-1">
+            <GanttDateField
+              value={draft.actualStartDate}
+              onChange={(value) => updateDateDraft(withActualStart, value)}
+              onCommit={(value) => commitDateDraft(withActualStart, value, "actualStartDate", true)}
+              disabled={actualReadOnly}
+              readOnly={actualReadOnly}
+              slot={draft.actualStartSlot}
+              ariaLabel="实际开始"
+            />
+          </div>
+          {!actualReadOnly && draft.actualStartDate && (
+            <GanttHalfDaySlotControl
+              disabled={false}
+              label="实际开始"
+              value={draft.actualStartSlot}
+              onChange={(actualStartSlot) => {
+                const nextDraft = { ...draft, actualStartSlot };
+                setDraft(nextDraft);
+                if (!taskDraftEquals(row, nextDraft, calendarMode)) void onUpdateTask?.(row, nextDraft, "actualStartDate");
+              }}
+            />
+          )}
         </div>
       )}
       {isColumnVisible("actualEndDate") && (
-        <div data-gantt-column-key="actualEndDate">
-          <GanttDateField
-            value={draft.actualEndDate}
-            onChange={(value) => updateDateDraft(withActualEnd, value)}
-            onCommit={(value) => commitDateDraft(withActualEnd, value, "actualEndDate")}
-            disabled={!canEdit || isSaving}
-            ariaLabel="实际完成"
-            min={draft.actualStartDate || undefined}
-          />
+        <div data-gantt-column-key="actualEndDate" className="flex min-w-0 items-center">
+          <div className="min-w-0 flex-1">
+            <GanttDateField
+              value={draft.actualEndDate}
+              onChange={(value) => updateDateDraft(withActualEnd, value)}
+              onCommit={(value) => commitDateDraft(withActualEnd, value, "actualEndDate", true)}
+              disabled={actualReadOnly}
+              readOnly={actualReadOnly}
+              slot={draft.actualFinishSlot}
+              ariaLabel="实际完成"
+              min={draft.actualStartDate || undefined}
+            />
+          </div>
+          {!actualReadOnly && draft.actualEndDate && (
+            <GanttHalfDaySlotControl
+              disabled={false}
+              label="实际完成"
+              value={draft.actualFinishSlot}
+              onChange={(actualFinishSlot) => {
+                const nextDraft = { ...draft, actualFinishSlot };
+                setDraft(nextDraft);
+                if (!taskDraftEquals(row, nextDraft, calendarMode)) void onUpdateTask?.(row, nextDraft, "actualEndDate");
+              }}
+            />
+          )}
         </div>
       )}
       {isColumnVisible("estimatedWorkHours") && (
@@ -2604,11 +2967,11 @@ const EditableTaskRow = ({
         <div data-gantt-column-key="actualWorkHours">
           <ActualWorkHoursInput
             value={draft.actualWorkHours}
-            disabled={!canEdit || isSaving}
+            disabled={actualReadOnly}
             onCommit={(value) => {
               const nextDraft = { ...draft, actualWorkHours: value };
               setDraft(nextDraft);
-              if (canEdit && !taskDraftEquals(row, nextDraft, calendarMode)) {
+              if (canEditActuals && !taskDraftEquals(row, nextDraft, calendarMode)) {
                 void onUpdateTask?.(row, nextDraft, "actualWorkHours");
               }
             }}
@@ -2622,14 +2985,14 @@ const EditableTaskRow = ({
               inputMode="numeric"
               pattern="[0-9]*"
               value={draft.progress}
-              onBlur={() => commitDraft("progress")}
+              onBlur={() => commitDraft("progress", true)}
               onChange={(event) => {
                 const digits = event.target.value.replace(/\D/g, "");
                 updateDraft("progress", digits ? Math.min(100, Number(digits)) : 0);
               }}
               onKeyDown={handleKeyDown}
               className={durationFieldClass}
-              disabled={!canEdit || isSaving}
+              disabled={actualReadOnly}
               aria-label="当前进度"
             />
             <span className="text-[10px] text-muted-foreground">%</span>

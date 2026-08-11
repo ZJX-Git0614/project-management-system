@@ -89,6 +89,12 @@ if (-not (Test-Path $assistantBridgeInstaller)) {
 }
 & $assistantBridgeInstaller -DeploymentDirectory $PSScriptRoot -SourceDirectory $PSScriptRoot
 
+$drawioMcpInstaller = Join-Path $PSScriptRoot "install-drawio-mcp.ps1"
+if (-not (Test-Path $drawioMcpInstaller)) {
+  throw "Missing deployment file: install-drawio-mcp.ps1"
+}
+& $drawioMcpInstaller -SourceDirectory $PSScriptRoot
+
 docker info *> $null
 Assert-LastExitCode "Docker Desktop is not running. Start Docker Desktop and retry."
 

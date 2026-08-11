@@ -25,6 +25,27 @@ const sameOwnerIds = (left: string[] = [], right: string[] = []) => {
   return sortedLeft.every((id, index) => id === sortedRight[index]);
 };
 
+/**
+ * Inline Gantt edits submit the complete row, including a parent's computed
+ * owner rollup. Treat that value as informational unless the owner set itself
+ * changed, so unrelated edits do not attempt to rewrite a parent owner.
+ */
+export const hasGanttOwnerSetChange = ({
+  hasOwnerInput,
+  currentOwnerMemberIds,
+  nextOwnerMemberIds,
+  ownerChangeMode,
+}: {
+  hasOwnerInput: boolean;
+  currentOwnerMemberIds: string[];
+  nextOwnerMemberIds: string[] | null;
+  ownerChangeMode?: unknown;
+}) => {
+  if (!hasOwnerInput) return false;
+  if (ownerChangeMode === "BRANCH_REASSIGN") return true;
+  return !sameOwnerIds(currentOwnerMemberIds, nextOwnerMemberIds ?? currentOwnerMemberIds);
+};
+
 type GanttOwnerWriteContext = {
   tasks: Array<{ id: string; parentId: string | null; ownerMemberId: string | null; ownerMemberIds: string[] }>;
   members: Array<{ id: string; accountId: string | null; personName: string }>;
@@ -257,6 +278,9 @@ export const applyGanttOwnerSet = async ({
   const ownerMemberIds = [...new Set(nextOwnerMemberIds.filter((id) => memberIds.has(id)))];
   if (ownerMemberIds.length !== [...new Set(nextOwnerMemberIds.filter(Boolean))].length) {
     throw new Error("负责人必须来自当前项目组成员");
+  }
+  if (ownerMemberIds.length > 1) {
+    throw new Error("末级任务只能指定一名负责人；父级负责人由子任务自动汇总");
   }
   const target = tasks.find((task) => task.id === taskId);
   if (!target) return { updatedTaskIds: [], affectedTaskIds: [] };

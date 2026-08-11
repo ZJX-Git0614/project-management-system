@@ -6,6 +6,7 @@ export type GanttColumnKey =
   | "taskName"
   | "taskDescription"
   | "owner"
+  | "priority"
   | "durationDays"
   | "startDate"
   | "endDate"
@@ -35,6 +36,8 @@ export interface GanttColumnLayoutTask {
   taskDescription?: string;
   ownerMember?: { personName?: string; roleName?: string } | null;
   ownerMembers?: Array<{ personName?: string; roleName?: string }>;
+  userPriority?: string;
+  effectivePriority?: string;
   durationDays?: number;
   startDate?: string;
   endDate?: string;
@@ -65,6 +68,7 @@ export const GANTT_EXPANDED_COLUMN_KEYS: GanttColumnKey[] = [
   "taskName",
   "taskDescription",
   "owner",
+  "priority",
   "durationDays",
   "startDate",
   "endDate",
@@ -102,6 +106,7 @@ export const GANTT_COLUMN_LABELS: Record<GanttColumnKey, string> = {
   taskName: "任务名称",
   taskDescription: "任务描述",
   owner: "负责人",
+  priority: "优先级",
   durationDays: "工期",
   startDate: "计划开始",
   endDate: "计划完成",
@@ -128,7 +133,9 @@ export const GANTT_COLUMN_MIN_WIDTHS: GanttColumnWidths = {
   taskCategory: 86,
   taskName: 180,
   taskDescription: 220,
-  owner: 120,
+  // Reserve room for the owner text, conflict marker, and select chevron.
+  owner: 176,
+  priority: 76,
   durationDays: 56,
   startDate: 108,
   endDate: 108,
@@ -155,7 +162,8 @@ const GANTT_COLUMN_MAX_WIDTHS: GanttColumnWidths = {
   taskCategory: 520,
   taskName: 720,
   taskDescription: 720,
-  owner: 260,
+  owner: 320,
+  priority: 104,
   durationDays: 120,
   startDate: 150,
   endDate: 150,
@@ -237,11 +245,13 @@ export const fitGanttColumnWidth = (
             ? [task.ownerMember]
             : [];
         const ownerLabel = owners
-          .map((owner) => owner.personName || owner.roleName || "")
+          .map((owner) => [owner.personName, owner.roleName].filter(Boolean).join(" · "))
           .filter(Boolean)
           .join("、") || "未分配";
-        return textWidth(ownerLabel) + 48;
+        // The rendered selector also has horizontal padding, a chevron, and may show a conflict marker.
+        return textWidth(ownerLabel) + 72;
       }
+      case "priority": return textWidth(task.effectivePriority || task.userPriority || "中") + 40;
       case "durationDays": return textWidth(task.durationDays && task.durationDays > 0 ? task.durationDays : "--") + 34;
       case "startDate": return textWidth(task.startDate) + 42;
       case "endDate": return textWidth(task.endDate || task.finishDate) + 42;

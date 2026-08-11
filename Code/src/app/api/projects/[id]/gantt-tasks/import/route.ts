@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { extname } from "node:path";
 
 import { ensureMutableProject, err, notFound, ok } from "@/lib/api-utils";
+import { getGanttPlanMutationBlockReasonForActor } from "@/lib/gantt-baseline-service";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import { extractAssistantDocument } from "@/lib/assistant-document-processing";
 import { estimatedHoursForDuration, roundGanttHours } from "@/lib/gantt-calendar";
@@ -60,6 +61,12 @@ export async function POST(
   if (["APPEND", "MERGE"].includes(mode)) {
     const mutableError = await ensureMutableProject(id);
     if (mutableError) return mutableError;
+    const baselineLockReason = await getGanttPlanMutationBlockReasonForActor({
+      projectId: id,
+      userId: user.userId,
+      isAdministrator: user.assignedRoleNames.includes("管理员"),
+    });
+    if (baselineLockReason) return err(baselineLockReason, 409, "GANTT_BASELINE_LOCKED");
   }
   let sourceFileName = "";
   let sourceBuffer: Buffer;

@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma"
 import { ok, err, forbidden, notFound, ensureMutableProject, unauthorizedFromRequest } from "@/lib/api-utils"
 import { APPROVAL_BUSINESS_TYPES, approvalBusinessIdForProjectStatus } from "@/lib/approval-workflow"
 import { serializeApprovalInstance, startApprovalWorkflow } from "@/lib/approval-workflow-server"
-import { getOrderedGanttTasks, serializeGanttTaskList } from "@/lib/gantt-task-service"
+import { getOrderedGanttTasks, recalculateProjectGanttSchedule, serializeGanttTaskList } from "@/lib/gantt-task-service"
 import { getProjectDocumentDirectory } from "@/lib/project-document-storage"
 import { assertProjectStatusTransition, projectStatusActionPermission } from "@/lib/project-lifecycle"
 import { getValidProjectRoleNames, serializeProjectMember } from "@/lib/project-member-view"
@@ -111,6 +111,7 @@ export async function PUT(
     updateData.repairCycleDays = body.repairCycleDays
   if (body.startDate !== undefined) updateData.startDate = body.startDate
   if (body.expectedEndDate !== undefined) updateData.expectedEndDate = body.expectedEndDate
+  if (body.ganttHardFinishDate !== undefined) updateData.ganttHardFinishDate = body.ganttHardFinishDate
   if (body.startDate !== undefined || body.expectedEndDate !== undefined) {
     const startDate = String(body.startDate !== undefined ? body.startDate : existing.startDate).trim()
     const expectedEndDate = String(body.expectedEndDate !== undefined ? body.expectedEndDate : existing.expectedEndDate).trim()
@@ -118,11 +119,22 @@ export async function PUT(
     if (!/^\d{4}-\d{2}-\d{2}$/.test(expectedEndDate)) return err("预计结项时间格式应为 YYYY-MM-DD")
     if (expectedEndDate < startDate) return err("预计结项时间不能早于开始时间")
   }
+  if (body.ganttHardFinishDate !== undefined) {
+    const ganttHardFinishDate = String(body.ganttHardFinishDate ?? "").trim()
+    if (ganttHardFinishDate && !/^\d{4}-\d{2}-\d{2}$/.test(ganttHardFinishDate)) {
+      return err("项目硬完成时间格式应为 YYYY-MM-DD，或留空取消硬约束")
+    }
+    updateData.ganttHardFinishDate = ganttHardFinishDate
+  }
 
   const project = await prisma.project.update({
     where: { id },
     data: updateData,
   })
+
+  if (body.startDate !== undefined || body.expectedEndDate !== undefined || body.ganttHardFinishDate !== undefined) {
+    await recalculateProjectGanttSchedule(id)
+  }
 
   return ok({ ...project, createdAt: project.createdAt.toISOString() })
 }

@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 
 import { prisma } from "@/lib/prisma";
 import { ensureMutableProject, err, notFound, ok } from "@/lib/api-utils";
+import { getGanttPlanMutationBlockReasonForActor } from "@/lib/gantt-baseline-service";
 import { renumberProjectGanttTaskCodes } from "@/lib/gantt-task-service";
 import { requireUser, userHasPermission } from "@/lib/server-auth";
 
@@ -16,6 +17,12 @@ export async function PUT(
 
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
+  const baselineLockReason = await getGanttPlanMutationBlockReasonForActor({
+    projectId: id,
+    userId: user.userId,
+    isAdministrator: user.assignedRoleNames.includes("管理员"),
+  });
+  if (baselineLockReason) return err(baselineLockReason, 409, "GANTT_BASELINE_LOCKED");
 
   const body = await req.json();
   const taskIds: string[] = Array.isArray(body.taskIds) ? body.taskIds.map((item: unknown) => String(item)) : [];

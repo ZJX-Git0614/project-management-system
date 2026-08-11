@@ -36,7 +36,12 @@ export const estimatedHoursForDuration = (durationDays: number): number => (
   roundGanttHours(normalizeGanttDurationDays(durationDays) * GANTT_HOURS_PER_DAY)
 );
 
-const isWorkingDate = (date: Date) => isWorkday(formatGanttDate(date));
+export const isGanttWorkingDate = (date: Date | string) => {
+  const normalized = typeof date === "string" ? parseGanttDate(date) : date;
+  return isWorkday(formatGanttDate(normalized));
+};
+
+const isWorkingDate = (date: Date) => isGanttWorkingDate(date);
 
 const moveToWorkingDate = (date: Date, direction: 1 | -1) => {
   const result = new Date(date.getTime());
@@ -116,6 +121,35 @@ export const calculateTaskDurationDays = (
     cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
   return Math.max(1, count);
+};
+
+/**
+ * Returns the working allocation buckets occupied by a task. A 0.5-day task
+ * consumes half of the daily capacity on its single calendar day; 1.5 days
+ * consumes one full bucket followed by one half bucket. Dates stay day-based
+ * so the existing Gantt model remains compatible with Project and Excel IO.
+ */
+export const ganttTaskWorkSlots = (
+  startDate: string,
+  durationDays: number,
+  mode: GanttCalendarMode,
+): Array<{ date: string; portion: number }> => {
+  const duration = normalizeGanttDurationDays(durationDays);
+  if (!startDate || duration <= 0) return [];
+  const slots: Array<{ date: string; portion: number }> = [];
+  const cursor = mode === "WORKING_DAYS"
+    ? moveToWorkingDate(parseGanttDate(startDate), 1)
+    : parseGanttDate(startDate);
+  let remaining = duration;
+  while (remaining > 0.000_001) {
+    if (mode === "CALENDAR_DAYS" || isWorkingDate(cursor)) {
+      const portion = Math.min(1, remaining);
+      slots.push({ date: formatGanttDate(cursor), portion });
+      remaining = Math.max(0, remaining - portion);
+    }
+    if (remaining > 0.000_001) cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return slots;
 };
 
 export const nextTaskStartDate = (finishDate: string, mode: GanttCalendarMode): string => {

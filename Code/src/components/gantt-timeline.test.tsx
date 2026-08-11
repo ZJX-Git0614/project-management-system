@@ -65,7 +65,7 @@ describe("GanttTimeline performance", () => {
     const parentNameInput = screen.getByDisplayValue("父任务");
     expect(parentNameInput).toHaveClass("pr-[76px]");
     expect(warning.closest("[data-gantt-column-key='taskCode']")).toBeInTheDocument();
-    expect(warning).toHaveClass("border-0", "bg-transparent");
+    expect(warning).toHaveClass("!border-0", "!bg-transparent");
     expect(within(parentNameInput.parentElement!).getByText("【关键路径】")).toHaveClass("right-1.5");
 
     await userEvent.hover(warning);
@@ -112,7 +112,7 @@ describe("GanttTimeline performance", () => {
     ));
   });
 
-  it("edits leaf task owners as a searchable multi-selection", async () => {
+  it("edits a leaf task owner as a searchable single selection", async () => {
     const onUpdateTask = vi.fn();
     render(<GanttTimeline
       tasks={[task(1)]}
@@ -125,15 +125,47 @@ describe("GanttTimeline performance", () => {
     />);
 
     await userEvent.click(screen.getByRole("button", { name: "负责人" }));
-    await userEvent.click(screen.getByRole("checkbox", { name: "选择 张三" }));
     await userEvent.click(screen.getByRole("checkbox", { name: "选择 李四" }));
-    await userEvent.click(screen.getByRole("button", { name: "应用负责人" }));
 
     await waitFor(() => expect(onUpdateTask).toHaveBeenCalledWith(
       expect.objectContaining({ id: "task-1" }),
-      expect.objectContaining({ ownerMemberId: null, ownerMemberIds: ["member-1", "member-2"] }),
+      expect.objectContaining({ ownerMemberId: "member-2", ownerMemberIds: ["member-2"] }),
       "owner",
     ));
+  });
+
+  it("does not submit a parent owner rollup when changing its scheduling mode", async () => {
+    const onUpdateTask = vi.fn();
+    render(<GanttTimeline
+      tasks={[
+        task(1, {
+          taskName: "父任务",
+          ownerMemberIds: [],
+          ownerMembers: [
+            { id: "member-1", accountId: "account-1", personName: "张三", roleName: "开发", roleNames: ["开发"] },
+            { id: "member-2", accountId: "account-2", personName: "李四", roleName: "测试", roleNames: ["测试"] },
+          ],
+          ownerReadOnly: true,
+        }),
+        task(2, { parentId: "task-1", taskCode: "Task001.001", taskName: "子任务" }),
+      ]}
+      canEdit
+      onUpdateTask={onUpdateTask}
+    />);
+
+    fireEvent.contextMenu(screen.getByText("Task001"));
+    await userEvent.hover(screen.getByRole("menuitem", { name: "排期设置" }));
+    await userEvent.click(screen.getByRole("menuitemradio", { name: /工期固定 · 正排/ }));
+
+    expect(onUpdateTask).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "task-1" }),
+      expect.objectContaining({
+        taskMode: "DURATION_FORWARD",
+        ownerMemberId: null,
+        ownerMemberIds: [],
+      }),
+      "taskMode",
+    );
   });
 
   it("hides optional columns from both the header and task rows", async () => {
@@ -284,6 +316,29 @@ describe("GanttTimeline performance", () => {
     fireEvent.pointerDown(document.body);
     fireEvent.contextMenu(screen.getByText("Task001"));
     await userEvent.hover(screen.getByRole("menuitem", { name: "插入" }));
+    expect(screen.getByRole("spinbutton", { name: "在下方插入个同级任务数量" })).toHaveValue(1);
+  });
+
+  it("keeps a context submenu available after the pointer leaves its trigger", async () => {
+    render(<GanttTimeline
+      projectId="project-1"
+      tasks={[task(1)]}
+      canCreate
+      canEdit
+      onInsertTasks={vi.fn()}
+    />);
+
+    fireEvent.contextMenu(screen.getByText("Task001"));
+    const insertItem = screen.getByRole("menuitem", { name: "插入" });
+    await userEvent.hover(insertItem);
+    const countInput = screen.getByRole("spinbutton", { name: "在下方插入个同级任务数量" });
+    const submenuAnchor = countInput.closest(".gantt-context-menu-submenu-anchor");
+
+    expect(submenuAnchor).not.toBeNull();
+    fireEvent.mouseLeave(submenuAnchor!);
+    fireEvent.pointerDown(countInput);
+
+    expect(screen.getByRole("menu", { name: "插入任务" })).toBeInTheDocument();
     expect(screen.getByRole("spinbutton", { name: "在下方插入个同级任务数量" })).toHaveValue(1);
   });
 

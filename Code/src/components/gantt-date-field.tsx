@@ -19,6 +19,10 @@ interface GanttDateFieldProps {
   onCommit: (value: string) => void;
   ariaLabel: string;
   disabled?: boolean;
+  /** Render a compact value instead of retaining the segmented editor. */
+  readOnly?: boolean;
+  /** Display-only half-day marker used when the task date is not editable. */
+  slot?: "AM" | "PM";
   min?: string;
   required?: boolean;
 }
@@ -31,6 +35,8 @@ export const GanttDateField = ({
   onCommit,
   ariaLabel,
   disabled = false,
+  readOnly = false,
+  slot = "AM",
   min,
   required = false,
 }: GanttDateFieldProps) => {
@@ -85,6 +91,10 @@ export const GanttDateField = ({
       return;
     }
     setParts(splitGanttDate(nextValue));
+    // Moving focus through an unchanged date field must not trigger a schedule
+    // recalculation. This is especially important for AUTO tasks, where an
+    // unrelated field edit can otherwise recompute the planned finish date.
+    if (nextValue === value) return;
     onChange(nextValue);
     onCommit(nextValue);
   };
@@ -116,6 +126,21 @@ export const GanttDateField = ({
       picker.click();
     }
   };
+
+  if (readOnly) {
+    const displayValue = value
+      ? `${value} ${slot === "PM" ? "\u2193" : "\u2191"}`
+      : "未设置";
+    return (
+      <span
+        className="flex h-6 min-w-0 items-center truncate px-1 font-mono text-[10px] tabular-nums text-muted-foreground"
+        title={displayValue}
+        aria-label={ariaLabel}
+      >
+        {displayValue}
+      </span>
+    );
+  }
 
   return (
     <div

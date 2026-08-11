@@ -36,6 +36,9 @@ export interface CpmGanttTask {
   constraintType?: number | null;
   constraintDate?: string;
   predecessorDependencies?: CpmGanttDependency[];
+  progress?: number;
+  actualStartDate?: string;
+  actualEndDate?: string;
 }
 
 export interface GanttCpmMetrics {
@@ -65,8 +68,29 @@ type CpmEdge = {
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
-const taskDurationMinutes = (task: CpmGanttTask) => {
+const isCompletedWithActualFinish = (task: CpmGanttTask) => (
+  Number(task.progress ?? 0) >= 100 && DATE_PATTERN.test(task.actualEndDate ?? "")
+);
+
+const effectiveTaskStartDate = (task: CpmGanttTask) => {
+  if (isCompletedWithActualFinish(task) && DATE_PATTERN.test(task.actualStartDate ?? "")) {
+    return task.actualStartDate!;
+  }
+  return task.startDate;
+};
+
+const taskDurationMinutes = (task: CpmGanttTask, mode: GanttCalendarMode) => {
   if (task.isMilestone) return 0;
+  if (isCompletedWithActualFinish(task)) {
+    const actualStartDate = effectiveTaskStartDate(task);
+    const actualEndDate = task.actualEndDate!;
+    if (DATE_PATTERN.test(actualStartDate) && actualEndDate >= actualStartDate) {
+      // A completed task consumes its actual elapsed working/calendar window
+      // in CPM. This captures a late completion without ever reserving future
+      // resources for a task that is already done.
+      return (scheduleDayDistance(actualStartDate, actualEndDate, mode) + 1) * GANTT_MINUTES_PER_DAY;
+    }
+  }
   const explicit = Number(task.durationMinutes);
   if (Number.isFinite(explicit) && explicit > 0) return Math.round(explicit);
   const days = Number(task.durationDays);
@@ -196,7 +220,7 @@ export const calculateGanttCpm = (
   mode: GanttCalendarMode,
   requiredFinishDate = "",
 ): GanttCpmResult => {
-  const validDates = tasks.map((task) => task.startDate).filter((value) => DATE_PATTERN.test(value));
+  const validDates = tasks.map((task) => effectiveTaskStartDate(task)).filter((value) => DATE_PATTERN.test(value));
   const projectStartDate = validDates.sort()[0] ?? "";
   const metricsByTaskId = new Map<string, GanttCpmMetrics>();
   if (!projectStartDate || tasks.length === 0) {
@@ -218,9 +242,9 @@ export const calculateGanttCpm = (
   const taskById = new Map(tasks.map((task) => [task.id, task]));
   const networkTasks = tasks.filter((task) => !childrenByParentId.has(task.id));
   const networkTaskById = new Map(networkTasks.map((task) => [task.id, task]));
-  const durationById = new Map(networkTasks.map((task) => [task.id, taskDurationMinutes(task)]));
+  const durationById = new Map(networkTasks.map((task) => [task.id, taskDurationMinutes(task, mode)]));
   const schedulableIds = new Set(networkTasks
-    .filter((task) => task.isMilestone || taskDurationMinutes(task) > 0)
+    .filter((task) => task.isMilestone || taskDurationMinutes(task, mode) > 0)
     .map((task) => task.id));
   const incoming = new Map<string, CpmEdge[]>();
   const outgoing = new Map<string, CpmEdge[]>();
@@ -267,7 +291,7 @@ export const calculateGanttCpm = (
   for (const id of order) {
     const task = networkTaskById.get(id)!;
     const duration = durationById.get(id) ?? 0;
-    const baseStart = dateToMinutes(projectStartDate, task.startDate, mode, "START");
+    const baseStart = dateToMinutes(projectStartDate, effectiveTaskStartDate(task), mode, "START");
     const dependencyStart = Math.max(
       Number.NEGATIVE_INFINITY,
       ...(incoming.get(id) ?? []).map((edge) => (earlyStart.get(edge.predecessorTaskId) ?? 0) + edge.weightMinutes),

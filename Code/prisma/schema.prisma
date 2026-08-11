@@ -24,24 +24,31 @@ model UserAccount {
 }
 
 model Project {
-  id                String   @id @default(cuid())
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-  name              String
-  code              String   @default("")
-  clientName        String   @default("")
-  amountWan         Float    @default(0)
-  deviceCount       Int      @default(0)
-  repairCycleDays   Int      @default(0)
-  startDate         String   @default("")
-  expectedEndDate   String   @default("")
-  status            String   @default("DRAFT") // ProjectStatus
-  ganttCalendarMode String   @default("CALENDAR_DAYS")
-  ganttRevision     Int      @default(0)
+  id                       String    @id @default(cuid())
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+  name                     String
+  code                     String    @default("")
+  clientName               String    @default("")
+  amountWan                Float     @default(0)
+  deviceCount              Int       @default(0)
+  repairCycleDays          Int       @default(0)
+  startDate                String    @default("")
+  expectedEndDate          String    @default("")
+  status                   String    @default("DRAFT") // ProjectStatus
+  ganttCalendarMode        String    @default("CALENDAR_DAYS")
+  ganttHardFinishDate      String    @default("")
+  ganttRevision            Int       @default(0)
+  ganttBaselineVersion     Int       @default(0)
+  ganttBaselineState       String    @default("DRAFT")
+  ganttBaselinePublishedAt DateTime?
+  ganttBaselinePublishedBy String    @default("")
 
   projectMembers         ProjectMember[]
   ganttTasks             ProjectGanttTask[]
   ganttDependencies      ProjectGanttDependency[]
+  ganttBaselines         ProjectGanttBaseline[]
+  ganttBaselineDraft     ProjectGanttBaselineDraft?
   scheduleMetadata       ProjectScheduleImportMetadata?
   scheduleSnapshots      ProjectScheduleSnapshot[]
   moduleHistorySnapshots ProjectModuleHistorySnapshot[]
@@ -96,6 +103,16 @@ model ProjectGanttTask {
   progress              Int       @default(0)
   predecessorTask       String    @default("")
   taskMode              String    @default("AUTO")
+  startSlot             String    @default("AM")
+  finishSlot            String    @default("PM")
+  actualStartSlot       String    @default("AM")
+  actualFinishSlot      String    @default("PM")
+  parentBoundaryMode    String    @default("ROLLUP")
+  schedulePriority      Int       @default(500)
+  userPriority          String    @default("MEDIUM")
+  effectivePriority     String    @default("MEDIUM")
+  effortDriven          Boolean   @default(false)
+  parallelizable        Boolean   @default(false)
   isMilestone           Boolean   @default(false)
   externalUid           String    @default("")
   wbsCode               String    @default("")
@@ -132,9 +149,12 @@ model ProjectGanttTask {
 }
 
 model ProjectGanttTaskOwner {
-  taskId          String
-  projectMemberId String
-  createdAt       DateTime @default(now())
+  taskId           String
+  projectMemberId  String
+  createdAt        DateTime @default(now())
+  unitsPercent     Int      @default(100)
+  plannedWorkHours Float    @default(0)
+  assignmentRole   String   @default("EXECUTOR")
 
   task          ProjectGanttTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
   projectMember ProjectMember    @relation(fields: [projectMemberId], references: [id], onDelete: Cascade)
@@ -153,6 +173,7 @@ model ProjectGanttDependency {
   type              Int      @default(1)
   lag               Int      @default(0)
   lagFormat         Int      @default(7)
+  unsupportedReason String   @default("")
 
   project         Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
   predecessorTask ProjectGanttTask @relation("GanttDependencyPredecessor", fields: [predecessorTaskId], references: [id], onDelete: Cascade)
@@ -160,6 +181,47 @@ model ProjectGanttDependency {
 
   @@unique([predecessorTaskId, successorTaskId])
   @@index([projectId, successorTaskId])
+}
+
+model ProjectGanttBaseline {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  projectId       String
+  version         Int
+  status          String   @default("PUBLISHED")
+  sourceRevision  Int      @default(0)
+  reason          String   @default("")
+  impactJson      String   @default("{}") @db.Text
+  snapshotJson    String   @db.Text
+  createdByUserId String   @default("")
+  createdByName   String   @default("")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, version])
+  @@index([projectId, createdAt])
+}
+
+model ProjectGanttBaselineDraft {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  projectId       String   @unique
+  baseVersion     Int      @default(0)
+  sourceRevision  Int      @default(0)
+  status          String   @default("ACTIVE")
+  reason          String   @default("")
+  snapshotJson    String   @default("{}") @db.Text
+  impactJson      String   @default("{}") @db.Text
+  createdByUserId String   @default("")
+  createdByName   String   @default("")
+  updatedByUserId String   @default("")
+  updatedByName   String   @default("")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([status, updatedAt])
 }
 
 model ProjectGanttDeletionBatch {
@@ -330,13 +392,16 @@ model SystemPerson {
 }
 
 model ProjectMember {
-  id         String   @id @default(cuid())
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-  projectId  String
-  accountId  String?
-  roleName   String
-  personName String
+  id                       String   @id @default(cuid())
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+  projectId                String
+  accountId                String?
+  roleName                 String
+  personName               String
+  capacityHoursPerDay      Float    @default(7.5)
+  productivityRate         Float    @default(1)
+  maxConcurrentAssignments Int      @default(0)
 
   project        Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
   account        UserAccount?            @relation(fields: [accountId], references: [id], onDelete: SetNull)

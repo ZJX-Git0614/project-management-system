@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "drawio": {
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "C:\\ProgramData\\Ceastar-PMS\\drawio-mcp.ps1"
+      ]
+    }
+  }
+}

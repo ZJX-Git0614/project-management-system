@@ -5,8 +5,11 @@ import { describe, expect, it } from "vitest";
 
 const deploymentFile = (name: string) =>
   readFileSync(resolve(process.cwd(), "deployment/windows-x86", name), "utf8");
+const deploymentBytes = (name: string) =>
+  readFileSync(resolve(process.cwd(), "deployment/windows-x86", name));
 
 const updateScript = deploymentFile("update.ps1");
+const installScript = deploymentFile("install.ps1");
 const rollbackScript = deploymentFile("rollback.ps1");
 const packageScript = deploymentFile("build-update-package.sh");
 const rollbackLauncher = deploymentFile("rollback.bat");
@@ -15,6 +18,9 @@ const assistantServicesScript = deploymentFile("assistant-services.ps1");
 const assistantWatchdogScript = deploymentFile("assistant-service-watchdog.ps1");
 const assistantBridgeScript = deploymentFile("assistant-service-bridge.ps1");
 const assistantBridgeInstaller = deploymentFile("install-assistant-service-bridge.ps1");
+const drawioMcpScript = deploymentFile("drawio-mcp.ps1");
+const drawioMcpInstaller = deploymentFile("install-drawio-mcp.ps1");
+const drawioMcpConfig = deploymentFile("drawio-mcp-config.json");
 const releaseId = deploymentFile("release-id.txt").trim();
 const imageName = deploymentFile("image-name.txt").trim();
 const roleIntegrityMigration = readFileSync(
@@ -24,6 +30,14 @@ const roleIntegrityMigration = readFileSync(
 const entrypoint = readFileSync(resolve(process.cwd(), "docker-entrypoint.sh"), "utf8");
 const preSchemaMigration = readFileSync(
   resolve(process.cwd(), "prisma/pre-schema-migrations/20260804_unique_project_members.sql"),
+  "utf8",
+);
+const approvalWorkflowCompatMigration = readFileSync(
+  resolve(process.cwd(), "prisma/pre-schema-migrations/20260806_approval_workflow_compat.sql"),
+  "utf8",
+);
+const prepareDatabaseScript = readFileSync(
+  resolve(process.cwd(), "scripts/prepare-database.mjs"),
   "utf8",
 );
 const ownerInheritanceMigration = readFileSync(
@@ -58,8 +72,11 @@ describe("Windows staged blue-green deployment", () => {
       const candidateIndex = script.indexOf(
         '@("compose", "run", "--detach", "--no-deps"',
       );
+      const healthInvocation = script === updateScript
+        ? `Wait-ForApplication "${healthUrl}" $script:CandidateContainer`
+        : `Wait-ForApplication "${healthUrl}"`;
       const candidateHealthIndex = script.indexOf(
-        `Wait-ForApplication "${healthUrl}"`,
+        healthInvocation,
       );
       const cutoverIndex = script.indexOf(
         '@("compose", "up", "-d", "--no-deps", "--force-recreate", "pms")',
@@ -71,6 +88,9 @@ describe("Windows staged blue-green deployment", () => {
       expect(candidateHealthIndex).toBeGreaterThan(candidateIndex);
       expect(cutoverIndex).toBeGreaterThan(candidateHealthIndex);
     }
+
+    expect(updateScript).toContain('"--env", "SKIP_PRISMA_DB_PUSH=false"');
+    expect(updateScript).toContain('"--env", "SKIP_PRISMA_SEED=true"');
   });
 
   it("validates migrations against an isolated candidate database", () => {
@@ -83,6 +103,24 @@ describe("Windows staged blue-green deployment", () => {
     expect(updateScript).not.toContain("$response.StatusCode -lt 500");
   });
 
+  it("migrates the production database only after the green candidate is healthy", () => {
+    const candidateHealthIndex = updateScript.indexOf(
+      'Wait-ForApplication "http://127.0.0.1:$candidatePort/api/health/ready" $script:CandidateContainer',
+    );
+    const productionMigrationIndex = updateScript.lastIndexOf("Upgrade-ProductionDatabase");
+    const cutoverIndex = updateScript.indexOf(
+      '@("compose", "up", "-d", "--no-deps", "--force-recreate", "pms")',
+      candidateHealthIndex,
+    );
+
+    expect(updateScript).toContain('"compose", "run", "--rm", "--no-deps"');
+    expect(updateScript).toContain('"正式数据库结构同步失败，未切换 3000 端口。"');
+    expect(updateScript).toContain("候选容器最近日志");
+    expect(candidateHealthIndex).toBeGreaterThan(-1);
+    expect(productionMigrationIndex).toBeGreaterThan(candidateHealthIndex);
+    expect(cutoverIndex).toBeGreaterThan(productionMigrationIndex);
+  });
+
   it("runs duplicate-member protection before Prisma creates the unique index", () => {
     const preSchemaIndex = entrypoint.indexOf("prisma/pre-schema-migrations/*.sql");
     const dbPushIndex = entrypoint.indexOf("prisma db push --skip-generate");
@@ -90,6 +128,15 @@ describe("Windows staged blue-green deployment", () => {
     expect(dbPushIndex).toBeGreaterThan(preSchemaIndex);
     expect(preSchemaMigration).toContain('column_name = \'accountId\'');
     expect(preSchemaMigration).toContain('to_regclass(\'public."ProjectGanttTaskOwner"\')');
+  });
+
+  it("prepares approval todo columns without globally accepting data loss", () => {
+    expect(approvalWorkflowCompatMigration).toContain('ADD COLUMN IF NOT EXISTS "approvalAssignmentId" TEXT');
+    expect(approvalWorkflowCompatMigration).toContain('ADD COLUMN IF NOT EXISTS "approvalInstanceId" TEXT');
+    expect(approvalWorkflowCompatMigration).toContain('CREATE UNIQUE INDEX IF NOT EXISTS "TodoItem_approvalAssignmentId_key"');
+    expect(packageScript).toContain("20260806_approval_workflow_compat.sql");
+    expect(entrypoint).not.toContain("--accept-data-loss");
+    expect(prepareDatabaseScript).not.toContain("--accept-data-loss");
   });
 
   it("does not repeat the legacy owner inheritance backfill on every restart", () => {
@@ -146,8 +193,16 @@ describe("Windows staged blue-green deployment", () => {
     expect(packageScript).toContain("assistant-service-watchdog.ps1");
     expect(packageScript).toContain("assistant-service-bridge.ps1");
     expect(packageScript).toContain("install-assistant-service-bridge.ps1");
+    expect(packageScript).toContain("drawio-mcp.ps1");
+    expect(packageScript).toContain("drawio-mcp-config.json");
+    expect(packageScript).toContain("install-drawio-mcp.ps1");
     expect(packageScript).toContain("20260805_wbs_resource_optimization.sql");
+    expect(packageScript).toContain("20260807_gantt_auto_manual_scheduling.sql");
     expect(packageScript).toContain('"$PACKAGE_DIR/Assistant-Services-Guide-CN.txt"');
+    expect(packageScript).toContain('"$PACKAGE_DIR/Draw.io-MCP-Guide-CN.txt"');
+    expect(packageScript).toContain("Windows PowerShell 5.1");
+    expect(packageScript).toContain("\\xEF\\xBB\\xBF");
+    expect(packageScript).toContain("PowerShell script is missing the UTF-8 BOM");
     expect(packageScript).toContain("CEASTAR_WINDOWS_UPDATE_ZIP_SHA256=");
   });
 
@@ -157,6 +212,14 @@ describe("Windows staged blue-green deployment", () => {
   });
 
   it("ships independent Ollama and RAGLite service management with opt-in startup recovery", () => {
+    for (const scriptName of [
+      "assistant-services.ps1",
+      "assistant-service-watchdog.ps1",
+      "assistant-service-bridge.ps1",
+      "install-assistant-service-bridge.ps1",
+    ]) {
+      expect([...deploymentBytes(scriptName).subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+    }
     expect(assistantServicesLauncher).toContain("chcp 65001 >nul");
     expect(assistantServicesLauncher).toContain("assistant-services.ps1");
     expect(assistantServicesScript).toContain('ValidateSet("All", "Ollama", "RagLite")');
@@ -182,6 +245,20 @@ describe("Windows staged blue-green deployment", () => {
     expect(assistantBridgeInstaller).toContain('-RemoteAddress LocalSubnet');
     expect(assistantBridgeInstaller).toContain('Stop-ScheduledTask -TaskName $taskName');
     expect(updateScript).toContain("install-assistant-service-bridge.ps1");
+  });
+
+  it("ships a Windows Draw.io MCP launcher with a predictable managed location", () => {
+    for (const scriptName of ["drawio-mcp.ps1", "install-drawio-mcp.ps1"]) {
+      expect([...deploymentBytes(scriptName).subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+    }
+    expect(drawioMcpScript).toContain("@drawio/mcp");
+    expect(drawioMcpScript).toContain("npx.cmd");
+    expect(drawioMcpScript).toContain("$npx.Path");
+    expect(drawioMcpInstaller).toContain('Join-Path $env:ProgramData "Ceastar-PMS"');
+    expect(drawioMcpInstaller).toContain("drawio-mcp-config.json");
+    expect(drawioMcpConfig).toContain("C:\\\\ProgramData\\\\Ceastar-PMS\\\\drawio-mcp.ps1");
+    expect(installScript).toContain("install-drawio-mcp.ps1");
+    expect(updateScript).toContain("install-drawio-mcp.ps1");
   });
 
   it("preserves malformed role and permission JSON during integrity repair", () => {
