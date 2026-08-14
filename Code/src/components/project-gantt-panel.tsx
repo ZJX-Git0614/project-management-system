@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { BriefcaseBusiness, CalendarDays, ChevronDown, Download, FileSpreadsheet, FileType2, FlagTriangleRight, Maximize2, Minimize2, Network, Redo2, TriangleAlert, Undo2, Upload, WandSparkles } from "lucide-react";
+import { BriefcaseBusiness, CalendarDays, ChevronDown, Download, FileSpreadsheet, FileType2, FlagTriangleRight, ListTree, Maximize2, Minimize2, Network, Redo2, TriangleAlert, Undo2, Upload, Users, WandSparkles } from "lucide-react";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -25,6 +25,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { GanttTimeline, type GanttTaskDraft } from "@/components/gantt-timeline";
+import { ResourceSwimlaneView, ScheduleCalendarView } from "@/components/gantt-schedule-views";
 import { OperationErrorDialog } from "@/components/operation-error-dialog";
 import { useConfirm } from "@/components/confirm-provider";
 import { usePermission } from "@/lib/use-permission";
@@ -35,6 +36,7 @@ import {
   isValidGanttDurationDays,
   type GanttCalendarMode,
 } from "@/lib/gantt-calendar";
+import { formatGanttRelativeOffset } from "@/lib/gantt-relative-time";
 import { renumberGanttTaskCodes } from "@/lib/gantt-task-codes";
 import { ganttTaskDepths } from "@/lib/gantt-column-layout";
 import {
@@ -61,7 +63,8 @@ interface ProjectGanttPanelProps {
 
 interface FetchTasksOptions {
   showLoading?: boolean;
-  clearOnError?: boolean;
+  forceFresh?: boolean;
+  refreshResourceAnalysis?: boolean;
 }
 
 interface GanttTransferCapabilities {
@@ -101,11 +104,17 @@ interface GanttHistorySnapshotResult {
   createdAt: string;
 }
 
+interface GanttHistorySnapshotCapture {
+  snapshot: GanttHistorySnapshotResult | null;
+  warning: string | null;
+}
+
 export interface GanttHistoryFocusRequest extends GanttHistoryFocusTarget {
   requestId: number;
 }
 
 let fallbackClientIdSequence = 0;
+const GANTT_HISTORY_SNAPSHOT_TIMEOUT_MS = 5_000;
 const createClientId = () => {
   if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
   fallbackClientIdSequence += 1;
@@ -180,14 +189,20 @@ type ResourceConflictView = {
 
 type ResourceScheduleCandidateView = {
   id: string;
-  kind: "MINIMAL_CHANGE" | "EARLIEST_FINISH" | "ON_TIME" | "RESOURCE_SMOOTHING";
+  kind: "FORMAL";
   title: string;
   explanation: string;
+  relativeSchedule: boolean;
   applicable: boolean;
   changes: Array<{
     taskId: string;
     startDate: string;
     finishDate: string;
+    relativeStartOffsetDays?: number | null;
+    relativeFinishOffsetDays?: number | null;
+    durationDays?: number;
+    durationMinutes?: number;
+    estimatedWorkHours?: number;
     taskMode?: "AUTO" | "DURATION_FORWARD" | "DURATION_BACKWARD";
     task: ResourceConflictTask | null;
   }>;
@@ -201,8 +216,31 @@ type ResourceScheduleCandidateView = {
     suggestion: string;
   }>;
   resourceConstrainedTaskIds: string[];
+  resourceCriticalChainTaskIds: string[];
+  resourceCriticalChainLinks: Array<{
+    predecessorTaskId: string;
+    successorTaskId: string;
+    ownerKey: string;
+  }>;
+  criticalTaskIds: string[];
+  taskExplanations: Array<{
+    taskId: string;
+    startDate: string;
+    finishDate: string;
+    relativeStartOffsetDays?: number | null;
+    relativeFinishOffsetDays?: number | null;
+    initialTotalFloatDays: number | null;
+    finalTotalFloatDays: number | null;
+    isCritical: boolean;
+    resourceConstrained: boolean;
+    resourceCritical: boolean;
+    reasonCodes: string[];
+    summary: string;
+    details: string[];
+  }>;
   metrics: {
     completionDate: string;
+    relativeCompletionOffsetDays?: number | null;
     delayedDays: number;
     movedTaskCount: number;
     totalShiftDays: number;
@@ -222,6 +260,20 @@ type ResourceScheduleAnalysisView = {
     suggestion: string;
   }>;
   candidates: ResourceScheduleCandidateView[];
+  durationSuggestions: Array<{
+    taskId: string;
+    parentTaskId: string;
+    ownerKey: string;
+    suggestedDurationDays: number;
+    source: "SYSTEM_SUGGESTED";
+    reason: string;
+  }>;
+  durationSuggestionIssues: Array<{
+    id: string;
+    taskIds: string[];
+    code: string;
+    message: string;
+  }>;
   scope?: {
     rootTaskIds: string[];
     taskIds: string[];
@@ -371,6 +423,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const [reordering, setReordering] = useState(false);
   const [hierarchyChanging, setHierarchyChanging] = useState(false);
   const [fullScreen, setFullScreen] = useState(false);
+  const [scheduleView, setScheduleView] = useState<"WBS" | "RESOURCE" | "CALENDAR">("WBS");
   const [importing, setImporting] = useState(false);
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
   const [mppExportAvailable, setMppExportAvailable] = useState(false);
@@ -384,6 +437,8 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const [resourceDialogOpen, setResourceDialogOpen] = useState(false);
   const [resourceAnalysisLoading, setResourceAnalysisLoading] = useState(false);
   const [resourceApplyingKind, setResourceApplyingKind] = useState<ResourceScheduleCandidateView["kind"] | null>(null);
+  const [durationSuggestionsApplying, setDurationSuggestionsApplying] = useState(false);
+  const [selectedDurationSuggestionIds, setSelectedDurationSuggestionIds] = useState<string[]>([]);
   const [resourceScheduleRequest, setResourceScheduleRequest] = useState<ResourceScheduleRequest>(DEFAULT_RESOURCE_SCHEDULE_REQUEST);
   const [autoScheduleScopeTask, setAutoScheduleScopeTask] = useState<ProjectGanttTask | null>(null);
   const [autoScheduleScopeIds, setAutoScheduleScopeIds] = useState<string[]>([]);
@@ -394,6 +449,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const [baselineReason, setBaselineReason] = useState("");
   const [baselineBusy, setBaselineBusy] = useState(false);
   const historyFocusRequestIdRef = useRef(0);
+  const resourceAnalysisRequestIdRef = useRef(0);
   const importInputRef = useRef<HTMLInputElement>(null);
   const processedAssistantAttachmentId = useRef<string | null>(null);
   const ganttCardRef = useRef<HTMLDivElement>(null);
@@ -438,6 +494,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     includeCandidates = false,
     request: ResourceScheduleRequest = DEFAULT_RESOURCE_SCHEDULE_REQUEST,
   ) => {
+    const requestId = ++resourceAnalysisRequestIdRef.current;
     try {
       const query = new URLSearchParams();
       if (includeCandidates) query.set("includeCandidates", "1");
@@ -448,28 +505,50 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       const data = await api.get<ResourceScheduleAnalysisView>(
         `/api/projects/${projectId}/gantt-tasks/resource-schedule${query.size > 0 ? `?${query.toString()}` : ""}`,
       );
+      if (requestId !== resourceAnalysisRequestIdRef.current) return data;
       setResourceAnalysis(data);
+      setSelectedDurationSuggestionIds((current) => {
+        const available = new Set((data.durationSuggestions ?? []).map((suggestion) => suggestion.taskId));
+        return current.filter((taskId) => available.has(taskId));
+      });
       return data;
     } catch {
-      setResourceAnalysis(null);
+      if (requestId === resourceAnalysisRequestIdRef.current) setResourceAnalysis(null);
       return null;
     }
   }, [projectId]);
 
-  const fetchTasks = useCallback(async ({ showLoading = false, clearOnError = false }: FetchTasksOptions = {}) => {
+  const fetchTasks = useCallback(async ({
+    showLoading = false,
+    forceFresh = false,
+    refreshResourceAnalysis = true,
+  }: FetchTasksOptions = {}) => {
     if (showLoading) {
       setLoading(true);
     }
 
     try {
-      const data = await api.get<ProjectGanttTask[]>(`/api/projects/${projectId}/gantt-tasks`);
-      setTasks(data);
-      void fetchResourceAnalysis(false);
-      return data;
-    } catch {
-      if (clearOnError) {
-        setTasks([]);
+      const endpoint = forceFresh
+        ? `/api/projects/${projectId}/gantt-tasks?refresh=${Date.now()}`
+        : `/api/projects/${projectId}/gantt-tasks`;
+      let data = await api.get<ProjectGanttTask[]>(endpoint);
+      // A page can remain mounted while an import, restore or data rebuild
+      // completes in another request. Revalidate once before rendering an
+      // empty WBS so a stale HTTP/client-cache response is never mistaken for
+      // an empty project plan.
+      if (data.length === 0 && !forceFresh) {
+        data = await api.get<ProjectGanttTask[]>(`/api/projects/${projectId}/gantt-tasks?refresh=${Date.now()}`);
       }
+      setTasks(data);
+      if (refreshResourceAnalysis) void fetchResourceAnalysis(false);
+      return data;
+    } catch (error) {
+      // Keep the last known list visible. A transient auth or network failure
+      // must never be presented as an empty WBS.
+      setOperationError({
+        title: "加载项目 WBS 失败",
+        message: error instanceof Error ? error.message : "无法读取项目 WBS，请稍后重试。",
+      });
       return [];
     } finally {
       if (showLoading) {
@@ -479,8 +558,21 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   }, [fetchResourceAnalysis, projectId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => fetchTasks({ showLoading: true, clearOnError: true }));
+    void Promise.resolve().then(() => fetchTasks({ showLoading: true }));
   }, [fetchTasks]);
+
+  useEffect(() => {
+    const refreshEmptyWbs = () => {
+      if (document.visibilityState !== "visible" || loading || tasks.length > 0) return;
+      void fetchTasks({ forceFresh: true });
+    };
+    window.addEventListener("focus", refreshEmptyWbs);
+    document.addEventListener("visibilitychange", refreshEmptyWbs);
+    return () => {
+      window.removeEventListener("focus", refreshEmptyWbs);
+      document.removeEventListener("visibilitychange", refreshEmptyWbs);
+    };
+  }, [fetchTasks, loading, tasks.length]);
 
   useEffect(() => {
     const state = typeof window === "undefined"
@@ -646,6 +738,29 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     `/api/projects/${projectId}/gantt-tasks/history/snapshots`,
     { sessionId: historySessionId(), label },
   );
+  const captureHistorySnapshotWithinDeadline = async (label: string): Promise<GanttHistorySnapshotCapture> => {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const request = captureHistorySnapshot(label)
+      .then((snapshot) => ({ snapshot, warning: null }))
+      .catch((error): GanttHistorySnapshotCapture => ({
+        snapshot: null,
+        warning: error instanceof Error ? `保存撤销快照失败：${error.message}` : "保存撤销快照失败",
+      }));
+    const timeout = new Promise<GanttHistorySnapshotCapture>((resolve) => {
+      timeoutId = setTimeout(() => {
+        resolve({
+          snapshot: null,
+          warning: `保存撤销快照超过 ${GANTT_HISTORY_SNAPSHOT_TIMEOUT_MS / 1000} 秒，已跳过本次撤销记录。`,
+        });
+      }, GANTT_HISTORY_SNAPSHOT_TIMEOUT_MS);
+    });
+
+    try {
+      return await Promise.race([request, timeout]);
+    } finally {
+      if (timeoutId !== null) clearTimeout(timeoutId);
+    }
+  };
   const signalHistoryTarget = (target: GanttHistoryFocusTarget) => {
     historyFocusRequestIdRef.current += 1;
     setHistoryFocusRequest({ ...target, requestId: historyFocusRequestIdRef.current });
@@ -658,21 +773,31 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     target: GanttHistoryFocusTarget,
     action: () => Promise<T>,
   ): Promise<T> => {
-    const before = await captureHistorySnapshot(`${label}:before`);
+    const beforeCapture = await captureHistorySnapshotWithinDeadline(`${label}:before`);
     const result = await action();
-    void captureHistorySnapshot(`${label}:after`).then((after) => {
+    if (!beforeCapture.snapshot) {
+      setOperationError({
+        title: "操作已完成，但未加入撤销历史",
+        message: beforeCapture.warning ?? "操作前撤销快照不可用，本次操作无法通过撤销恢复。",
+      });
+      return result;
+    }
+    const beforeSnapshot = beforeCapture.snapshot;
+    void captureHistorySnapshotWithinDeadline(`${label}:after`).then((afterCapture) => {
+      if (!afterCapture.snapshot) {
+        setOperationError({
+          title: "操作已完成，但未加入撤销历史",
+          message: afterCapture.warning ?? "操作后撤销快照不可用，本次操作无法通过撤销恢复。",
+        });
+        return;
+      }
       commitHistoryEntry({
         id: createClientId(),
         kind: "SNAPSHOT",
         label,
-        beforeSnapshotId: before.snapshotId,
-        afterSnapshotId: after.snapshotId,
+        beforeSnapshotId: beforeSnapshot.snapshotId,
+        afterSnapshotId: afterCapture.snapshot.snapshotId,
         target,
-      });
-    }).catch((error) => {
-      setOperationError({
-        title: "操作已完成，但未能加入撤销历史",
-        message: error instanceof Error ? error.message : "保存操作历史失败",
       });
     });
     return result;
@@ -719,6 +844,43 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       await fetchResourceAnalysis(true, resourceScheduleRequest);
     } finally {
       setResourceApplyingKind(null);
+    }
+  };
+
+  const applyDurationSuggestions = async () => {
+    if (!resourceAnalysis || durationSuggestionsApplying || selectedDurationSuggestionIds.length === 0 || !canEditPlanning) return;
+    const accepted = await confirm(
+      `确认将选中的 ${selectedDurationSuggestionIds.length} 条系统建议工期写入正式计划？写入后会参与依赖、资源容量和关键路径计算。`,
+    );
+    if (!accepted) return;
+    setDurationSuggestionsApplying(true);
+    try {
+      await runWithSnapshotHistory(
+        "确认系统建议工期",
+        { taskIds: selectedDurationSuggestionIds },
+        async () => {
+          await api.post(`/api/projects/${projectId}/gantt-tasks/resource-schedule`, {
+            action: "APPLY_DURATION_SUGGESTIONS",
+            taskIds: selectedDurationSuggestionIds,
+            revision: resourceAnalysis.revision,
+            snapshotHash: resourceAnalysis.snapshotHash,
+          });
+          await fetchTasks({ forceFresh: true, refreshResourceAnalysis: false });
+        },
+      );
+      setSelectedDurationSuggestionIds([]);
+      // Writing suggested durations is a completed action, not a second scheduling decision.
+      // Close the preview immediately so a successful confirmation cannot be mistaken for a stalled dialog.
+      setResourceDialogOpen(false);
+      void fetchResourceAnalysis(true, resourceScheduleRequest);
+    } catch (error) {
+      setOperationError({
+        title: "确认建议工期失败",
+        message: error instanceof Error ? error.message : "系统建议工期写入失败",
+      });
+      await fetchResourceAnalysis(true, resourceScheduleRequest);
+    } finally {
+      setDurationSuggestionsApplying(false);
     }
   };
 
@@ -917,7 +1079,10 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   };
 
   const handleUpdateTask = async (task: ProjectGanttTask, draft: GanttTaskDraft, columnKey?: string) => {
-    const planColumns = new Set(["startDate", "endDate", "durationDays", "priority", "owner", "predecessor"]);
+    // Changing an owner may trigger a resource recalculation after save, but
+    // it does not change the manual task plan. Keep the schedule-impact
+    // confirmation reserved for actual date, duration, priority and FS edits.
+    const planColumns = new Set(["startDate", "endDate", "durationDays", "priority", "predecessor"]);
     const isPlanEdit = Boolean(columnKey && planColumns.has(columnKey));
     const hasChildTasks = tasks.some((candidate) => candidate.parentId === task.id);
     // A direct plan edit establishes a deterministic task mode. Editing a
@@ -1298,6 +1463,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
 
   const range = getGanttDateRange(tasks);
   const criticalCount = buildGanttRows(tasks).filter((row) => row.isCritical).length;
+  const taskById = new Map(tasks.map((task) => [task.id, task] as const));
   const undoEntry = currentHistory.entries[currentHistory.cursor];
   const redoEntry = currentHistory.entries[currentHistory.cursor + 1];
   const resourceAttentionCount = (resourceAnalysis?.conflicts?.length ?? 0) + (resourceAnalysis?.issues?.length ?? 0);
@@ -1323,6 +1489,27 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
               <CardTitle className="text-sm">项目WBS管理</CardTitle>
             </div>
             <div className="flex flex-wrap items-start justify-end gap-2">
+              <div className="inline-flex h-8 items-stretch border border-border/70 bg-background/35" role="group" aria-label="排期视图">
+                {([
+                  ["WBS", "WBS 与甘特", ListTree],
+                  ["RESOURCE", "负责人泳道", Users],
+                  ["CALENDAR", "资源日历", CalendarDays],
+                ] as const).map(([value, label, Icon]) => (
+                  <Button
+                    key={value}
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    className={cn("size-8 rounded-none", scheduleView === value && "bg-primary/12 text-foreground")}
+                    aria-pressed={scheduleView === value}
+                    aria-label={label}
+                    title={label}
+                    onClick={() => setScheduleView(value)}
+                  >
+                    <Icon className="size-3.5" />
+                  </Button>
+                ))}
+              </div>
               {range && (
                 <div className="mr-1 grid grid-cols-3 gap-3 text-right text-xs">
                   <div>
@@ -1349,10 +1536,10 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                 )}
                 disabled={resourceAnalysisLoading}
                 onClick={() => void openResourceScheduleDialog()}
-                title={resourceAttentionCount > 0 ? "查看资源冲突、排期约束并选择优化方案" : "检查资源容量和排期约束"}
+                title={resourceAttentionCount > 0 ? "查看正式自动排期预览、资源冲突和排期约束" : "计算正式自动排期预览"}
               >
                 <WandSparkles className="size-3.5" />
-                资源优化 {resourceAttentionCount}
+                自动排期 {resourceAttentionCount}
               </Button>
               {(canCreate || canEdit || canDelete) && (
                 <div className="flex items-center gap-2" role="group" aria-label="撤销与重做">
@@ -1532,7 +1719,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
           </div>
         </CardHeader>
         <CardContent className={cn("pb-0", fullScreen && "min-h-0 flex-1 overflow-hidden px-3")}>
-          <GanttTimeline
+          {scheduleView === "WBS" ? <GanttTimeline
             canCreate={canCreate}
             canDelete={canDelete}
             canEdit={canEdit}
@@ -1559,9 +1746,15 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
             projectMembers={projectMembers}
             reordering={reordering}
             resourceConflictMessagesByTaskId={resourceConflictMessagesByTaskId}
+            resourceCriticalTaskIds={resourceAnalysis?.candidates[0]?.resourceCriticalChainTaskIds ?? []}
+            resourceCriticalChainLinks={resourceAnalysis?.candidates[0]?.resourceCriticalChainLinks ?? []}
             savingTaskId={savingTaskId}
             tasks={tasks}
-          />
+          /> : scheduleView === "RESOURCE" ? (
+            <ResourceSwimlaneView tasks={tasks} calendarMode={calendarMode} />
+          ) : (
+            <ScheduleCalendarView tasks={tasks} />
+          )}
         </CardContent>
       </Card>
       <Dialog
@@ -1777,7 +1970,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
           <DialogHeader>
             <DialogTitle>选择自动排期范围</DialogTitle>
             <DialogDescription>
-              只会计算所选末级父任务下的叶子任务。未选分支保留当前日期并继续占用负责人容量，不会被本次自动排期移动。
+              所选范围只决定哪些子任务会批量覆盖排期方式、接收建议工期。正式求解始终评估项目内全部可移动的叶子任务，确保跨分支 FS 紧前关系和同一负责人容量不会漏算。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -1847,13 +2040,13 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       <Dialog open={resourceDialogOpen} onOpenChange={(open) => !resourceApplyingKind && setResourceDialogOpen(open)}>
         <DialogContent container={fullScreen ? ganttPortalContainer : undefined} className="max-w-4xl">
           <DialogHeader>
-            <DialogTitle>资源冲突与优化排期</DialogTitle>
+            <DialogTitle>正式自动排期预览</DialogTitle>
             <DialogDescription>
-              排期范围：{resourceScheduleRequest.scopeLabel}。自动排期只移动当前项目尚未开始的范围内叶子任务；日期固定、进行中和已完成任务不会移动，范围外任务会继续占用负责人容量。系统会先校验负责人、工期、计划锚点、紧前关系和父级硬边界，再给出可应用方案；应用后可通过 WBS 顶部撤销按钮恢复。
+              排期方式覆盖范围：{resourceScheduleRequest.scopeLabel}。未填写项目 T0 时，系统以 T0 为第 0 个工作日输出相对工期；填写 T0 后，系统按项目日历、FS 紧前关系和硬边界换算为具体日期。正式求解会统一评估项目内全部未开始的自动叶子任务；日期固定、进行中和已完成任务保持不动。预览确认后才会写入。
             </DialogDescription>
           </DialogHeader>
           {resourceAnalysisLoading ? (
-            <div className="py-10 text-center text-sm text-muted-foreground">正在计算候选方案...</div>
+            <div className="py-10 text-center text-sm text-muted-foreground">正在计算正式自动排期...</div>
           ) : (
             <div className="max-h-[65vh] space-y-4 overflow-y-auto pr-1">
               <div className="flex items-center gap-2 border-b border-border/70 pb-3 text-sm">
@@ -1875,9 +2068,76 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   ))}
                 </div>
               )}
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              {(resourceAnalysis?.durationSuggestions?.length ?? 0) > 0 && (
+                <section className="border-y border-border/70 py-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold">系统建议工期</div>
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                        对唯一负责人且父任务有可用窗口的未定工期叶子任务生成。FS 关系只决定任务先后顺序，不会阻止建议生成。点击下方“应用正式排期”时会连同日期一并写入；也可在此单独确认建议工期。
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        className="text-xs text-muted-foreground hover:text-foreground"
+                        onClick={() => setSelectedDurationSuggestionIds(resourceAnalysis?.durationSuggestions.map((suggestion) => suggestion.taskId) ?? [])}
+                      >
+                        全选
+                      </button>
+                      <button
+                        type="button"
+                        className="text-xs text-muted-foreground hover:text-foreground"
+                        onClick={() => setSelectedDurationSuggestionIds([])}
+                      >
+                        清空
+                      </button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={selectedDurationSuggestionIds.length === 0 || durationSuggestionsApplying || !canEditPlanning}
+                        onClick={() => void applyDurationSuggestions()}
+                      >
+                        {durationSuggestionsApplying ? "正在写入正式工期..." : `确认选中建议 ${selectedDurationSuggestionIds.length}`}
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="mt-3 grid gap-2 md:grid-cols-2">
+                    {resourceAnalysis?.durationSuggestions.map((suggestion) => {
+                      const suggestionTask = taskById.get(suggestion.taskId);
+                      return (
+                        <label key={suggestion.taskId} className="flex cursor-pointer items-start gap-2 border border-border/60 px-3 py-2 text-xs hover:bg-muted/20">
+                          <input
+                            type="checkbox"
+                            className="mt-0.5 size-4 accent-primary"
+                            checked={selectedDurationSuggestionIds.includes(suggestion.taskId)}
+                            onChange={() => setSelectedDurationSuggestionIds((current) => current.includes(suggestion.taskId)
+                              ? current.filter((taskId) => taskId !== suggestion.taskId)
+                              : [...current, suggestion.taskId])}
+                          />
+                          <span className="min-w-0">
+                            <span className="block truncate font-medium" title={`${suggestionTask?.taskCode || ""} · ${suggestionTask?.taskName || suggestion.taskId}`}>
+                              {suggestionTask?.taskCode || "任务"} · {suggestionTask?.taskName || "未命名任务"}
+                            </span>
+                            <span className="mt-0.5 block text-muted-foreground">建议 {suggestion.suggestedDurationDays} 天 · {suggestion.reason}</span>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
+              {(resourceAnalysis?.durationSuggestionIssues?.length ?? 0) > 0 && (
+                <details className="border-b border-border/70 pb-3 text-xs">
+                  <summary className="cursor-pointer text-muted-foreground">未能生成建议工期 {resourceAnalysis?.durationSuggestionIssues.length ?? 0} 项</summary>
+                  <div className="mt-2 space-y-1.5">
+                    {resourceAnalysis?.durationSuggestionIssues.slice(0, 8).map((issue) => <div key={issue.id}>{issue.message}</div>)}
+                  </div>
+                </details>
+              )}
+              <div className="grid gap-3">
                 {(resourceAnalysis?.candidates ?? []).map((candidate) => (
-                  <section key={candidate.kind} className="flex min-h-[220px] flex-col rounded-md border border-border/70 p-4">
+                  <section key={candidate.kind} className="flex min-h-[220px] max-w-2xl flex-col rounded-md border border-border/70 p-4">
                     <div className="text-sm font-semibold">{candidate.title}</div>
                     <p className="mt-1 text-xs leading-5 text-muted-foreground">{candidate.explanation}</p>
                     <dl className="mt-4 grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
@@ -1886,11 +2146,19 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                       <dt className="text-muted-foreground">累计移动</dt>
                       <dd className="text-right font-medium">{candidate.metrics.totalShiftDays} 天</dd>
                       <dt className="text-muted-foreground">预计完成</dt>
-                      <dd className="text-right font-medium">{candidate.metrics.completionDate || "-"}</dd>
+                      <dd className="text-right font-medium">
+                        {candidate.relativeSchedule
+                          ? formatGanttRelativeOffset(candidate.metrics.relativeCompletionOffsetDays)
+                          : candidate.metrics.completionDate || "-"}
+                      </dd>
                       <dt className="text-muted-foreground">剩余冲突</dt>
                       <dd className="text-right font-medium text-destructive">{candidate.remainingConflicts.length}</dd>
-                      <dt className="text-muted-foreground">资源约束链</dt>
+                      <dt className="text-muted-foreground">资源等待任务</dt>
                       <dd className="text-right font-medium">{candidate.resourceConstrainedTaskIds.length}</dd>
+                      <dt className="text-muted-foreground">资源关键链</dt>
+                      <dd className="text-right font-medium text-sky-500">{candidate.resourceCriticalChainTaskIds.length}</dd>
+                      <dt className="text-muted-foreground">最终关键任务</dt>
+                      <dd className="text-right font-medium">{candidate.criticalTaskIds.length}</dd>
                     </dl>
                     {candidate.changes.length > 0 && (
                       <div className="mt-3 border-t border-border/60 pt-3">
@@ -1901,7 +2169,12 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                               <span className="block truncate" title={`${change.task?.taskCode || ""} ${change.task?.taskName || "任务"}`}>
                                 {change.task?.taskCode || "任务"} · {change.task?.taskName || "未命名"}
                               </span>
-                              <span className="text-muted-foreground">→ {change.startDate} 至 {change.finishDate}</span>
+                              <span className="text-muted-foreground">
+                                → {candidate.relativeSchedule
+                                  ? `${formatGanttRelativeOffset(change.relativeStartOffsetDays)} 至 ${formatGanttRelativeOffset(change.relativeFinishOffsetDays)}`
+                                  : `${change.startDate} 至 ${change.finishDate}`}
+                                {typeof change.durationDays === "number" ? ` · 工期 ${change.durationDays} 天` : ""}
+                              </span>
                             </li>
                           ))}
                           {candidate.changes.length > 4 && <li className="text-muted-foreground">另有 {candidate.changes.length - 4} 个任务</li>}
@@ -1914,9 +2187,25 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                           ?? candidate.issues[0]?.message}
                       </div>
                     )}
+                    {candidate.taskExplanations.length > 0 && (
+                      <details className="mt-3 border-t border-border/60 pt-3 text-[11px] leading-4">
+                        <summary className="cursor-pointer font-medium text-muted-foreground">查看排期依据</summary>
+                        <div className="mt-2 max-h-36 space-y-2 overflow-y-auto pr-1">
+                          {candidate.taskExplanations.slice(0, 8).map((explanation) => (
+                            <div key={explanation.taskId} className="border-l-2 border-primary/40 pl-2">
+                              <div>{explanation.summary}</div>
+                              {explanation.details.map((detail) => <div key={detail} className="text-muted-foreground">{detail}</div>)}
+                            </div>
+                          ))}
+                          {candidate.taskExplanations.length > 8 && <div className="text-muted-foreground">另有 {candidate.taskExplanations.length - 8} 项排期依据</div>}
+                        </div>
+                      </details>
+                    )}
                     {!candidate.applicable && (
                       <p className="mt-3 text-xs leading-5 text-amber-500">
-                        手工排程、进行中任务或其他项目占用使此方案无法减少冲突，请先调整这些约束。
+                        {candidate.issues.some((issue) => issue.severity === "ERROR")
+                          ? "存在阻断性约束，系统不会生成部分写入结果。请先按上方提示补齐或修复条件。"
+                          : "当前计划无需日期调整；如需重新安排，请补充或修改项目 T0、工期、负责人、紧前关系或硬边界。"}
                       </p>
                     )}
                     <Button
@@ -1926,7 +2215,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                       disabled={!candidate.applicable || Boolean(resourceApplyingKind) || !canEditPlanning}
                       onClick={() => void applyResourceScheduleCandidate(candidate)}
                     >
-                      {resourceApplyingKind === candidate.kind ? "应用中..." : "应用此方案"}
+                      {resourceApplyingKind === candidate.kind ? "应用中..." : "应用正式排期"}
                     </Button>
                   </section>
                 ))}

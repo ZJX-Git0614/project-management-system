@@ -10,7 +10,7 @@ import {
   isProjectGanttManager,
   publishProjectGanttBaseline,
 } from "@/lib/gantt-baseline-service";
-import { recalculateProjectGanttSchedule } from "@/lib/gantt-task-service";
+import { refreshProjectGanttDerivedState } from "@/lib/gantt-task-service";
 import { prisma } from "@/lib/prisma";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 
@@ -105,7 +105,7 @@ export async function POST(
   if (action === "VALIDATE") {
     if (!await userHasPermission(user, "project-gantt:view")) return forbidden();
     try {
-      await recalculateProjectGanttSchedule(id);
+      await refreshProjectGanttDerivedState(id);
       const overview = await getProjectGanttBaselineOverview(id);
       return ok({
         ...overview,
@@ -154,7 +154,7 @@ export async function POST(
       const overview = await getProjectGanttBaselineOverview(id);
       const permissions = await getBaselinePermissionsForUser(id, user, overview);
       if (!permissions.canPublish) return err("发布或变更 WBS 基线需要项目经理具备“发布或变更 WBS 基线”权限。", 403);
-      await recalculateProjectGanttSchedule(id);
+      await refreshProjectGanttDerivedState(id);
       const result = await publishProjectGanttBaseline({
         projectId: id,
         actor: { userId: user.userId, displayName: user.displayName },

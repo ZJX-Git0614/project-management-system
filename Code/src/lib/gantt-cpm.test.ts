@@ -47,7 +47,7 @@ describe("gantt CPM", () => {
     expect(["a", "b", "c", "d"].map((id) => result.metricsByTaskId.get(id)?.isCritical)).toEqual([true, true, true, true]);
   });
 
-  it("supports SS, FF and SF dependency constraints", () => {
+  it("marks non-FS dependency constraints as invalid instead of calculating a different network", () => {
     const result = calculateGanttCpm([
       task("a", 4),
       task("ss", 2, [], { predecessorDependencies: [{ predecessorTaskId: "a", type: 3, lag: 0 }] }),
@@ -55,9 +55,9 @@ describe("gantt CPM", () => {
       task("sf", 2, [], { predecessorDependencies: [{ predecessorTaskId: "a", type: 2, lag: 0 }] }),
     ], "CALENDAR_DAYS");
 
-    expect(result.metricsByTaskId.get("ss")?.earlyStartDate).toBe("2026-07-01");
-    expect(result.metricsByTaskId.get("ff")?.earlyStartDate).toBe("2026-07-03");
-    expect(result.metricsByTaskId.get("sf")?.earlyStartDate).toBe("2026-07-01");
+    expect(result.metricsByTaskId.get("ss")).toMatchObject({ scheduleStatus: "INVALID_DEPENDENCY", earlyStartDate: "" });
+    expect(result.metricsByTaskId.get("ff")).toMatchObject({ scheduleStatus: "INVALID_DEPENDENCY", earlyStartDate: "" });
+    expect(result.metricsByTaskId.get("sf")).toMatchObject({ scheduleStatus: "INVALID_DEPENDENCY", earlyStartDate: "" });
   });
 
   it("exposes negative float when the required finish is earlier than the network finish", () => {
@@ -125,5 +125,21 @@ describe("gantt CPM", () => {
       isCritical: true,
     });
     expect(result.metricsByTaskId.get("successor")?.earlyStartDate).toBe("2026-07-06");
+  });
+
+  it("expands a summary FS dependency to the successor summary entry leaf", () => {
+    const result = calculateGanttCpm([
+      task("parent-a", 2),
+      task("a-1", 1, [], { parentId: "parent-a" }),
+      task("a-2", 1, [], { parentId: "parent-a" }),
+      task("parent-b", 2, ["parent-a"]),
+      task("b-1", 1, [], { parentId: "parent-b" }),
+      task("b-2", 1, ["b-1"], {
+        parentId: "parent-b",
+      }),
+    ], "CALENDAR_DAYS");
+
+    expect(result.metricsByTaskId.get("b-1")?.earlyStartDate).toBe("2026-07-02");
+    expect(result.metricsByTaskId.get("b-2")?.earlyStartDate).toBe("2026-07-03");
   });
 });

@@ -46,6 +46,18 @@ describe("gantt helpers", () => {
     expect(row.widthPercent).toBe(0);
   });
 
+  it("keeps WBS rows visible before any task has been scheduled", () => {
+    const rows = buildGanttRows([
+      baseTask({ id: "task-1", taskName: "未排期父任务", startDate: "", finishDate: "", durationDays: 0 }),
+      baseTask({ id: "task-2", taskName: "未排期子任务", startDate: "", finishDate: "", durationDays: 0 }),
+    ]);
+
+    expect(getGanttDateRange(rows)).toBeNull();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.taskName)).toEqual(["未排期父任务", "未排期子任务"]);
+    expect(rows.every((row) => row.spanDays === 0 && row.endDate === "")).toBe(true);
+  });
+
   it("builds proportional timeline offsets for multiple tasks", () => {
     const rows = buildGanttRows([
       baseTask({ id: "task-1", startDate: "2026-06-01", durationDays: 5 }),
@@ -56,6 +68,49 @@ describe("gantt helpers", () => {
     expect(rows[0].widthPercent).toBe(50);
     expect(rows[1].leftPercent).toBe(50);
     expect(rows[1].widthPercent).toBe(50);
+  });
+
+  it("uses relative offsets as abstract workday coordinates", () => {
+    const rows = buildGanttRows([
+      baseTask({ id: "task-1", startDate: "", durationDays: 3, relativeStartOffsetDays: 0, relativeFinishOffsetDays: 2 }),
+      baseTask({ id: "task-2", startDate: "", durationDays: 2, relativeStartOffsetDays: 5, relativeFinishOffsetDays: 6, predecessorTaskIds: ["task-1"] }),
+    ]);
+
+    expect(getGanttDateRange(rows)).toBeNull();
+    expect(rows[0]).toMatchObject({ startDisplayLabel: "T0", finishDisplayLabel: "T0+2", timelineStartDays: 0, timelineEndDays: 3, spanDays: 3 });
+    expect(rows[1]).toMatchObject({ startDisplayLabel: "T0+5", finishDisplayLabel: "T0+6", timelineStartDays: 5, timelineEndDays: 7, spanDays: 2 });
+    expect(buildGanttDependencyLinks(rows)).toEqual([
+      { predecessorId: "task-1", successorId: "task-2", predecessorName: "方案设计", successorName: "方案设计" },
+    ]);
+  });
+
+  it("keeps unresolved T0 schedules relative even when an old calendar date remains", () => {
+    const rows = buildGanttRows([
+      baseTask({
+        id: "task-1",
+        startDate: "2026-08-01",
+        finishDate: "2026-08-03",
+        durationDays: 3,
+        relativeStartOffsetDays: 2,
+        relativeFinishOffsetDays: 4,
+      }),
+      baseTask({
+        id: "task-2",
+        startDate: "",
+        finishDate: "",
+        durationDays: 2,
+        relativeStartOffsetDays: 5,
+        relativeFinishOffsetDays: 6,
+      }),
+    ]);
+
+    expect(getGanttDateRange(rows)).toBeNull();
+    expect(rows[0]).toMatchObject({
+      startDisplayLabel: "T0+2",
+      finishDisplayLabel: "T0+4",
+      timelineStartDays: 2,
+      timelineEndDays: 5,
+    });
   });
 
   it("returns the visible date range for all gantt tasks", () => {

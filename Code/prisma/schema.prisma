@@ -85,6 +85,8 @@ model ProjectGanttTask {
   taskDescription       String    @default("无")
   startDate             String
   finishDate            String    @default("")
+  relativeStartOffsetDays  Float?
+  relativeFinishOffsetDays Float?
   earlyStartDate        String    @default("")
   earlyFinishDate       String    @default("")
   lateStartDate         String    @default("")

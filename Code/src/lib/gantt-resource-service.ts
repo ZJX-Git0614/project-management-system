@@ -3,6 +3,7 @@ import {
   createResourceScheduleCandidates,
   detectResourceConflicts,
   detectResourceScheduleIssues,
+  FORMAL_RESOURCE_SCHEDULE_CANDIDATE_KIND,
   resourceScheduleSnapshotHash,
   type ResourceConflict,
   type ResourceScheduleCandidate,
@@ -10,13 +11,10 @@ import {
   type ResourceScheduleModeOverride,
   type ResourceSchedulingTask,
 } from "@/lib/gantt-resource-schedule";
-import { recalculateProjectGanttSchedule } from "@/lib/gantt-task-service";
+import { refreshProjectGanttDerivedState } from "@/lib/gantt-task-service";
 
 export const RESOURCE_SCHEDULE_CANDIDATE_KINDS: readonly ResourceScheduleCandidateKind[] = [
-  "MINIMAL_CHANGE",
-  "EARLIEST_FINISH",
-  "ON_TIME",
-  "RESOURCE_SMOOTHING",
+  FORMAL_RESOURCE_SCHEDULE_CANDIDATE_KIND,
 ];
 
 export interface ResourceTaskSummary {
@@ -34,6 +32,7 @@ export interface ProjectResourceScheduleContext {
   currentProject: {
     id: string;
     name: string;
+    startDate: string;
     expectedEndDate: string;
     ganttHardFinishDate: string;
     ganttCalendarMode: string;
@@ -153,7 +152,7 @@ export const collectManualScheduleImpactTaskIds = (
 export const loadProjectResourceScheduleContext = async (projectId: string): Promise<ProjectResourceScheduleContext> => {
   const projects = await prisma.project.findMany({
     where: { status: { not: "VOIDED" } },
-    select: { id: true, name: true, expectedEndDate: true, ganttHardFinishDate: true, ganttCalendarMode: true, ganttRevision: true, status: true },
+    select: { id: true, name: true, startDate: true, expectedEndDate: true, ganttHardFinishDate: true, ganttCalendarMode: true, ganttRevision: true, status: true },
   });
   const currentProject = projects.find((project) => project.id === projectId);
   if (!currentProject) throw new Error("项目不存在");
@@ -240,10 +239,15 @@ export const loadProjectResourceScheduleContext = async (projectId: string): Pro
       ownerAssignments,
       startDate: task.startDate,
       finishDate: task.finishDate,
+      relativeStartOffsetDays: task.relativeStartOffsetDays,
+      relativeFinishOffsetDays: task.relativeFinishOffsetDays,
       durationDays: task.durationDays,
       durationMinutes: task.durationMinutes,
+      isMilestone: task.isMilestone,
       estimatedWorkHours: task.estimatedWorkHours,
       progress: task.progress,
+      actualStartDate: task.actualStartDate,
+      actualEndDate: task.actualEndDate,
       taskMode: task.taskMode,
       parentBoundaryMode: task.parentBoundaryMode,
       schedulePriority: task.schedulePriority,
@@ -313,6 +317,7 @@ export const resourceScheduleAnalysis = async (
     tasks: context.tasks,
     currentProjectId: projectId,
     calendarMode: context.currentProject.ganttCalendarMode === "WORKING_DAYS" ? "WORKING_DAYS" : "CALENDAR_DAYS",
+    projectStartDate: context.currentProject.startDate,
     expectedEndDate: context.currentProject.expectedEndDate,
     hardFinishDate: context.currentProject.ganttHardFinishDate,
     scopeTaskIds: scope.taskIds,
@@ -329,7 +334,12 @@ export const resourceConflictAnalysis = async (projectId: string) => {
   return {
     context,
     result: {
-      snapshotHash: resourceScheduleSnapshotHash(context.tasks),
+      snapshotHash: resourceScheduleSnapshotHash(context.tasks, {
+        projectStartDate: context.currentProject.startDate,
+        expectedEndDate: context.currentProject.expectedEndDate,
+        hardFinishDate: context.currentProject.ganttHardFinishDate,
+        calendarMode: context.currentProject.ganttCalendarMode === "WORKING_DAYS" ? "WORKING_DAYS" : "CALENDAR_DAYS",
+      }),
       conflicts: detectResourceConflicts(
         context.tasks,
         context.currentProject.ganttCalendarMode === "WORKING_DAYS" ? "WORKING_DAYS" : "CALENDAR_DAYS",
@@ -422,6 +432,73 @@ export const serializeResourceCandidate = (
   })),
 });
 
+export const applyProjectDurationSuggestions = async (params: {
+  projectId: string;
+  taskIds: string[];
+  expectedRevision: number;
+  expectedSnapshotHash: string;
+  operator: string;
+}) => {
+  const { context, result } = await resourceScheduleAnalysis(params.projectId);
+  if (["COMPLETED", "VOIDED"].includes(context.currentProject.status)) {
+    throw new Error("项目已作废或已完成，不允许修改");
+  }
+  if (
+    params.expectedRevision !== context.currentProject.ganttRevision
+    || params.expectedSnapshotHash !== result.snapshotHash
+  ) {
+    throw new Error("系统建议工期已过期，请重新计算");
+  }
+  const requestedTaskIds = [...new Set(params.taskIds.map((taskId) => taskId.trim()).filter(Boolean))];
+  if (requestedTaskIds.length === 0) throw new Error("请选择要确认的系统建议工期");
+  const suggestionByTaskId = new Map(result.durationSuggestions.map((suggestion) => [suggestion.taskId, suggestion] as const));
+  const suggestions = requestedTaskIds.map((taskId) => suggestionByTaskId.get(taskId));
+  if (suggestions.some((suggestion) => !suggestion)) {
+    throw new Error("部分建议工期已失效，请重新计算");
+  }
+
+  await prisma.$transaction(async (tx) => {
+    const revision = await tx.project.updateMany({
+      where: { id: params.projectId, ganttRevision: params.expectedRevision },
+      data: { ganttRevision: { increment: 1 } },
+    });
+    if (revision.count !== 1) throw new Error("系统建议工期已过期，请重新计算");
+    for (const suggestion of suggestions) {
+      const durationDays = suggestion!.suggestedDurationDays;
+      const updated = await tx.projectGanttTask.updateMany({
+        where: {
+          id: suggestion!.taskId,
+          projectId: params.projectId,
+          durationDays: 0,
+        },
+        data: {
+          durationDays,
+          durationMinutes: Math.round(durationDays * 450),
+          estimatedWorkHours: Math.round(durationDays * 7.5 * 100) / 100,
+          scheduleCalculatedAt: null,
+        },
+      });
+      if (updated.count !== 1) throw new Error("系统建议工期目标任务已变化，请重新计算");
+    }
+    await tx.operationHistory.create({
+      data: {
+        projectId: params.projectId,
+        entityType: "PROJECT_GANTT_DURATION_SUGGESTION",
+        entityId: params.projectId,
+        actionType: "UPDATE",
+        operator: params.operator,
+        detail: `确认 ${suggestions.length} 条系统建议工期为正式工期，来源记录为 SYSTEM_SUGGESTED`,
+      },
+    });
+    await refreshProjectGanttDerivedState(params.projectId, undefined, tx);
+  }, { timeout: 30_000, maxWait: 10_000 });
+
+  return {
+    message: `已确认 ${suggestions.length} 条系统建议工期`,
+    changedTaskIds: suggestions.map((suggestion) => suggestion!.taskId),
+  };
+};
+
 export const applyProjectResourceScheduleCandidate = async (params: {
   projectId: string;
   candidateKind: ResourceScheduleCandidateKind;
@@ -432,7 +509,7 @@ export const applyProjectResourceScheduleCandidate = async (params: {
   modeOverride?: ResourceScheduleModeOverride;
 }) => {
   if (!RESOURCE_SCHEDULE_CANDIDATE_KINDS.includes(params.candidateKind)) {
-    throw new Error("优化排期方案无效");
+    throw new Error("正式自动排期方案无效");
   }
   const { context, result, scope } = await resourceScheduleAnalysis(params.projectId, {
     scopeRootTaskIds: params.scopeRootTaskIds,
@@ -445,30 +522,45 @@ export const applyProjectResourceScheduleCandidate = async (params: {
     params.expectedRevision !== context.currentProject.ganttRevision
     || params.expectedSnapshotHash !== result.snapshotHash
   ) {
-    throw new Error("优化排期方案已过期，请重新计算");
+    throw new Error("正式自动排期方案已过期，请重新计算");
   }
   const candidate = result.candidates.find((item) => item.kind === params.candidateKind);
-  if (!candidate) throw new Error("优化排期方案不存在");
-  if (!candidate.applicable) throw new Error("当前方案无法减少资源冲突，请调整固定任务或负责人");
+  if (!candidate) throw new Error("正式自动排期方案不存在");
+  if (!candidate.applicable) {
+    const blockingIssue = candidate.issues.find((issue) => issue.severity === "ERROR");
+    throw new Error(blockingIssue?.message ?? "当前计划已无需调整，或缺少正式自动排期所需的工期、负责人或排期锚点");
+  }
 
   await prisma.$transaction(async (tx) => {
     const revision = await tx.project.updateMany({
       where: { id: params.projectId, ganttRevision: params.expectedRevision },
       data: { ganttRevision: { increment: 1 } },
     });
-    if (revision.count !== 1) throw new Error("优化排期方案已过期，请重新计算");
+    if (revision.count !== 1) throw new Error("正式自动排期方案已过期，请重新计算");
     for (const change of candidate.changes) {
       const updated = await tx.projectGanttTask.updateMany({
         where: { id: change.taskId, projectId: params.projectId },
         data: {
           startDate: change.startDate,
           finishDate: change.finishDate,
+          relativeStartOffsetDays: change.relativeStartOffsetDays ?? null,
+          relativeFinishOffsetDays: change.relativeFinishOffsetDays ?? null,
+          ...(typeof change.durationDays === "number"
+            ? {
+              durationDays: change.durationDays,
+              durationMinutes: change.durationMinutes ?? Math.round(change.durationDays * 450),
+              estimatedWorkHours: change.estimatedWorkHours ?? Math.round(change.durationDays * 7.5 * 100) / 100,
+            }
+            : {}),
           ...(change.taskMode ? { taskMode: change.taskMode } : {}),
-          resourceNotBeforeDate: change.startDate,
+          // Candidate dates are a calculation result, not a new immutable
+          // scheduling constraint. Keeping a derived start here caused later
+          // automatic scheduling runs to treat an old proposal as user input.
+          resourceNotBeforeDate: "",
           scheduleCalculatedAt: new Date(),
         },
       });
-      if (updated.count !== 1) throw new Error("优化排期目标任务已变化，请重新计算");
+      if (updated.count !== 1) throw new Error("正式自动排期目标任务已变化，请重新计算");
     }
     await tx.operationHistory.create({
       data: {
@@ -477,14 +569,14 @@ export const applyProjectResourceScheduleCandidate = async (params: {
         entityId: params.projectId,
         actionType: "UPDATE",
         operator: params.operator,
-        detail: `应用${candidate.title}资源排期建议，范围 ${scope.rootTaskIds.length > 0 ? `${scope.rootTaskIds.length} 个父级` : "全项目"}，调整 ${candidate.changes.length} 个任务`,
+        detail: `应用${candidate.relativeSchedule ? " T0 相对" : ""}正式自动排期，范围 ${scope.rootTaskIds.length > 0 ? `${scope.rootTaskIds.length} 个父级` : "全项目"}，调整 ${candidate.changes.length} 个任务，其中 ${candidate.changes.filter((change) => typeof change.durationDays === "number").length} 个任务写入系统拆分工期`,
       },
     });
-    await recalculateProjectGanttSchedule(params.projectId, undefined, tx, { preservePlannedDates: true });
+    await refreshProjectGanttDerivedState(params.projectId, undefined, tx);
   }, { timeout: 30_000, maxWait: 10_000 });
 
   return {
-    message: `已应用${candidate.title}资源排期建议`,
+    message: `已应用${candidate.relativeSchedule ? " T0 相对" : ""}正式自动排期`,
     candidateKind: candidate.kind,
     candidateTitle: candidate.title,
     changedTaskCount: candidate.changes.length,

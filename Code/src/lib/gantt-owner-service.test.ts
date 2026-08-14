@@ -6,6 +6,7 @@ import {
   hasGanttOwnerSetChange,
   replaceGanttOwnerMember,
   resolveEffectiveGanttOwnerMemberId,
+  shouldApplyGanttOwnerChange,
   synchronizeGanttOwnerHierarchy,
 } from "@/lib/gantt-owner-service";
 
@@ -157,6 +158,21 @@ describe("gantt owner service", () => {
       hasOwnerInput: true,
       currentOwnerMemberIds: ["member-a"],
       nextOwnerMemberIds: ["member-a"],
+      ownerChangeMode: "BRANCH_REASSIGN",
+    })).toBe(true);
+  });
+
+  it("allows an explicit branch reassignment on a parent but ignores inline parent owner drafts", () => {
+    const parentOwnerDraft = {
+      isParentTask: true,
+      hasOwnerInput: true,
+      currentOwnerMemberIds: ["member-a"],
+      nextOwnerMemberIds: ["member-b"],
+    };
+
+    expect(shouldApplyGanttOwnerChange(parentOwnerDraft)).toBe(false);
+    expect(shouldApplyGanttOwnerChange({
+      ...parentOwnerDraft,
       ownerChangeMode: "BRANCH_REASSIGN",
     })).toBe(true);
   });

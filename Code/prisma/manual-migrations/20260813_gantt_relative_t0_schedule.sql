@@ -1,0 +1,3 @@
+ALTER TABLE "ProjectGanttTask"
+  ADD COLUMN IF NOT EXISTS "relativeStartOffsetDays" DOUBLE PRECISION,
+  ADD COLUMN IF NOT EXISTS "relativeFinishOffsetDays" DOUBLE PRECISION;

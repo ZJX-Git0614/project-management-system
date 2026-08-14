@@ -19,7 +19,7 @@ import {
   getProjectGanttCalendarMode,
   getOrderedGanttTasks,
   parseGanttDependencyInput,
-  recalculateProjectGanttSchedule,
+  refreshProjectGanttDerivedState,
   renumberProjectGanttTaskCodes,
   replaceGanttTaskDependencies,
   serializeGanttTaskList,
@@ -28,6 +28,9 @@ import {
   resolveEffectiveGanttOwnerMemberIds,
   synchronizeGanttOwnerHierarchy,
 } from "@/lib/gantt-owner-service";
+
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 const PARENT_BOUNDARY_MODES = new Set(["ROLLUP", "TARGET", "LOCKED"]);
 
@@ -45,7 +48,9 @@ export async function GET(
 
   const tasks = await getOrderedGanttTasks(id);
 
-  return ok(serializeGanttTaskList(tasks));
+  const response = ok(serializeGanttTaskList(tasks));
+  response.headers.set("Cache-Control", "private, no-store, max-age=0, must-revalidate");
+  return response;
 }
 
 export async function POST(
@@ -214,7 +219,7 @@ export async function POST(
     return created;
   });
   await renumberProjectGanttTaskCodes(id);
-  await recalculateProjectGanttSchedule(id, calendarMode);
+  await refreshProjectGanttDerivedState(id, calendarMode);
   const normalizedTask = serializeGanttTaskList(await getOrderedGanttTasks(id)).find((item) => item.id === task.id);
   if (!normalizedTask) return err("新增任务后读取失败", 500);
 

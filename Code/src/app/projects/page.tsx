@@ -112,6 +112,7 @@ export default function ProjectsPage() {
     deviceCount: number;
     repairCycleDays: number;
     startDate: string;
+    expectedEndDate: string;
     initialMember?: { roleName: string; personName: string };
   }) => {
     try {
@@ -283,8 +284,8 @@ export default function ProjectsPage() {
                   <TableCell>{project.amountWan}</TableCell>
                   <TableCell>{project.deviceCount}</TableCell>
                   <TableCell>{project.repairCycleDays}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{project.startDate}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{project.expectedEndDate}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{project.startDate || "未确定"}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{project.expectedEndDate || "-"}</TableCell>
                   <TableCell>
                     <Badge variant={STATUS_BADGE_VARIANT[project.status] ?? "secondary"}>
                       {PROJECT_STATUS_LABEL[project.status as ProjectStatus] || project.status}

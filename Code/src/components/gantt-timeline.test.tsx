@@ -31,6 +31,33 @@ const task = (index: number, overrides: Partial<ProjectGanttTask> = {}): Project
 });
 
 describe("GanttTimeline performance", () => {
+  it("renders relative offsets on the abstract timeline", () => {
+    render(<GanttTimeline tasks={[
+      task(1, { taskName: "抽象阶段", startDate: "", finishDate: "", durationDays: 3, relativeStartOffsetDays: 0, relativeFinishOffsetDays: 2 }),
+      task(2, { taskName: "后续阶段", startDate: "", finishDate: "", durationDays: 2, relativeStartOffsetDays: 5, relativeFinishOffsetDays: 6, predecessorTaskIds: ["task-1"] }),
+    ]} canEdit />);
+
+    expect(screen.getAllByText("T0").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/T0\+5/).length).toBeGreaterThan(0);
+    expect(screen.getAllByLabelText("计划开始")[0]).toHaveTextContent("T0");
+    expect(screen.getAllByTitle(/抽象阶段:/).length).toBeGreaterThan(0);
+  });
+
+  it("renders an unscheduled WBS instead of treating it as an empty project", () => {
+    render(<GanttTimeline
+      tasks={[
+        task(1, { taskName: "未排期父任务", startDate: "", finishDate: "", durationDays: 0 }),
+        task(2, { parentId: "task-1", taskCode: "Task001.001", taskName: "未排期子任务", startDate: "", finishDate: "", durationDays: 0 }),
+      ]}
+      canEdit
+    />);
+
+    expect(screen.getByText("尚未录入排期")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("未排期父任务")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("未排期子任务")).toBeInTheDocument();
+    expect(screen.queryByText("暂无甘特任务")).not.toBeInTheDocument();
+  });
+
   it("renders task categories as read-only values and defaults blank descriptions to 无", () => {
     render(<GanttTimeline tasks={[task(1)]} canEdit />);
 
@@ -132,6 +159,26 @@ describe("GanttTimeline performance", () => {
       expect.objectContaining({ ownerMemberId: "member-2", ownerMemberIds: ["member-2"] }),
       "owner",
     ));
+  });
+
+  it("keeps a parent owner selector disabled even before its children have owners", () => {
+    render(<GanttTimeline
+      tasks={[
+        task(1, { taskName: "未分配父任务" }),
+        task(2, { parentId: "task-1", taskCode: "Task001.001", taskName: "未分配子任务" }),
+      ]}
+      projectMembers={[
+        { id: "member-1", projectId: "project-1", accountId: "account-1", personName: "张三", roleName: "开发", roleNames: ["开发"], createdAt: "", updatedAt: "" },
+      ]}
+      canEdit
+    />);
+
+    const parentRow = document.querySelector<HTMLElement>("[data-gantt-task-id='task-1']");
+    const childRow = document.querySelector<HTMLElement>("[data-gantt-task-id='task-2']");
+    expect(parentRow).not.toBeNull();
+    expect(childRow).not.toBeNull();
+    expect(within(parentRow!).getByRole("button", { name: "负责人" })).toBeDisabled();
+    expect(within(childRow!).getByRole("button", { name: "负责人" })).toBeEnabled();
   });
 
   it("does not submit a parent owner rollup when changing its scheduling mode", async () => {
@@ -319,7 +366,7 @@ describe("GanttTimeline performance", () => {
     expect(screen.getByRole("spinbutton", { name: "在下方插入个同级任务数量" })).toHaveValue(1);
   });
 
-  it("keeps a context submenu available after the pointer leaves its trigger", async () => {
+  it("keeps a portaled context submenu available after the pointer leaves its trigger", async () => {
     render(<GanttTimeline
       projectId="project-1"
       tasks={[task(1)]}
@@ -332,10 +379,10 @@ describe("GanttTimeline performance", () => {
     const insertItem = screen.getByRole("menuitem", { name: "插入" });
     await userEvent.hover(insertItem);
     const countInput = screen.getByRole("spinbutton", { name: "在下方插入个同级任务数量" });
-    const submenuAnchor = countInput.closest(".gantt-context-menu-submenu-anchor");
+    const submenu = screen.getByRole("menu", { name: "插入任务" });
 
-    expect(submenuAnchor).not.toBeNull();
-    fireEvent.mouseLeave(submenuAnchor!);
+    expect(submenu).toHaveClass("gantt-context-submenu-portal");
+    expect(submenu.closest(".gantt-context-menu")).toBeNull();
     fireEvent.pointerDown(countInput);
 
     expect(screen.getByRole("menu", { name: "插入任务" })).toBeInTheDocument();

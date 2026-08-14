@@ -102,7 +102,10 @@ async function request<T>(
     headers["Authorization"] = `Bearer ${token}`
   }
 
-  const res = await fetch(url, { ...options, headers })
+  // Business data must always reflect the latest server state. In particular,
+  // an empty WBS response must not be retained by a browser after a restore
+  // or an import completes in another request.
+  const res = await fetch(url, { ...options, headers, cache: options.cache ?? "no-store" })
 
   if (!res.ok) {
     if (res.status === 401) {
@@ -171,6 +174,7 @@ async function requestDownload(url: string, retryOnExpired = true): Promise<Down
   const token = getToken()
   const res = await fetch(url, {
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    cache: "no-store",
   })
 
   if (!res.ok) {

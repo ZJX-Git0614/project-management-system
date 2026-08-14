@@ -8,8 +8,9 @@ import {
   shiftTaskDate,
   type GanttCalendarMode,
 } from "@/lib/gantt-calendar";
-import { normalizeGanttScheduleMode } from "@/lib/gantt-planning-rules";
+import { isGanttFsDependency, normalizeGanttScheduleMode } from "@/lib/gantt-planning-rules";
 import { GANTT_MINUTES_PER_DAY, ganttDependencyLagMinutes } from "@/lib/gantt-cpm";
+import { buildGanttLeafScheduleNetwork } from "@/lib/gantt-schedule-network";
 
 export interface SchedulableGanttDependency {
   predecessorTaskId: string;
@@ -50,11 +51,9 @@ export interface ScheduledGanttTask extends SchedulableGanttTask {
 
 const dependencyDate = (
   predecessor: ScheduledGanttTask,
-  successorDuration: number,
   dependency: SchedulableGanttDependency,
   mode: GanttCalendarMode,
 ) => {
-  const type = Number.isInteger(dependency.type) ? dependency.type! : 1;
   const lagMinutes = ganttDependencyLagMinutes(dependency);
   const lag = lagMinutes === 0
     ? 0
@@ -64,16 +63,7 @@ const dependencyDate = (
     && validDate(predecessor.actualEndDate)
     ? predecessor.actualEndDate!
     : predecessor.finishDate;
-  if (type === 3) return shiftTaskDate(predecessor.startDate, lag, mode); // SS
-  if (type === 0) {
-    const requiredFinish = shiftTaskDate(predecessorFinishDate, lag, mode); // FF
-    return calculateTaskStartDate(requiredFinish, successorDuration, mode);
-  }
-  if (type === 2) {
-    const requiredFinish = shiftTaskDate(predecessor.startDate, lag, mode); // SF
-    return calculateTaskStartDate(requiredFinish, successorDuration, mode);
-  }
-  return shiftTaskDate(nextTaskStartDate(predecessorFinishDate, mode), lag, mode); // FS
+  return shiftTaskDate(nextTaskStartDate(predecessorFinishDate, mode), lag, mode);
 };
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -82,6 +72,110 @@ const isAutomaticTask = (task: SchedulableGanttTask) => (
   normalizeGanttScheduleMode(task.taskMode) === "AUTO"
   && (task.progress ?? 0) === 0
 );
+
+/**
+ * A completed predecessor is an execution fact. When that fact makes the
+ * start of an unstarted date-fixed successor impossible, the successor must
+ * return to automatic scheduling so the current forecast can move while the
+ * published baseline remains untouched.
+ */
+export const fixedSuccessorTaskIdsBlockedByActualCompletion = <T extends SchedulableGanttTask>(
+  tasks: T[],
+  mode: GanttCalendarMode,
+  changedPredecessorTaskIds?: Iterable<string>,
+): string[] => {
+  const network = buildGanttLeafScheduleNetwork(tasks);
+  const networkTaskById = new Map(network.tasks.map((task) => [task.id, task] as const));
+  const leafTaskIds = new Set(network.leafTaskIds);
+  const changedPredecessors = changedPredecessorTaskIds
+    ? new Set(changedPredecessorTaskIds)
+    : null;
+  const actualCompletionRootIds = new Set(
+    [...(changedPredecessors ?? leafTaskIds)].filter((taskId) => {
+      const task = networkTaskById.get(taskId);
+      return Boolean(task)
+        && Number(task!.progress ?? 0) >= 100
+        && validDate(task!.actualEndDate);
+    }),
+  );
+  if (actualCompletionRootIds.size === 0) return [];
+
+  const successorsByPredecessorId = new Map<string, string[]>();
+  network.tasks.forEach((task) => {
+    (task.predecessorDependencies ?? []).filter(isGanttFsDependency).forEach((dependency) => {
+      successorsByPredecessorId.set(dependency.predecessorTaskId, [
+        ...(successorsByPredecessorId.get(dependency.predecessorTaskId) ?? []),
+        task.id,
+      ]);
+    });
+  });
+  const affectedTaskIds = new Set<string>();
+  const queue = [...actualCompletionRootIds];
+  while (queue.length > 0) {
+    const predecessorId = queue.shift()!;
+    for (const successorId of successorsByPredecessorId.get(predecessorId) ?? []) {
+      if (affectedTaskIds.has(successorId)) continue;
+      affectedTaskIds.add(successorId);
+      queue.push(successorId);
+    }
+  }
+
+  const releasedTaskIds = new Set<string>();
+  const propagatingTaskIds = new Set(actualCompletionRootIds);
+  let workingTasks = network.tasks.map((task) => ({ ...task }));
+  while (true) {
+    const propagationQueue = [...propagatingTaskIds];
+    while (propagationQueue.length > 0) {
+      const predecessorId = propagationQueue.shift()!;
+      for (const successorId of successorsByPredecessorId.get(predecessorId) ?? []) {
+        const successor = networkTaskById.get(successorId);
+        if (!successor
+          || propagatingTaskIds.has(successorId)
+          || Number(successor.progress ?? 0) > 0
+          || normalizeGanttScheduleMode(successor.taskMode) !== "AUTO") {
+          continue;
+        }
+        propagatingTaskIds.add(successorId);
+        propagationQueue.push(successorId);
+      }
+    }
+
+    const scheduled = scheduleGanttTasks(workingTasks, mode);
+    const scheduledById = new Map(scheduled.map((task) => [task.id, task] as const));
+    const newlyBlockedIds = workingTasks.flatMap((task) => {
+      if (!leafTaskIds.has(task.id)
+        || !affectedTaskIds.has(task.id)
+        || releasedTaskIds.has(task.id)
+        || Number(task.progress ?? 0) > 0
+        || normalizeGanttScheduleMode(task.taskMode) !== "DATES_FIXED"
+        || !validDate(task.startDate)) {
+        return [];
+      }
+
+      const fixedStartDate = normalizeTaskStartDate(task.startDate, mode);
+      const blocked = (task.predecessorDependencies ?? [])
+        .filter(isGanttFsDependency)
+        .some((dependency) => {
+          if (!propagatingTaskIds.has(dependency.predecessorTaskId)) return false;
+          const predecessor = scheduledById.get(dependency.predecessorTaskId);
+          if (!predecessor) return false;
+          const requiredStartDate = dependencyDate(predecessor, dependency, mode);
+          return validDate(requiredStartDate) && requiredStartDate > fixedStartDate;
+        });
+      return blocked ? [task.id] : [];
+    });
+    if (newlyBlockedIds.length === 0) break;
+    newlyBlockedIds.forEach((taskId) => {
+      releasedTaskIds.add(taskId);
+      propagatingTaskIds.add(taskId);
+    });
+    workingTasks = workingTasks.map((task) => (
+      releasedTaskIds.has(task.id) ? { ...task, taskMode: "AUTO" } : task
+    ));
+  }
+
+  return network.leafTaskIds.filter((taskId) => releasedTaskIds.has(taskId));
+};
 
 /**
  * Manual parent windows are hard constraints. A roll-up parent only derives
@@ -125,7 +219,7 @@ export const scheduleGanttTasks = <T extends SchedulableGanttTask>(
   const successors = new Map<string, string[]>();
 
   tasks.forEach((task) => {
-    (task.predecessorDependencies ?? []).forEach((dependency) => {
+    (task.predecessorDependencies ?? []).filter(isGanttFsDependency).forEach((dependency) => {
       if (!taskById.has(dependency.predecessorTaskId) || dependency.predecessorTaskId === task.id) return;
       inDegree.set(task.id, (inDegree.get(task.id) ?? 0) + 1);
       successors.set(dependency.predecessorTaskId, [
@@ -172,11 +266,11 @@ export const scheduleGanttTasks = <T extends SchedulableGanttTask>(
   orderedIds.forEach((taskId) => {
     const task = taskById.get(taskId)!;
     const durationDays = normalizeGanttDurationDays(task.durationDays);
-    const dependencies = (task.predecessorDependencies ?? [])
+    const dependencies = (task.predecessorDependencies ?? []).filter(isGanttFsDependency)
       .map((dependency) => ({ dependency, predecessor: scheduled.get(dependency.predecessorTaskId) }))
       .filter((item): item is { dependency: SchedulableGanttDependency; predecessor: T & ScheduledGanttTask } => Boolean(item.predecessor?.finishDate));
     const dependencyStarts = dependencies.map(({ dependency, predecessor }) => (
-      dependencyDate(predecessor, durationDays, dependency, mode)
+      dependencyDate(predecessor, dependency, mode)
     ));
     const automatic = isAutomaticTask(task);
     const dependencyStartDate = durationDays > 0

@@ -22,12 +22,13 @@ import {
   resolveGanttTaskPlan,
 } from "@/lib/gantt-planning-rules";
 import {
+  convertFixedSuccessorsBlockedByActualCompletion,
   deleteGanttTaskSubtrees,
   GanttRevisionConflictError,
   getProjectGanttCalendarMode,
   getOrderedGanttTasks,
   parseGanttDependencyInput,
-  recalculateProjectGanttSchedule,
+  refreshProjectGanttDerivedState,
   replaceGanttTaskDependencies,
   serializeGanttTaskList,
 } from "@/lib/gantt-task-service";
@@ -36,7 +37,7 @@ import {
   applyGanttOwnerChange,
   applyGanttOwnerSet,
   GanttOwnerReadOnlyError,
-  hasGanttOwnerSetChange,
+  shouldApplyGanttOwnerChange,
 } from "@/lib/gantt-owner-service";
 import { previewProjectManualScheduleImpact, resourceConflictAnalysis } from "@/lib/gantt-resource-service";
 
@@ -164,7 +165,8 @@ export async function PUT(
   const ownerMemberId = ownerMemberIds === null
     ? existing.ownerMemberId
     : ownerMemberIds.length === 1 ? ownerMemberIds[0] : null;
-  const ownerChanged = !isParentTask && hasGanttOwnerSetChange({
+  const ownerChanged = shouldApplyGanttOwnerChange({
+    isParentTask,
     hasOwnerInput: hasOwnerIdsInput,
     currentOwnerMemberIds: existingOwnerMemberIds,
     nextOwnerMemberIds: ownerMemberIds,
@@ -277,6 +279,10 @@ export async function PUT(
     return ok(impact);
   }
 
+  const tasksBeforeActualMutation = actualMutation
+    ? serializeGanttTaskList(await getOrderedGanttTasks(id))
+    : [];
+
   try {
     await prisma.$transaction(async (tx) => {
       const baseData = {
@@ -355,6 +361,25 @@ export async function PUT(
         }
       }
       if (hasDependencyInput) await replaceGanttTaskDependencies(tx, id, taskId, dependencies);
+      const releasedSuccessors = actualMutation
+        ? await convertFixedSuccessorsBlockedByActualCompletion(id, [taskId], calendarMode, tx)
+        : [];
+      if (actualMutation) {
+        const releasedText = releasedSuccessors.length > 0
+          ? `；${releasedSuccessors.map((task) => `${task.taskCode} · ${task.taskName}`).join("、")} 因实际完成约束转为自动排期`
+          : "";
+        await tx.operationHistory.create({
+          data: {
+            projectId: id,
+            entityType: "ProjectGanttTask",
+            entityId: taskId,
+            actionType: "UPDATE_ACTUAL",
+            operator: user.displayName,
+            detail: `更新任务「${existing.taskCode} · ${existing.taskName}」执行事实：进度 ${existing.progress}% → ${completion.progress}%，实际完成 ${existing.actualEndDate || "未填写"} → ${completion.actualEndDate || "未填写"}${releasedText}`,
+          },
+        });
+        await refreshProjectGanttDerivedState(id, calendarMode, tx);
+      }
       await tx.project.update({ where: { id }, data: { ganttRevision: { increment: 1 } } });
       return updated;
     }, { timeout: 30_000, maxWait: 10_000 });
@@ -362,14 +387,61 @@ export async function PUT(
     if (error instanceof GanttOwnerReadOnlyError) return err(error.message, 409);
     throw error;
   }
-  await recalculateProjectGanttSchedule(id, calendarMode, prisma, {
-    // Editing a parent date establishes or changes its boundary. It must never
-    // silently reschedule already-entered child work; conflicts are surfaced
-    // through the manual impact preview instead.
-    preservePlannedDates: Boolean(baselineLockReason) || (isParentTask && planningMutation),
-  });
-  const normalizedTask = serializeGanttTaskList(await getOrderedGanttTasks(id)).find((item) => item.id === taskId);
+  if (!actualMutation) {
+    await refreshProjectGanttDerivedState(id, calendarMode, prisma);
+  }
+  const normalizedTasks = serializeGanttTaskList(await getOrderedGanttTasks(id));
+  const normalizedTask = normalizedTasks.find((item) => item.id === taskId);
   if (!normalizedTask) return notFound("甘特任务");
+  if (actualMutation && tasksBeforeActualMutation.length > 0) {
+    const beforeById = new Map(tasksBeforeActualMutation.map((task) => [task.id, task] as const));
+    const affectedTasks = normalizedTasks.filter((task) => {
+      const before = beforeById.get(task.id);
+      return task.id !== taskId
+        && Number(task.progress) < 100
+        && Boolean(before)
+        && (before!.startDate !== task.startDate
+          || before!.finishDate !== task.finishDate
+          || before!.taskMode !== task.taskMode);
+    });
+    if (affectedTasks.length > 0) {
+      try {
+        const affectedAccountIds = affectedTasks.flatMap((task) => (
+          task.ownerMembers.map((owner) => owner.accountId).filter((accountId): accountId is string => Boolean(accountId))
+        ));
+        const managers = await prisma.projectMember.findMany({
+          where: { projectId: id, accountId: { not: null }, roleName: { contains: "项目经理" } },
+          select: { accountId: true },
+        });
+        const accountIds = [...new Set([
+          ...affectedAccountIds,
+          ...managers.map((manager) => manager.accountId).filter((accountId): accountId is string => Boolean(accountId)),
+        ])];
+        const preview = affectedTasks.slice(0, 8).map((task) => {
+          const before = beforeById.get(task.id)!;
+          return `${task.taskCode} · ${task.taskName}：${before.startDate || "未排期"}~${before.finishDate || "未排期"} → ${task.startDate || "未排期"}~${task.finishDate || "未排期"}`;
+        });
+        const remaining = affectedTasks.length - preview.length;
+        const detail = `任务「${normalizedTask.taskCode} · ${normalizedTask.taskName}」的实际执行信息已更新。系统已刷新汇总、浮动与关键路径信息；如需调整未完成任务的计划日期，请运行正式自动排期。受影响 ${affectedTasks.length} 条任务：${preview.join("；")}${remaining > 0 ? `；另有 ${remaining} 条` : ""}`;
+        if (accountIds.length > 0) {
+          await prisma.systemNotification.createMany({
+            data: accountIds.map((accountId) => ({
+              projectId: id,
+              accountId,
+              category: "WBS_SCHEDULE",
+              title: "实际进度已更新，请执行正式自动排期",
+              detail,
+              severity: "WARNING",
+              sourceType: "ProjectGanttTask",
+              sourceId: taskId,
+            })),
+          });
+        }
+      } catch (error) {
+        console.error("[gantt-schedule] actual-change notification failed", error);
+      }
+    }
+  }
   const conflictAnalysis = await resourceConflictAnalysis(id);
   const scheduleWarnings = [
     ...conflictAnalysis.result.conflicts

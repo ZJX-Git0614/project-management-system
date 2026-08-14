@@ -46,6 +46,33 @@ export const hasGanttOwnerSetChange = ({
   return !sameOwnerIds(currentOwnerMemberIds, nextOwnerMemberIds ?? currentOwnerMemberIds);
 };
 
+/**
+ * Parent task owners are computed from descendants and cannot be updated by
+ * the inline editor. The explicit branch action is the sole exception: it
+ * intentionally propagates one owner assignment through the selected tree.
+ */
+export const shouldApplyGanttOwnerChange = ({
+  isParentTask,
+  hasOwnerInput,
+  currentOwnerMemberIds,
+  nextOwnerMemberIds,
+  ownerChangeMode,
+}: {
+  isParentTask: boolean;
+  hasOwnerInput: boolean;
+  currentOwnerMemberIds: string[];
+  nextOwnerMemberIds: string[] | null;
+  ownerChangeMode?: unknown;
+}) => (
+  hasGanttOwnerSetChange({
+    hasOwnerInput,
+    currentOwnerMemberIds,
+    nextOwnerMemberIds,
+    ownerChangeMode,
+  })
+  && (!isParentTask || ownerChangeMode === "BRANCH_REASSIGN")
+);
+
 type GanttOwnerWriteContext = {
   tasks: Array<{ id: string; parentId: string | null; ownerMemberId: string | null; ownerMemberIds: string[] }>;
   members: Array<{ id: string; accountId: string | null; personName: string }>;

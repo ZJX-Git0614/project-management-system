@@ -231,8 +231,8 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
   );
 
   const handleUpdate = async () => {
-    if (!startDate || !expectedEndDate || expectedEndDate < startDate) {
-      alert("预计结项时间不能为空，且不能早于开始时间");
+    if (startDate && expectedEndDate && expectedEndDate < startDate) {
+      alert("预计结项时间不能早于项目 T0");
       return;
     }
     try {
@@ -332,12 +332,12 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
               <InlineEditField label="合同金额(万元)">
                 <Input type="number" value={amount} onChange={(e) => setAmount(Number(e.target.value))} className="h-8 text-xs" />
               </InlineEditField>
-              <InlineEditField label="开始时间" required>
-                <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="h-8 text-xs" required />
+              <InlineEditField label="项目 T0">
+                <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="h-8 text-xs" />
               </InlineEditField>
-              <InlineEditField label="预计结项" required>
+              <InlineEditField label="预计结项">
                 <div>
-                  <Input type="date" value={expectedEndDate} min={startDate || undefined} onChange={(e) => setExpectedEndDate(e.target.value)} className="h-8 text-xs" required />
+                  <Input type="date" value={expectedEndDate} min={startDate || undefined} onChange={(e) => setExpectedEndDate(e.target.value)} className="h-8 text-xs" />
                   {latestWbsFinishDate && expectedEndDate && latestWbsFinishDate > expectedEndDate && (
                     <div className="mt-1 flex items-center gap-1 text-[11px] text-amber-500">
                       <AlertTriangle className="size-3" />WBS 计划最晚完成日为 {latestWbsFinishDate}
@@ -345,6 +345,9 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
                   )}
                 </div>
               </InlineEditField>
+              <p className="col-span-full text-[11px] leading-4 text-muted-foreground">
+                项目 T0 未确定时可留空。正式自动排期将显示为 T0、T0+N；后续填写项目 T0 后，系统会按项目日历换算为具体日期。
+              </p>
               <div className="flex items-center gap-2">
                 <span className="text-muted-foreground min-w-[100px]">状态：</span>
                 <Badge>{PROJECT_STATUS_LABEL[project.status]}</Badge>
@@ -356,7 +359,7 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
               <FieldRow label="项目编号" value={project.code || "-"} />
               <FieldRow label="甲方单位" value={project.clientName || "-"} />
               <FieldRow label="合同金额(万元)" value={String(project.amountWan)} />
-              <FieldRow label="开始时间" value={project.startDate || "-"} />
+              <FieldRow label="项目 T0" value={project.startDate || "未确定（使用相对排期）"} />
               <FieldRow
                 label="预计结项"
                 value={project.expectedEndDate || "-"}

@@ -4,6 +4,8 @@ import {
   ganttSnapshotOwnerLinkRows,
   ganttSnapshotOwnerMemberIds,
   ganttTaskIdsAtOrBeyondDepth,
+  rollupGanttParentRelativeSchedules,
+  rollupGanttParentSchedules,
   rollupGanttParentActuals,
   serializeGanttTaskList,
 } from "@/lib/gantt-task-service";
@@ -61,6 +63,16 @@ describe("serializeGanttTaskList owner rollups", () => {
       roleNames: ["开发", "测试"],
     })]);
     expect(rows[0].ownerReadOnly).toBe(true);
+  });
+
+  it("keeps an unassigned parent owner readonly until its leaves are assigned", () => {
+    const rows = serializeGanttTaskList([
+      task("root", null, null),
+      task("child", "root", null),
+    ] as never);
+
+    expect(rows[0].ownerReadOnly).toBe(true);
+    expect(rows[1].ownerReadOnly).toBe(false);
   });
 });
 
@@ -192,6 +204,114 @@ describe("gantt parent actual rollups", () => {
       actualFinishSlot: "PM",
       actualWorkHours: 15,
       progress: 100,
+    });
+  });
+});
+
+describe("gantt parent plan rollups", () => {
+  it("普通派生刷新只汇总父级，绝不重排叶子计划字段", () => {
+    const rows = rollupGanttParentSchedules([
+      {
+        id: "parent",
+        parentId: null,
+        parentBoundaryMode: "ROLLUP",
+        startDate: "",
+        finishDate: "",
+        durationDays: 0,
+        durationMinutes: 0,
+        estimatedWorkHours: 0,
+      },
+      {
+        id: "child-a",
+        parentId: "parent",
+        parentBoundaryMode: "ROLLUP",
+        startDate: "2026-09-01",
+        finishDate: "2026-09-02",
+        durationDays: 2,
+        durationMinutes: 900,
+        estimatedWorkHours: 15,
+      },
+      {
+        id: "child-b",
+        parentId: "parent",
+        parentBoundaryMode: "ROLLUP",
+        startDate: "2026-09-05",
+        finishDate: "2026-09-05",
+        durationDays: 1,
+        durationMinutes: 450,
+        estimatedWorkHours: 7.5,
+      },
+    ], "CALENDAR_DAYS");
+
+    expect(rows.find((row) => row.id === "parent")).toMatchObject({
+      startDate: "2026-09-01",
+      finishDate: "2026-09-05",
+      durationDays: 5,
+      estimatedWorkHours: 22.5,
+    });
+    expect(rows.find((row) => row.id === "child-a")).toMatchObject({
+      startDate: "2026-09-01",
+      finishDate: "2026-09-02",
+      durationDays: 2,
+      durationMinutes: 900,
+      estimatedWorkHours: 15,
+    });
+    expect(rows.find((row) => row.id === "child-b")).toMatchObject({
+      startDate: "2026-09-05",
+      finishDate: "2026-09-05",
+      durationDays: 1,
+      durationMinutes: 450,
+      estimatedWorkHours: 7.5,
+    });
+  });
+
+  it("derives a T0 envelope for a locked parent without an explicit boundary", () => {
+    const rows = rollupGanttParentRelativeSchedules([
+      {
+        id: "parent",
+        parentId: null,
+        parentBoundaryMode: "LOCKED",
+        startDate: "2026-09-01",
+        finishDate: "2026-09-10",
+        relativeStartOffsetDays: null,
+        relativeFinishOffsetDays: null,
+        durationDays: 10,
+        durationMinutes: 4500,
+        estimatedWorkHours: 0,
+      },
+      {
+        id: "child-a",
+        parentId: "parent",
+        parentBoundaryMode: "ROLLUP",
+        startDate: "",
+        finishDate: "",
+        relativeStartOffsetDays: 2,
+        relativeFinishOffsetDays: 4,
+        durationDays: 3,
+        durationMinutes: 1350,
+        estimatedWorkHours: 22.5,
+      },
+      {
+        id: "child-b",
+        parentId: "parent",
+        parentBoundaryMode: "ROLLUP",
+        startDate: "",
+        finishDate: "",
+        relativeStartOffsetDays: 7,
+        relativeFinishOffsetDays: 8,
+        durationDays: 2,
+        durationMinutes: 900,
+        estimatedWorkHours: 15,
+      },
+    ]);
+
+    expect(rows.find((row) => row.id === "parent")).toMatchObject({
+      startDate: "2026-09-01",
+      finishDate: "2026-09-10",
+      relativeStartOffsetDays: 2,
+      relativeFinishOffsetDays: 11,
+      durationDays: 10,
+      estimatedWorkHours: 37.5,
     });
   });
 });

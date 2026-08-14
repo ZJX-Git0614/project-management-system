@@ -9,7 +9,7 @@ import {
   type GanttCalendarMode,
 } from "@/lib/gantt-calendar";
 import { prisma } from "@/lib/prisma";
-import { recalculateProjectGanttSchedule } from "@/lib/gantt-task-service";
+import { refreshProjectGanttDerivedState } from "@/lib/gantt-task-service";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 
 export async function GET(
@@ -81,7 +81,7 @@ export async function PUT(
     where: { id },
     data: { ganttCalendarMode: calendarMode, ganttHardFinishDate: hardFinishDate },
   });
-  await recalculateProjectGanttSchedule(id, calendarMode);
+  await refreshProjectGanttDerivedState(id, calendarMode);
   await prisma.operationHistory.create({
     data: {
       projectId: id,

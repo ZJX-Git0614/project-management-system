@@ -81,7 +81,7 @@ describe("assistant settings foundations", () => {
   it("rejects undeclared or invalid tool arguments before execution", () => {
     expect(validateAssistantToolArgs("gantt.progress.update", { taskId: "task-1", progress: 35 })).toMatchObject({ ok: true });
     expect(validateAssistantToolArgs("gantt.progress.update", { taskId: "task-1", progress: 101 })).toMatchObject({ ok: false });
-    expect(validateAssistantToolArgs("gantt.resource.optimize", { candidateKind: "MINIMAL_CHANGE", revision: 3, snapshotHash: "hash" })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("gantt.resource.optimize", { candidateKind: "FORMAL", revision: 3, snapshotHash: "hash" })).toMatchObject({ ok: true });
     expect(validateAssistantToolArgs("gantt.resource.optimize", { candidateKind: "UNKNOWN", revision: 3, snapshotHash: "hash" })).toMatchObject({ ok: false });
     expect(validateAssistantToolArgs("weekly.status.update", { weeklyItemId: "item-1", progress: 100 })).toMatchObject({ ok: true });
     expect(validateAssistantToolArgs("weekly.status.update", { weeklyItemId: "item-1", status: "DONE", progress: 100 })).toMatchObject({ ok: false });

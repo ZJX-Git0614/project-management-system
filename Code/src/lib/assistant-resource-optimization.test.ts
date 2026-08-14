@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/server-auth", () => ({ userHasPermission: mocks.userHasPermission }));
 vi.mock("@/lib/prisma", () => ({ prisma: mocks.prisma }));
 vi.mock("@/lib/gantt-resource-service", () => ({
-  RESOURCE_SCHEDULE_CANDIDATE_KINDS: ["MINIMAL_CHANGE", "EARLIEST_FINISH", "ON_TIME"],
+  RESOURCE_SCHEDULE_CANDIDATE_KINDS: ["FORMAL"],
   resourceScheduleAnalysis: mocks.resourceScheduleAnalysis,
   applyProjectResourceScheduleCandidate: vi.fn(),
 }));
@@ -44,8 +44,8 @@ describe("assistant resource optimization", () => {
       result: {
         snapshotHash: "snapshot-7",
         candidates: [{
-          kind: "MINIMAL_CHANGE",
-          title: "最少改动",
+          kind: "FORMAL",
+          title: "正式自动排期",
           applicable: true,
           changes: [{ taskId: "task-2", startDate: "2026-08-06", finishDate: "2026-08-07" }],
           remainingConflicts: [],
@@ -70,13 +70,13 @@ describe("assistant resource optimization", () => {
 
   it("distinguishes advice from an explicit apply instruction", () => {
     expect(parseResourceOptimizationIntent("分析一下资源冲突并给我优化建议")).toBeNull();
-    expect(parseResourceOptimizationIntent("采用最少改动方案优化资源冲突")).toEqual({ candidateKind: "MINIMAL_CHANGE" });
-    expect(parseResourceOptimizationIntent("执行按期优先的资源排期方案")).toEqual({ candidateKind: "ON_TIME" });
+    expect(parseResourceOptimizationIntent("执行正式自动排期")).toEqual({ candidateKind: "FORMAL" });
+    expect(parseResourceOptimizationIntent("确认应用自动排期方案")).toEqual({ candidateKind: "FORMAL" });
   });
 
   it("creates a version-bound confirmation proposal before writing WBS", async () => {
     const action = await proposeAssistantAction({
-      message: "采用最少改动方案优化资源冲突",
+      message: "执行正式自动排期",
       projectId: "project-1",
       user,
       runtime,
@@ -86,7 +86,7 @@ describe("assistant resource optimization", () => {
     expect(mocks.prisma.assistantActionRun.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         toolId: "gantt.resource.optimize",
-        argsJson: JSON.stringify({ candidateKind: "MINIMAL_CHANGE", revision: 7, snapshotHash: "snapshot-7" }),
+        argsJson: JSON.stringify({ candidateKind: "FORMAL", revision: 7, snapshotHash: "snapshot-7" }),
       }),
     }));
   });

@@ -319,6 +319,17 @@ body {
   width: 300px;
 }
 
+/* Context submenus are portaled outside the scrollable root menu so they
+ * remain usable near viewport edges and are never clipped by its scrollbar. */
+.gantt-context-submenu.gantt-context-submenu-portal {
+  position: fixed;
+  z-index: 140;
+}
+
+.gantt-context-submenu.gantt-context-submenu-portal::before {
+  display: none;
+}
+
 .gantt-context-menu-hint {
   padding: 5px 8px 2px;
   color: var(--app-text-dim);
@@ -350,6 +361,48 @@ body {
   color: var(--app-text);
   text-align: center;
   font: inherit;
+}
+
+/* Display-only date cells must not inherit input geometry or background.
+ * Keeping the value in one non-wrapping line also prevents adjacent narrow
+ * columns from visually overlapping it. */
+.gantt-date-display,
+.gantt-readonly-metric {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  align-items: center;
+  overflow: hidden;
+  border: 0 !important;
+  border-radius: 0 !important;
+  padding: 0 4px;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: hsl(var(--muted-foreground));
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.gantt-date-display-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gantt-date-display-slot {
+  margin-left: 3px;
+  flex: none;
+}
+
+.gantt-readonly-metric {
+  justify-content: center;
+  padding-inline: 2px;
+  text-align: center;
 }
 
 a {

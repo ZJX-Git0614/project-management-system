@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { parseDownloadFileName } from "@/lib/api-client";
+import { api, parseDownloadFileName } from "@/lib/api-client";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("download filename parsing", () => {
   it("decodes UTF-8 RFC 5987 filenames", () => {
@@ -11,5 +15,18 @@ describe("download filename parsing", () => {
 
   it("supports quoted legacy filenames and strips path segments", () => {
     expect(parseDownloadFileName('attachment; filename="reports\\risk-register.xlsx"')).toBe("risk-register.xlsx");
+  });
+
+  it("does not reuse a cached business-data response", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ success: true, data: [] }), { status: 200 }),
+    );
+
+    await api.get("/api/projects/project-1/gantt-tasks");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project-1/gantt-tasks",
+      expect.objectContaining({ cache: "no-store" }),
+    );
   });
 });

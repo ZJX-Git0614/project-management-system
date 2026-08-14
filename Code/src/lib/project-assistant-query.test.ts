@@ -121,8 +121,8 @@ const context = {
     expectedEndDate: "2026-08-20",
     conflicts: [{ id: "conflict-1", taskIds: ["task-1", "task-2"], tasks: [] }],
     candidates: [{
-      kind: "MINIMAL_CHANGE",
-      title: "最少改动",
+      kind: "FORMAL",
+      title: "正式自动排期",
       applicable: true,
       changes: [{ taskId: "task-2", startDate: "2026-07-27", finishDate: "2026-07-28", task: null }],
       remainingConflicts: [],
@@ -261,8 +261,8 @@ describe("project assistant query routing", () => {
       assistantName: "佳佳",
     })
 
-    expect(fallback.answer).toContain("资源冲突与优化建议")
-    expect(fallback.answer).toContain("最少改动")
+    expect(fallback.answer).toContain("正式自动排期预览")
+    expect(fallback.answer).toContain("正式自动排期")
     expect(fallback.answer).toContain("只有你确认后才写入 WBS")
   })
 

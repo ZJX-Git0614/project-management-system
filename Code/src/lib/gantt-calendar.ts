@@ -1,6 +1,7 @@
 import chineseDays from "chinese-days/dist/index.min.js";
 
 import { MS_PER_DAY, formatGanttDate, parseGanttDate } from "@/lib/gantt";
+import { normalizeGanttRelativeOffset } from "@/lib/gantt-relative-time";
 
 const { isWorkday } = chineseDays;
 
@@ -168,4 +169,36 @@ export const shiftTaskDate = (value: string, days: number, mode: GanttCalendarMo
     if (mode === "CALENDAR_DAYS" || isWorkingDate(date)) remaining -= 1;
   }
   return formatGanttDate(date);
+};
+
+/** Materializes an abstract T0 offset after the project receives a real T0. */
+export const materializeGanttOffsetDate = (
+  projectT0: string,
+  offset: number,
+  mode: GanttCalendarMode,
+): string => {
+  const anchor = normalizeTaskStartDate(projectT0, mode);
+  return shiftTaskDate(anchor, Math.trunc(normalizeGanttRelativeOffset(offset)), mode);
+};
+
+/** Converts a concrete date back to its project-calendar workday offset. */
+export const ganttOffsetFromMaterializedDate = (
+  projectT0: string,
+  value: string,
+  mode: GanttCalendarMode,
+): number => {
+  const anchor = normalizeTaskStartDate(projectT0, mode);
+  if (mode === "CALENDAR_DAYS") {
+    return normalizeGanttRelativeOffset(Math.round(
+      (parseGanttDate(value).getTime() - parseGanttDate(anchor).getTime()) / MS_PER_DAY,
+    ));
+  }
+  if (value <= anchor) return 0;
+  let offset = 0;
+  let cursor = anchor;
+  while (cursor < value) {
+    cursor = shiftTaskDate(cursor, 1, mode);
+    offset += 1;
+  }
+  return normalizeGanttRelativeOffset(offset);
 };

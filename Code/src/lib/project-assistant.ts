@@ -659,17 +659,17 @@ export const buildDatabaseAssistantAnswer = (query: string, context: ProjectAssi
     ].join("\n\n")
   }
 
-  if (asks(["资源冲突", "人员冲突", "资源优化", "资源排期", "排期优化", "wbs优化", "优化wbs"])) {
+  if (asks(["资源冲突", "人员冲突", "资源优化", "资源排期", "排期优化", "自动排期", "正式排期", "wbs优化", "优化wbs"])) {
     const optimization = context.resourceOptimization
-    if (!optimization) return "当前未生成资源优化分析，请刷新后重试。"
+    if (!optimization) return "当前未生成正式自动排期预览，请刷新后重试。"
     if (optimization.conflicts.length === 0) {
-      return "## 资源优化\n\n当前负责人任务时间范围内未检测到资源冲突，不需要调整排期。"
+      return "## 正式自动排期\n\n当前负责人任务时间范围内未检测到资源冲突。仍可执行正式自动排期，由系统按 T0、FS 紧前关系、日历、负责人容量和硬边界重新计算未开始叶子任务。"
     }
     return [
-      "## 资源冲突与优化建议",
-      `当前检测到 **${optimization.conflicts.length}** 组负责人时间冲突。系统只调整当前项目未开始的可排程叶子任务；手工排程、进行中或已完成任务以及其他项目任务保持不变。`,
+      "## 正式自动排期预览",
+      `当前检测到 **${optimization.conflicts.length}** 组负责人时间冲突。正式算法只调整当前项目范围内未开始、可排程的叶子任务；它会先按 T0、FS 紧前关系、日历和硬边界计算网络浮动，再按负责人容量、下游影响与任务优先级安排。日期固定、进行中、已完成和范围外任务保持不变。`,
       markdownTable(
-        ["候选方案", "调整任务", "累计移动", "预计完成", "剩余冲突", "可应用"],
+        ["正式方案", "调整任务", "累计移动", "预计完成", "剩余冲突", "可应用"],
         optimization.candidates.map((candidate) => [
           candidate.title,
           candidate.metrics.movedTaskCount,
@@ -679,7 +679,7 @@ export const buildDatabaseAssistantAnswer = (query: string, context: ProjectAssi
           candidate.applicable ? "是" : "否",
         ]),
       ),
-      "你可以继续说“采用最少改动方案”“采用最早完成方案”或“采用按期优先方案”。我会先展示确认卡片，只有你确认后才写入 WBS；如果期间 WBS 已变化，旧方案会自动失效。",
+      "你可以继续说“执行正式自动排期”或“应用自动排期”。我会先展示确认卡片，只有你确认后才写入 WBS；如果期间 WBS 已变化，旧预览会自动失效。",
     ].join("\n\n")
   }
 

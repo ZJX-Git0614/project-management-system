@@ -62,12 +62,22 @@ describe("gantt calendar", () => {
     expect(result[1]).toMatchObject({ startDate: "2026-07-15", finishDate: "2026-07-16", estimatedWorkHours: 15 });
   });
 
-  it.each([
-    [0, "2026-07-02", "2026-07-03"],
-    [1, "2026-07-06", "2026-07-07"],
-    [2, "2026-06-30", "2026-07-01"],
-    [3, "2026-07-01", "2026-07-02"],
-  ])("supports Project dependency type %s", (type, expectedStart, expectedFinish) => {
+  it("schedules the supported FS relationship", () => {
+    const result = scheduleGanttTasks([
+      { id: "a", startDate: "2026-07-01", durationDays: 3, taskMode: "AUTO" },
+      {
+        id: "b",
+        startDate: "2026-08-01",
+        durationDays: 2,
+        taskMode: "AUTO",
+        predecessorDependencies: [{ predecessorTaskId: "a", type: 1, lag: 0 }],
+      },
+    ], "WORKING_DAYS");
+
+    expect(result[1]).toMatchObject({ startDate: "2026-07-06", finishDate: "2026-07-07" });
+  });
+
+  it.each([0, 2, 3])("does not reinterpret unsupported Project dependency type %s as FS", (type) => {
     const result = scheduleGanttTasks([
       { id: "a", startDate: "2026-07-01", durationDays: 3, taskMode: "AUTO" },
       {
@@ -79,7 +89,7 @@ describe("gantt calendar", () => {
       },
     ], "WORKING_DAYS");
 
-    expect(result[1]).toMatchObject({ startDate: expectedStart, finishDate: expectedFinish });
+    expect(result[1]).toMatchObject({ startDate: "2026-08-03", finishDate: "2026-08-04" });
   });
 
   it("keeps a manually scheduled successor date", () => {

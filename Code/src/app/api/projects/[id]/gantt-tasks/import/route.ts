@@ -8,7 +8,7 @@ import { getGanttPlanMutationBlockReasonForActor } from "@/lib/gantt-baseline-se
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import { extractAssistantDocument } from "@/lib/assistant-document-processing";
 import { estimatedHoursForDuration, roundGanttHours } from "@/lib/gantt-calendar";
-import { recalculateProjectGanttSchedule, renumberProjectGanttTaskCodes, replaceGanttTaskDependencies } from "@/lib/gantt-task-service";
+import { refreshProjectGanttDerivedState, renumberProjectGanttTaskCodes, replaceGanttTaskDependencies } from "@/lib/gantt-task-service";
 import { synchronizeGanttOwnerHierarchy } from "@/lib/gantt-owner-service";
 import { prisma } from "@/lib/prisma";
 import { analyzeSchedule, matchScheduleTasks } from "@/lib/schedule-analysis";
@@ -406,7 +406,7 @@ export async function POST(
         },
       });
       await renumberProjectGanttTaskCodes(id, tx);
-      await recalculateProjectGanttSchedule(id, undefined, tx);
+      await refreshProjectGanttDerivedState(id, undefined, tx);
       return { createdCount, updatedCount };
     }, APPLY_TRANSACTION_OPTIONS);
 

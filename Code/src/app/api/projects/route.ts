@@ -56,9 +56,9 @@ export async function POST(req: NextRequest) {
   if (!body.name) return err("项目名称不能为空")
   const startDate = String(body.startDate ?? "").trim()
   const expectedEndDate = String(body.expectedEndDate ?? "").trim()
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return err("开始时间格式应为 YYYY-MM-DD")
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(expectedEndDate)) return err("预计结项时间格式应为 YYYY-MM-DD")
-  if (expectedEndDate < startDate) return err("预计结项时间不能早于开始时间")
+  if (startDate && !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return err("开始时间格式应为 YYYY-MM-DD，或留空使用相对 T0 排期")
+  if (expectedEndDate && !/^\d{4}-\d{2}-\d{2}$/.test(expectedEndDate)) return err("预计结项时间格式应为 YYYY-MM-DD，或留空")
+  if (startDate && expectedEndDate && expectedEndDate < startDate) return err("预计结项时间不能早于开始时间")
 
   const initialMember = body.initialMember
   if (initialMember?.roleName || initialMember?.personName) {

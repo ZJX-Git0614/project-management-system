@@ -7,6 +7,14 @@ import {
   UNSUPPORTED_GANTT_DEPENDENCY_REASON,
   validateFsDependencies,
 } from "@/lib/gantt-planning-rules";
+import {
+  detectResourceConflicts,
+  type ResourceSchedulingTask,
+} from "@/lib/gantt-resource-schedule";
+import {
+  abstractDateFromGanttOffset,
+  isGanttRelativeOffset,
+} from "@/lib/gantt-relative-time";
 import { prisma } from "@/lib/prisma";
 
 type GanttBaselineClient = Prisma.TransactionClient | typeof prisma;
@@ -25,7 +33,7 @@ export type GanttBaselineActor = {
 };
 
 export type GanttBaselineBlocker = {
-  code: "UNSUPPORTED_DEPENDENCY" | "HARD_BOUNDARY" | "PROJECT_HARD_FINISH" | "INVALID_SCHEDULE" | "UNSCHEDULED" | "INVALID_OWNER_ASSIGNMENT";
+  code: "UNSUPPORTED_DEPENDENCY" | "HARD_BOUNDARY" | "PROJECT_HARD_FINISH" | "INVALID_SCHEDULE" | "UNSCHEDULED" | "INVALID_OWNER_ASSIGNMENT" | "MISSING_DURATION" | "RESOURCE_CONFLICT";
   message: string;
   taskIds: string[];
 };
@@ -86,8 +94,14 @@ type BaselineComparableGanttTask = {
 
 const isLeafTask = <T extends { id: string }>(task: T, parentIds: Set<string>) => !parentIds.has(task.id);
 
-const hasPlanDates = (task: { startDate: string; finishDate: string }) => (
-  isValidPlanningDate(task.startDate) && isValidPlanningDate(task.finishDate)
+const hasPlanDates = (task: {
+  startDate: string;
+  finishDate: string;
+  relativeStartOffsetDays?: number | null;
+  relativeFinishOffsetDays?: number | null;
+}) => (
+  (isValidPlanningDate(task.startDate) && isValidPlanningDate(task.finishDate))
+  || (isGanttRelativeOffset(task.relativeStartOffsetDays) && isGanttRelativeOffset(task.relativeFinishOffsetDays))
 );
 
 const sameNumber = (left: unknown, right: unknown) => {
@@ -333,10 +347,10 @@ export const validateProjectGanttBaseline = async (
   projectId: string,
   client: GanttBaselineClient = prisma,
 ): Promise<GanttBaselineValidation> => {
-  const [project, tasks, dependencies] = await Promise.all([
+  const [project, tasks, dependencies, members] = await Promise.all([
     client.project.findUnique({
       where: { id: projectId },
-      select: { ganttHardFinishDate: true },
+      select: { ganttHardFinishDate: true, ganttCalendarMode: true },
     }),
     client.projectGanttTask.findMany({
       where: { projectId },
@@ -347,16 +361,37 @@ export const validateProjectGanttBaseline = async (
         taskName: true,
         startDate: true,
         finishDate: true,
+        relativeStartOffsetDays: true,
+        relativeFinishOffsetDays: true,
         durationDays: true,
+        durationMinutes: true,
+        estimatedWorkHours: true,
+        progress: true,
+        taskMode: true,
+        effortDriven: true,
+        parallelizable: true,
+        sortOrder: true,
+        isMilestone: true,
         parentBoundaryMode: true,
         scheduleStatus: true,
         ownerMemberId: true,
-        ownerLinks: { select: { projectMemberId: true } },
+        ownerLinks: { select: { projectMemberId: true, unitsPercent: true, plannedWorkHours: true } },
       },
     }),
     client.projectGanttDependency.findMany({
       where: { projectId },
       select: { id: true, predecessorTaskId: true, successorTaskId: true, type: true },
+    }),
+    client.projectMember.findMany({
+      where: { projectId },
+      select: {
+        id: true,
+        accountId: true,
+        personName: true,
+        capacityHoursPerDay: true,
+        productivityRate: true,
+        maxConcurrentAssignments: true,
+      },
     }),
   ]);
   if (!project) throw new Error("项目不存在");
@@ -409,6 +444,88 @@ export const validateProjectGanttBaseline = async (
       taskIds: invalidOwnerAssignments.map((task) => task.id),
     });
   }
+  const scheduledLeafTasks = tasks.filter((task) => (
+    isLeafTask(task, parentIds)
+    && Number(task.durationDays) > 0
+    && hasPlanDates(task)
+    && Number(task.progress) < 100
+  ));
+  const hasConcreteDates = scheduledLeafTasks.some((task) => (
+    isValidPlanningDate(task.startDate) && isValidPlanningDate(task.finishDate)
+  ));
+  const hasRelativeDates = scheduledLeafTasks.some((task) => (
+    isGanttRelativeOffset(task.relativeStartOffsetDays) && isGanttRelativeOffset(task.relativeFinishOffsetDays)
+    && !(isValidPlanningDate(task.startDate) && isValidPlanningDate(task.finishDate))
+  ));
+  if (hasConcreteDates && hasRelativeDates) {
+    blockers.push({
+      code: "INVALID_SCHEDULE",
+      message: "项目同时存在具体日期与未换算的 T0 相对计划，无法可靠校验资源容量；请先填写项目 T0 并统一换算后再发布基线。",
+      taskIds: scheduledLeafTasks.map((task) => task.id),
+    });
+  } else if (scheduledLeafTasks.length > 0) {
+    const memberById = new Map(members.map((member) => [member.id, member] as const));
+    const usesRelativeCalendar = hasRelativeDates && !hasConcreteDates;
+    const resourceTasks: ResourceSchedulingTask[] = scheduledLeafTasks.flatMap((task) => {
+      const assignments = normalizedOwnerIds(task).map((memberId) => {
+        const member = memberById.get(memberId);
+        const link = task.ownerLinks.find((ownerLink) => ownerLink.projectMemberId === memberId);
+        return {
+          ownerKey: `member:${memberId}`,
+          unitsPercent: link?.unitsPercent ?? 100,
+          plannedWorkHours: link?.plannedWorkHours ?? 0,
+          capacityHoursPerDay: member?.capacityHoursPerDay ?? 7.5,
+          productivityRate: member?.productivityRate ?? 1,
+          maxConcurrentAssignments: member?.maxConcurrentAssignments ?? 0,
+        };
+      });
+      if (assignments.length === 0) return [];
+      const relativeStartOffsetDays = task.relativeStartOffsetDays;
+      const relativeFinishOffsetDays = task.relativeFinishOffsetDays;
+      const relative = usesRelativeCalendar
+        && isGanttRelativeOffset(relativeStartOffsetDays)
+        && isGanttRelativeOffset(relativeFinishOffsetDays);
+      const scheduledStartDate = relative && isGanttRelativeOffset(relativeStartOffsetDays)
+        ? abstractDateFromGanttOffset(relativeStartOffsetDays)
+        : task.startDate;
+      const scheduledFinishDate = relative && isGanttRelativeOffset(relativeFinishOffsetDays)
+        ? abstractDateFromGanttOffset(relativeFinishOffsetDays)
+        : task.finishDate;
+      return [{
+        id: task.id,
+        projectId,
+        projectName: "",
+        taskName: task.taskName,
+        parentId: task.parentId,
+        isLeaf: true,
+        ownerKeys: assignments.map((assignment) => assignment.ownerKey),
+        ownerAssignments: assignments,
+        startDate: scheduledStartDate,
+        finishDate: scheduledFinishDate,
+        durationDays: Number(task.durationDays),
+        durationMinutes: Number(task.durationMinutes ?? 0),
+        estimatedWorkHours: Number(task.estimatedWorkHours ?? 0),
+        progress: Number(task.progress ?? 0),
+        taskMode: task.taskMode,
+        effortDriven: Boolean(task.effortDriven),
+        parallelizable: Boolean(task.parallelizable),
+        sortOrder: Number(task.sortOrder ?? 0),
+        predecessorDependencies: [],
+        isCurrentProject: true,
+      } satisfies ResourceSchedulingTask];
+    });
+    const resourceConflicts = detectResourceConflicts(
+      resourceTasks,
+      usesRelativeCalendar ? "CALENDAR_DAYS" : project.ganttCalendarMode === "WORKING_DAYS" ? "WORKING_DAYS" : "CALENDAR_DAYS",
+    );
+    if (resourceConflicts.length > 0) {
+      blockers.push({
+        code: "RESOURCE_CONFLICT",
+        message: `存在 ${resourceConflicts.length} 组同一负责人容量或并发冲突，发布基线前必须应用排期方案或调整负责人、工期。`,
+        taskIds: [...new Set(resourceConflicts.flatMap((conflict) => conflict.taskIds))],
+      });
+    }
+  }
   const unscheduledLeafTasks = tasks.filter((task) => (
     isLeafTask(task, parentIds)
     && Number(task.durationDays) > 0
@@ -419,6 +536,18 @@ export const validateProjectGanttBaseline = async (
       code: "UNSCHEDULED",
       message: `存在 ${unscheduledLeafTasks.length} 个叶子任务尚未完成排期，不能发布基线。`,
       taskIds: unscheduledLeafTasks.map((task) => task.id),
+    });
+  }
+  const missingDurationLeafTasks = tasks.filter((task) => (
+    isLeafTask(task, parentIds)
+    && !task.isMilestone
+    && Number(task.durationDays) <= 0
+  ));
+  if (missingDurationLeafTasks.length > 0) {
+    blockers.push({
+      code: "MISSING_DURATION",
+      message: `存在 ${missingDurationLeafTasks.length} 个叶子任务缺少已确认的正式工期，不能发布基线。`,
+      taskIds: missingDurationLeafTasks.map((task) => task.id),
     });
   }
   return {

@@ -39,6 +39,8 @@ export interface ProjectGanttTask extends BaseEntity {
   taskDescription: string;
   startDate: string;
   finishDate?: string;
+  relativeStartOffsetDays?: number | null;
+  relativeFinishOffsetDays?: number | null;
   earlyStartDate?: string;
   earlyFinishDate?: string;
   lateStartDate?: string;

@@ -1,4 +1,9 @@
 import type { ProjectGanttTask } from "@/domain/models";
+import {
+  formatGanttRelativeOffset,
+  isGanttRelativeOffset,
+  normalizeGanttRelativeOffset,
+} from "@/lib/gantt-relative-time";
 
 export interface GanttDateRange {
   startDate: string;
@@ -10,6 +15,10 @@ export interface GanttRow extends ProjectGanttTask {
   endDate: string;
   spanDays: number;
   offsetDays: number;
+  timelineStartDays: number;
+  timelineEndDays: number;
+  startDisplayLabel: string;
+  finishDisplayLabel: string;
   leftPercent: number;
   widthPercent: number;
   isCritical: boolean;
@@ -57,6 +66,14 @@ export const addCalendarDays = (startDate: string, days: number): string => {
 
 export const getGanttDateRange = (tasks: ProjectGanttTask[]): GanttDateRange | null => {
   if (tasks.length === 0) return null;
+
+  // A schedule with unresolved T0 offsets is intentionally calendar-free.
+  // Older imports can retain absolute dates alongside relative coordinates;
+  // relative coordinates are authoritative until a project T0 is materialized.
+  if (tasks.some((task) => (
+    isGanttRelativeOffset(task.relativeStartOffsetDays)
+    || isGanttRelativeOffset(task.relativeFinishOffsetDays)
+  ))) return null;
 
   const datePairs = tasks
     .filter((task) => /^\d{4}-\d{2}-\d{2}$/.test(task.startDate))
@@ -176,24 +193,52 @@ export const findGanttCriticalTaskIds = (tasks: ProjectGanttTask[]): Set<string>
 
 export const buildGanttRows = (tasks: ProjectGanttTask[]): GanttRow[] => {
   const range = getGanttDateRange(tasks);
-  if (!range) return [];
+  const relativeOffsets = tasks.flatMap((task) => [task.relativeStartOffsetDays, task.relativeFinishOffsetDays]
+    .filter(isGanttRelativeOffset)
+    .map(normalizeGanttRelativeOffset));
+  const relativeTimeline = {
+    originOffsetDays: 0,
+    totalDays: Math.max(1, (relativeOffsets.length > 0 ? Math.max(...relativeOffsets) : 0) + 1),
+  };
+  const hasRealDates = Boolean(range);
   const hasCalculatedFloat = tasks.some((task) => task.totalFloatMinutes != null);
   const criticalIds = hasCalculatedFloat
     ? new Set(tasks.filter((task) => (task.totalFloatMinutes ?? 1) <= 0).map((task) => task.id))
     : findGanttCriticalTaskIds(tasks);
 
   return tasks.map((task) => {
-    const endDate = task.finishDate || addDaysInclusive(task.startDate, task.durationDays) || task.startDate;
-    const offsetDays = diffDaysInclusive(range.startDate, task.startDate) - 1;
-    const spanDays = Math.max(0, task.durationDays || 0);
+    const hasPlannedStart = hasRealDates && /^\d{4}-\d{2}-\d{2}$/.test(task.startDate);
+    const endDate = hasPlannedStart
+      ? task.finishDate || addDaysInclusive(task.startDate, task.durationDays) || task.startDate
+      : "";
+    const spanDays = hasPlannedStart ? Math.max(0, task.durationDays || 0) : 0;
+    const hasRelativeStart = task.relativeStartOffsetDays != null;
+    const relativeStart = hasRelativeStart ? task.relativeStartOffsetDays! - relativeTimeline.originOffsetDays : 0;
+    const relativeFinishOffset = task.relativeFinishOffsetDays ?? (
+      hasRelativeStart ? task.relativeStartOffsetDays! + Math.max(0, task.durationDays || 1) - 1 : null
+    );
+    const relativeFinish = relativeFinishOffset == null
+      ? relativeStart
+      : relativeFinishOffset - relativeTimeline.originOffsetDays;
+    const resolvedSpanDays = hasPlannedStart
+      ? spanDays
+      : hasRelativeStart ? Math.max(1, relativeFinish - relativeStart + 1) : 0;
+    const offsetDays = range && hasPlannedStart
+      ? diffDaysInclusive(range.startDate, task.startDate) - 1
+      : !hasRealDates && hasRelativeStart ? relativeStart : 0;
+    const timelineTotalDays = hasRealDates && range ? range.totalDays : relativeTimeline.totalDays;
 
     return {
       ...task,
       endDate,
-      spanDays,
+      spanDays: resolvedSpanDays,
       offsetDays,
-      leftPercent: Math.round((offsetDays / range.totalDays) * 100),
-      widthPercent: spanDays > 0 ? Math.max(4, Math.round((spanDays / range.totalDays) * 100)) : 0,
+      timelineStartDays: offsetDays,
+      timelineEndDays: offsetDays + resolvedSpanDays,
+      startDisplayLabel: hasPlannedStart ? task.startDate : formatGanttRelativeOffset(task.relativeStartOffsetDays),
+      finishDisplayLabel: hasPlannedStart ? endDate : formatGanttRelativeOffset(relativeFinishOffset),
+      leftPercent: Math.round((offsetDays / timelineTotalDays) * 100),
+      widthPercent: resolvedSpanDays > 0 ? Math.max(4, Math.round((resolvedSpanDays / timelineTotalDays) * 100)) : 0,
       isCritical: criticalIds.has(task.id),
     };
   });

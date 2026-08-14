@@ -25,6 +25,7 @@ interface GanttDateFieldProps {
   slot?: "AM" | "PM";
   min?: string;
   required?: boolean;
+  displayValue?: string;
 }
 
 const SEGMENT_CLASS = "!h-5 !min-h-0 !border-0 !bg-transparent !p-0 text-center font-mono text-[10px] tabular-nums !shadow-none !ring-0";
@@ -39,6 +40,7 @@ export const GanttDateField = ({
   slot = "AM",
   min,
   required = false,
+  displayValue,
 }: GanttDateFieldProps) => {
   const currentYear = new Date().getFullYear();
   const [parts, setParts] = useState<GanttDateParts>(() => splitGanttDate(value));
@@ -128,17 +130,18 @@ export const GanttDateField = ({
   };
 
   if (readOnly) {
-    const displayValue = value
-      ? `${value} ${slot === "PM" ? "\u2193" : "\u2191"}`
-      : "未设置";
+    const dateValue = displayValue || value || "--";
+    const slotLabel = slot === "PM" ? "\u2193" : "\u2191";
+    const titleValue = value ? `${dateValue} ${slotLabel}` : dateValue;
     return (
-      <span
-        className="flex h-6 min-w-0 items-center truncate px-1 font-mono text-[10px] tabular-nums text-muted-foreground"
-        title={displayValue}
+      <output
+        className="gantt-date-display"
+        title={titleValue}
         aria-label={ariaLabel}
       >
-        {displayValue}
-      </span>
+        <span className="gantt-date-display-value">{dateValue}</span>
+        {value && <span className="gantt-date-display-slot" aria-hidden="true">{slotLabel}</span>}
+      </output>
     );
   }
 

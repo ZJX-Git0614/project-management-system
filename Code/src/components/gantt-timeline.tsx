@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ArrowDown, ArrowUp, CalendarClock, ChevronDown, ChevronLeft, ChevronRight, ChevronRight as MenuChevronRight, ClipboardPaste, Columns3, Copy, Filter, GripVertical, IndentDecrease, IndentIncrease, ListTree, Plus, Scissors, Star, Trash2, TriangleAlert, UserRoundCog, ZoomIn, ZoomOut } from "lucide-react";
 
@@ -41,6 +41,7 @@ import {
   getGanttDateRange,
   parseGanttDate,
 } from "@/lib/gantt";
+import { formatGanttRelativeOffset } from "@/lib/gantt-relative-time";
 import { ganttFloatDays, GANTT_MINUTES_PER_DAY, type GanttScheduleStatus } from "@/lib/gantt-cpm";
 import { buildGanttUnassignedLeafTasksByParentId } from "@/lib/gantt-owner-hierarchy";
 import {
@@ -88,6 +89,13 @@ interface GanttTimelineProps {
   fullScreen?: boolean;
   portalContainer?: HTMLElement | null;
   resourceConflictMessagesByTaskId?: Record<string, string[]>;
+  /** Derived capacity links from the latest formal scheduling preview. */
+  resourceCriticalTaskIds?: string[];
+  resourceCriticalChainLinks?: Array<{
+    predecessorTaskId: string;
+    successorTaskId: string;
+    ownerKey: string;
+  }>;
   onCreateTask?: (parentTask?: ProjectGanttTask) => void;
   /** Opens automatic scheduling for the selected parent scope. */
   onAutoSchedule?: (parentTask: ProjectGanttTask) => void;
@@ -127,6 +135,50 @@ interface GanttClipboardState {
   mode: GanttClipboardMode;
   taskIds: string[];
 }
+
+type GanttContextSubmenuKey = "paste" | "insert" | "owner" | "schedule";
+
+interface GanttContextSubmenuPosition {
+  left: number;
+  top: number;
+  width: number;
+}
+
+const GanttContextSubmenuPortal = ({
+  active,
+  ariaLabel,
+  children,
+  className,
+  portalContainer,
+  position,
+}: {
+  active: boolean;
+  ariaLabel: string;
+  children: ReactNode;
+  className?: string;
+  portalContainer?: HTMLElement | null;
+  position: GanttContextSubmenuPosition | null;
+}) => {
+  if (!active || !position || typeof document === "undefined") return null;
+
+  return createPortal(
+    <div
+      role="menu"
+      aria-label={ariaLabel}
+      className={cn("gantt-context-submenu gantt-context-submenu-portal", className)}
+      style={{ left: position.left, top: position.top, width: position.width }}
+      onClick={(event) => event.stopPropagation()}
+      onPointerDown={(event) => event.stopPropagation()}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+    >
+      {children}
+    </div>,
+    portalContainer ?? document.fullscreenElement ?? document.body,
+  );
+};
 
 export type GanttTaskDraft = {
   parentId?: string | null;
@@ -482,6 +534,8 @@ const GanttTimelineContent = ({
   fullScreen = false,
   portalContainer,
   resourceConflictMessagesByTaskId = {},
+  resourceCriticalTaskIds = [],
+  resourceCriticalChainLinks = [],
   historyFocusRequest,
   onCreateTask,
   onAutoSchedule,
@@ -512,7 +566,8 @@ const GanttTimelineContent = ({
   );
   const [columnFilters, setColumnFilters] = useState<GanttFilterState>({});
   const [contextMenu, setContextMenu] = useState<{ taskId: string; x: number; y: number } | null>(null);
-  const [contextSubmenu, setContextSubmenu] = useState<"paste" | "insert" | "owner" | "schedule" | null>(null);
+  const [contextSubmenu, setContextSubmenu] = useState<GanttContextSubmenuKey | null>(null);
+  const [contextSubmenuPosition, setContextSubmenuPosition] = useState<GanttContextSubmenuPosition | null>(null);
   const [insertCount, setInsertCount] = useState(1);
   const visibleColumnKeys = useMemo(
     () => ganttVisibleColumnKeys(detailsCollapsed, hiddenColumnKeys),
@@ -528,6 +583,15 @@ const GanttTimelineContent = ({
   const [embeddedViewportHeight, setEmbeddedViewportHeight] = useState<number | null>(null);
   const range = getGanttDateRange(tasks);
   const rows = useMemo(() => buildGanttRows(tasks), [tasks]);
+  const displayRange = range ?? (() => {
+    const today = new Date().toISOString().slice(0, 10);
+    return {
+      startDate: today,
+      endDate: addCalendarDays(today, 27),
+      totalDays: 28,
+    };
+  })();
+  const relativeTimeline = !range && rows.some((row) => row.spanDays > 0);
   const filteredRows = useMemo(
     () => filterGanttRowsWithAncestors(rows, columnFilters),
     [columnFilters, rows],
@@ -536,6 +600,7 @@ const GanttTimelineContent = ({
     GANTT_FILTER_KEYS.map((key) => [key, ganttFilterOptions(rows, key)]),
   ) as Record<GanttFilterKey, string[]>, [rows]);
   const dependencyLinks = useMemo(() => buildGanttDependencyLinks(tasks), [tasks]);
+  const resourceCriticalTaskIdSet = useMemo(() => new Set(resourceCriticalTaskIds), [resourceCriticalTaskIds]);
   const rowByTaskId = useMemo(() => new Map(rows.map((row) => [row.id, row])), [rows]);
   const childIdsByParentId = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -837,6 +902,7 @@ const GanttTimelineContent = ({
   const closeContextMenu = useCallback(() => {
     setContextMenu(null);
     setContextSubmenu(null);
+    setContextSubmenuPosition(null);
     setInsertCount(1);
   }, []);
 
@@ -855,7 +921,7 @@ const GanttTimelineContent = ({
     const clearOnBlankPointerDown = (event: globalThis.PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
-      if (target.closest("[data-gantt-task-id], .gantt-context-menu")) return;
+      if (target.closest("[data-gantt-task-id], .gantt-context-menu, .gantt-context-submenu")) return;
       clearTaskSelection();
     };
     window.addEventListener("keydown", clearOnEscape);
@@ -868,7 +934,11 @@ const GanttTimelineContent = ({
 
   useEffect(() => {
     if (!contextMenu) return;
-    const closeOnPointer = () => closeContextMenu();
+    const closeOnPointer = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".gantt-context-menu, .gantt-context-submenu")) return;
+      closeContextMenu();
+    };
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") closeContextMenu();
     };
@@ -900,12 +970,38 @@ const GanttTimelineContent = ({
     const offset = 6;
     setInsertCount(1);
     setContextSubmenu(null);
+    setContextSubmenuPosition(null);
     setContextMenu({
       taskId,
       x: Math.max(8, Math.min(event.clientX + offset, window.innerWidth - menuWidth - 8)),
       y: Math.max(8, Math.min(event.clientY + offset, window.innerHeight - menuHeight - 8)),
     });
   };
+
+  const openContextSubmenu = useCallback((key: GanttContextSubmenuKey, trigger: HTMLElement) => {
+    const anchor = trigger.closest(".gantt-context-menu-submenu-anchor") ?? trigger;
+    const rect = anchor.getBoundingClientRect();
+    const widthByKey: Record<GanttContextSubmenuKey, number> = {
+      paste: 204,
+      insert: 300,
+      owner: 240,
+      schedule: 304,
+    };
+    const width = widthByKey[key];
+    const edge = 8;
+    const gap = 6;
+    const maxHeight = Math.min(560, Math.max(160, window.innerHeight - edge * 2));
+    const canOpenLeft = rect.left - gap - width >= edge;
+    const openLeft = rect.right + gap + width > window.innerWidth - edge && canOpenLeft;
+    const left = openLeft
+      ? rect.left - gap - width
+      : Math.max(edge, Math.min(rect.right + gap, window.innerWidth - width - edge));
+    const top = Math.max(edge, Math.min(rect.top - 6, window.innerHeight - maxHeight - edge));
+
+    if (key === "insert" && contextSubmenu !== "insert") setInsertCount(1);
+    setContextSubmenu(key);
+    setContextSubmenuPosition({ left, top, width });
+  }, [contextSubmenu]);
 
   const changeContextHierarchy = (direction: GanttHierarchyDirection) => {
     if (!contextTask || hierarchyChanging || selectedTaskIds.length === 0) return;
@@ -1076,12 +1172,19 @@ const GanttTimelineContent = ({
         const taskId = selectedTaskIds[0];
         const node = document.querySelector<HTMLElement>(`[data-gantt-task-id="${CSS.escape(taskId)}"]`);
         const rect = node?.getBoundingClientRect();
+        const menuX = Math.max(8, Math.min((rect?.left ?? 24) + 36, window.innerWidth - 294));
+        const menuY = Math.max(8, Math.min((rect?.top ?? 24) + 8, window.innerHeight - 438));
+        const submenuWidth = 204;
+        const submenuLeft = menuX + 286 + 6 + submenuWidth > window.innerWidth - 8
+          ? Math.max(8, menuX - 6 - submenuWidth)
+          : menuX + 286 + 6;
         setInsertCount(1);
         setContextSubmenu("paste");
+        setContextSubmenuPosition({ left: submenuLeft, top: menuY + 68, width: submenuWidth });
         setContextMenu({
           taskId,
-          x: Math.max(8, Math.min((rect?.left ?? 24) + 36, window.innerWidth - 294)),
-          y: Math.max(8, Math.min((rect?.top ?? 24) + 8, window.innerHeight - 438)),
+          x: menuX,
+          y: menuY,
         });
       }
     };
@@ -1131,7 +1234,7 @@ const GanttTimelineContent = ({
     reorderTask(targetRow.id, position);
   };
 
-  if (!range || rows.length === 0) {
+  if (rows.length === 0) {
     return (
       <EmptyGanttTimeline
         emptyText={emptyText}
@@ -1156,13 +1259,15 @@ const GanttTimelineContent = ({
   }
 
   const config = { dayWidth, tickEvery: getTickEvery(dayWidth) };
-  const visibleStartDate = addCalendarDays(range.startDate, -1);
+  const visibleStartDate = addCalendarDays(displayRange.startDate, -1);
   const maxFloatCalendarSpan = rows.reduce((maximum, row) => Math.max(
     maximum,
     floatCalendarSpanDays(row.endDate, row.freeFloatMinutes, calendarMode),
   ), 0);
-  const visibleEndDate = addCalendarDays(range.endDate, Math.max(7, Math.ceil(maxFloatCalendarSpan) + 2));
-  const visibleDays = diffDays(visibleStartDate, visibleEndDate) + 1;
+  const visibleEndDate = addCalendarDays(displayRange.endDate, Math.max(7, Math.ceil(maxFloatCalendarSpan) + 2));
+  const visibleDays = relativeTimeline
+    ? Math.max(7, Math.max(...rows.map((row) => row.timelineEndDays), 0) + 2)
+    : diffDays(visibleStartDate, visibleEndDate) + 1;
   const timelineWidth = Math.max(MIN_TIMELINE_WIDTH, visibleDays * config.dayWidth);
   const bodyHeight = visibleRows.length * ROW_HEIGHT;
   const todayOffset = diffDays(visibleStartDate, new Date().toISOString().slice(0, 10));
@@ -1172,6 +1277,7 @@ const GanttTimelineContent = ({
   );
   const categoryCount = new Set(rows.map((row) => row.taskCategory)).size;
   const criticalCount = rows.filter((row) => row.isCritical).length;
+  const resourceCriticalCount = resourceCriticalTaskIdSet.size;
   const activeFilterCount = Object.values(columnFilters).filter((values) => Array.isArray(values)).length;
   const updateColumnFilter = (key: GanttFilterKey, values?: string[]) => {
     setColumnFilters((current) => {
@@ -1187,8 +1293,21 @@ const GanttTimelineContent = ({
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/20 px-3 py-1.5">
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span className="font-medium text-foreground">项目计划</span>
-          <span>{range.startDate} 至 {range.endDate}</span>
-          <span>总工期 {range.totalDays} 天</span>
+          {range ? (
+            <>
+              <span>{range.startDate} 至 {range.endDate}</span>
+              <span>总工期 {range.totalDays} 天</span>
+            </>
+          ) : relativeTimeline ? (
+            <>
+              <span>
+                T0 至 {formatGanttRelativeOffset(Math.max(...rows.map((row) => row.timelineEndDays), 0))}
+              </span>
+              <span>相对工作日排期</span>
+            </>
+          ) : (
+            <span>尚未录入排期</span>
+          )}
           <span>{rows.length} 个任务</span>
           <span>{categoryCount} 个类别</span>
           {activeFilterCount > 0 && (
@@ -1212,6 +1331,12 @@ const GanttTimelineContent = ({
             <span className="inline-block h-2.5 w-5 rounded-full bg-destructive" />
               关键路径 {criticalCount}
             </div>
+          {resourceCriticalCount > 0 && (
+            <div className="flex items-center gap-1 text-muted-foreground" title="同一负责人容量导致的串行关系，不会改写 FS 紧前关系">
+              <span className="inline-block h-0 w-5 border-t-2 border-sky-400" />
+              资源关键链 {resourceCriticalCount}
+            </div>
+          )}
             <button
               type="button"
               className={cn(
@@ -1320,6 +1445,7 @@ const GanttTimelineContent = ({
             visibleDays={visibleDays}
             visibleStartDate={visibleStartDate}
             width={timelineWidth}
+            relative={relativeTimeline}
           />
 
           <div
@@ -1426,6 +1552,7 @@ const GanttTimelineContent = ({
                 height={bodyHeight}
                 visibleDays={visibleDays}
                 visibleStartDate={visibleStartDate}
+                relative={relativeTimeline}
               />
               {todayX !== null && (
                 <line
@@ -1445,8 +1572,8 @@ const GanttTimelineContent = ({
                 const firstIndex = Math.min(from.index, to.index);
                 const lastIndex = Math.max(from.index, to.index);
                 if (lastIndex < virtualRange.start || firstIndex >= virtualRange.end) return null;
-                const fromX = (diffDays(visibleStartDate, from.row.endDate) + 1) * config.dayWidth;
-                const toX = diffDays(visibleStartDate, to.row.startDate) * config.dayWidth;
+                const fromX = (relativeTimeline ? from.row.timelineEndDays + 1 : diffDays(visibleStartDate, from.row.endDate) + 1) * config.dayWidth;
+                const toX = (relativeTimeline ? to.row.timelineStartDays : diffDays(visibleStartDate, to.row.startDate)) * config.dayWidth;
                 const fromY = from.index * ROW_HEIGHT + ROW_HEIGHT / 2;
                 const toY = to.index * ROW_HEIGHT + ROW_HEIGHT / 2;
                 return (
@@ -1459,11 +1586,33 @@ const GanttTimelineContent = ({
                   />
                 );
               })}
+              {resourceCriticalChainLinks.map((link) => {
+                const from = rowById.get(link.predecessorTaskId);
+                const to = rowById.get(link.successorTaskId);
+                if (!from || !to || from.row.spanDays <= 0 || to.row.spanDays <= 0) return null;
+                const firstIndex = Math.min(from.index, to.index);
+                const lastIndex = Math.max(from.index, to.index);
+                if (lastIndex < virtualRange.start || firstIndex >= virtualRange.end) return null;
+                const fromX = (relativeTimeline ? from.row.timelineEndDays + 1 : diffDays(visibleStartDate, from.row.endDate) + 1) * config.dayWidth;
+                const toX = (relativeTimeline ? to.row.timelineStartDays : diffDays(visibleStartDate, to.row.startDate)) * config.dayWidth;
+                const fromY = from.index * ROW_HEIGHT + ROW_HEIGHT / 2;
+                const toY = to.index * ROW_HEIGHT + ROW_HEIGHT / 2;
+                return (
+                  <DependencyConnector
+                    key={`resource:${link.predecessorTaskId}-${link.successorTaskId}-${link.ownerKey}`}
+                    fromX={fromX}
+                    fromY={fromY}
+                    toX={toX}
+                    toY={toY}
+                    tone="resource"
+                  />
+                );
+              })}
             </svg>
 
             {virtualRows.map(({ row, index: visualIndex }) => {
               if (row.spanDays <= 0) return null;
-              const left = diffDays(visibleStartDate, row.startDate) * config.dayWidth;
+              const left = (relativeTimeline ? row.timelineStartDays : diffDays(visibleStartDate, row.startDate)) * config.dayWidth;
               const width = config.dayWidth * row.spanDays;
               const showBarLabel = width >= 72;
               const barLabel = row.taskName || row.taskCode;
@@ -1489,14 +1638,16 @@ const GanttTimelineContent = ({
                       "relative h-full w-full overflow-hidden rounded-sm border shadow-sm",
                       row.isCritical
                         ? "border-destructive/60 bg-destructive/25"
-                        : "border-primary/60 bg-primary/25"
+                        : resourceCriticalTaskIdSet.has(row.id)
+                          ? "border-sky-400/75 bg-sky-400/20"
+                          : "border-primary/60 bg-primary/25"
                     )}
                     title={`${barLabel}: ${row.startDate} ~ ${row.endDate}，当前进度 ${progress}%\n最早 ${row.earlyStartDate || "--"} ~ ${row.earlyFinishDate || "--"}\n最迟 ${row.lateStartDate || "--"} ~ ${row.lateFinishDate || "--"}\n总浮动 ${formatFloat(row.totalFloatMinutes)}，自由浮动 ${formatFloat(row.freeFloatMinutes)}`}
                   >
                     <div
                       className={cn(
                         "h-full rounded-sm",
-                        row.isCritical ? "bg-destructive" : "bg-primary"
+                        row.isCritical ? "bg-destructive" : resourceCriticalTaskIdSet.has(row.id) ? "bg-sky-500" : "bg-primary"
                       )}
                       style={{ width: `${progress}%` }}
                     />
@@ -1568,51 +1719,53 @@ const GanttTimelineContent = ({
             </button>
             <div
               className="gantt-context-menu-submenu-anchor"
-              onMouseEnter={() => setContextSubmenu("paste")}
+              onMouseEnter={(event) => openContextSubmenu("paste", event.currentTarget)}
             >
               <button
                 type="button"
                 role="menuitem"
                 className="gantt-context-menu-item"
                 disabled={!canEdit || !clipboard || clipboard.projectId !== projectId}
-                onClick={() => setContextSubmenu("paste")}
+                onClick={(event) => openContextSubmenu("paste", event.currentTarget)}
               >
                 <ClipboardPaste className="size-4 shrink-0" />
                 <span>粘贴</span>
                 <MenuChevronRight className="ml-auto size-3.5" />
               </button>
-              {contextSubmenu === "paste" && clipboard?.projectId === projectId && (
-                <div className="gantt-context-submenu" role="menu" aria-label="粘贴位置">
+              <GanttContextSubmenuPortal
+                active={contextSubmenu === "paste" && clipboard?.projectId === projectId}
+                ariaLabel="粘贴位置"
+                portalContainer={portalContainer}
+                position={contextSubmenuPosition}
+              >
                   <button type="button" role="menuitem" className="gantt-context-menu-item" disabled={invalidMovePasteTarget} onClick={() => void pasteSelection("BEFORE")}>粘贴到行上方</button>
                   <button type="button" role="menuitem" className="gantt-context-menu-item" disabled={invalidMovePasteTarget} onClick={() => void pasteSelection("AFTER")}>粘贴到行下方</button>
                   {invalidMovePasteTarget && <div className="gantt-context-menu-hint">请选择被剪切分支以外的目标行</div>}
-                </div>
-              )}
+              </GanttContextSubmenuPortal>
             </div>
             <div className="gantt-context-menu-separator" />
             {canCreate && (
               <div
                 className="gantt-context-menu-submenu-anchor"
-                onMouseEnter={() => {
-                  if (contextSubmenu !== "insert") setInsertCount(1);
-                  setContextSubmenu("insert");
-                }}
+                onMouseEnter={(event) => openContextSubmenu("insert", event.currentTarget)}
               >
                 <button
                   type="button"
                   role="menuitem"
                   className="gantt-context-menu-item"
-                  onClick={() => {
-                    if (contextSubmenu !== "insert") setInsertCount(1);
-                    setContextSubmenu("insert");
-                  }}
+                  onClick={(event) => openContextSubmenu("insert", event.currentTarget)}
                 >
                   <Plus className="size-4 shrink-0" />
                   <span>插入</span>
                   <MenuChevronRight className="ml-auto size-3.5" />
                 </button>
-                {contextSubmenu === "insert" && (
-                  <div className="gantt-context-submenu gantt-context-submenu-wide" role="menu" aria-label="插入任务">
+                <GanttContextSubmenuPortal
+                  active={contextSubmenu === "insert"}
+                  ariaLabel="插入任务"
+                  className="gantt-context-submenu-wide"
+                  portalContainer={portalContainer}
+                  position={contextSubmenuPosition}
+                >
                     {([
                       ["SIBLING_BEFORE", "在上方插入", "个同级任务"],
                       ["SIBLING_AFTER", "在下方插入", "个同级任务"],
@@ -1641,8 +1794,7 @@ const GanttTimelineContent = ({
                         <span>{suffix}</span>
                       </button>
                     ))}
-                  </div>
-                )}
+                </GanttContextSubmenuPortal>
               </div>
             )}
             {canEdit && (
@@ -1651,28 +1803,32 @@ const GanttTimelineContent = ({
                 {contextTaskHasChildren && (
                   <div
                     className="gantt-context-menu-submenu-anchor"
-                    onMouseEnter={() => setContextSubmenu("owner")}
+                    onMouseEnter={(event) => openContextSubmenu("owner", event.currentTarget)}
                   >
                     <button
                       type="button"
                       role="menuitem"
                       className="gantt-context-menu-item"
-                      onClick={() => setContextSubmenu("owner")}
+                      onClick={(event) => openContextSubmenu("owner", event.currentTarget)}
                     >
                       <UserRoundCog className="size-4 shrink-0" />
                       <span>批量改派负责人</span>
                       <MenuChevronRight className="ml-auto size-3.5" />
                     </button>
-                    {contextSubmenu === "owner" && (
-                      <div className="gantt-context-submenu max-h-72 overflow-y-auto" role="menu" aria-label="批量改派负责人">
+                    <GanttContextSubmenuPortal
+                      active={contextSubmenu === "owner"}
+                      ariaLabel="批量改派负责人"
+                      className="max-h-72 overflow-y-auto"
+                      portalContainer={portalContainer}
+                      position={contextSubmenuPosition}
+                    >
                         <button type="button" role="menuitem" className="gantt-context-menu-item" onClick={() => void reassignContextBranch(null)}>未分配</button>
                         {projectMembers.map((member) => (
                           <button key={member.id} type="button" role="menuitem" className="gantt-context-menu-item" onClick={() => void reassignContextBranch(member.id)}>
                             {member.personName}（{member.roleName}）
                           </button>
                         ))}
-                      </div>
-                    )}
+                    </GanttContextSubmenuPortal>
                   </div>
                 )}
                 {contextTaskHasChildren && onAutoSchedule && (
@@ -1692,20 +1848,25 @@ const GanttTimelineContent = ({
                 )}
                 <div
                   className="gantt-context-menu-submenu-anchor"
-                  onMouseEnter={() => setContextSubmenu("schedule")}
+                  onMouseEnter={(event) => openContextSubmenu("schedule", event.currentTarget)}
                 >
                   <button
                     type="button"
                     role="menuitem"
                     className="gantt-context-menu-item"
-                    onClick={() => setContextSubmenu("schedule")}
+                    onClick={(event) => openContextSubmenu("schedule", event.currentTarget)}
                   >
                     <CalendarClock className="size-4 shrink-0" />
                     <span>排期设置</span>
                     <MenuChevronRight className="ml-auto size-3.5" />
                   </button>
-                  {contextSubmenu === "schedule" && (
-                    <div className="gantt-context-submenu min-w-52" role="menu" aria-label="排期设置">
+                  <GanttContextSubmenuPortal
+                    active={contextSubmenu === "schedule"}
+                    ariaLabel="排期设置"
+                    className="min-w-52"
+                    portalContainer={portalContainer}
+                    position={contextSubmenuPosition}
+                  >
                       <div className="px-3 py-1.5 text-[11px] text-muted-foreground">任务排期方式</div>
                       {([
                         ["AUTO", "自动排期", "由依赖、资源和父级边界计算"],
@@ -1774,8 +1935,7 @@ const GanttTimelineContent = ({
                           ))}
                         </>
                       )}
-                    </div>
-                  )}
+                  </GanttContextSubmenuPortal>
                 </div>
                 <button
                   type="button"
@@ -1824,7 +1984,7 @@ const GanttTimelineContent = ({
               </>
             )}
           </div>
-        ), document.fullscreenElement ?? document.body)}
+        ), portalContainer ?? document.fullscreenElement ?? document.body)}
         <GanttDividerToggle
           collapsed={detailsCollapsed}
           onToggle={() => setDetailsCollapsed((prev) => !prev)}
@@ -2169,6 +2329,18 @@ const DurationDaysInput = ({
     onCommit(next);
   };
 
+  if (disabled) {
+    return (
+      <output
+        className="gantt-readonly-metric"
+        aria-label="工期天数"
+        title="单位：天；支持 0.5 天步进，留空表示未排期"
+      >
+        {value > 0 ? String(value) : "--"}
+      </output>
+    );
+  }
+
   return (
     <Input
       type="text"
@@ -2202,7 +2374,6 @@ const DurationDaysInput = ({
         }
       }}
       className={cn(durationFieldClass, "placeholder:text-muted-foreground/45")}
-      disabled={disabled}
       aria-label="工期天数"
       title="单位：天；支持 0.5 天步进，留空表示未排期"
     />
@@ -2232,6 +2403,14 @@ const ActualWorkHoursInput = ({
     onCommit(next);
   };
 
+  if (disabled) {
+    return (
+      <output className="gantt-readonly-metric" aria-label="实际工时" title="单位：小时，最多两位小数">
+        {value > 0 ? roundGanttHours(value).toFixed(2) : "--"}
+      </output>
+    );
+  }
+
   return (
     <Input
       type="text"
@@ -2255,7 +2434,6 @@ const ActualWorkHoursInput = ({
         }
       }}
       className={durationFieldClass}
-      disabled={disabled}
       aria-label="实际工时"
       title="单位：小时，最多两位小数"
     />
@@ -2386,7 +2564,9 @@ const EditableTaskRow = ({
   const isChildTask = taskDepth > 0;
   const ownerMembers = row.ownerMembers ?? (row.ownerMember ? [row.ownerMember] : []);
   const ownerNames = ownerMembers.map((owner) => owner.personName);
-  const ownerReadOnly = Boolean(row.ownerReadOnly);
+  // The API marks summary owners readonly. Derive the same rule locally so a
+  // stale response can never make a parent owner selector editable.
+  const ownerReadOnly = hasChildren || Boolean(row.ownerReadOnly);
   const ownerSelectValue = ownerReadOnly && ownerMembers.length > 0
     ? ownerMembers.map((owner) => owner.id)
     : draft.ownerMemberIds?.length
@@ -2410,6 +2590,7 @@ const EditableTaskRow = ({
   const durationReadOnly = planReadOnly || taskMode === "DATES_FIXED";
   const startDateReadOnly = planReadOnly || taskMode === "DURATION_BACKWARD";
   const endDateReadOnly = planReadOnly || taskMode === "DURATION_FORWARD";
+  const relativePlanReadOnly = row.relativeStartOffsetDays != null && row.relativeFinishOffsetDays != null;
   const hasUnassignedLeafTasks = unassignedLeafTasks.length > 0;
   const hasResourceConflict = resourceConflictMessages.length > 0;
   const levelColor = GANTT_DEPTH_COLORS[taskDepth % GANTT_DEPTH_COLORS.length];
@@ -2749,7 +2930,11 @@ const EditableTaskRow = ({
               searchPlaceholder="搜索项目成员或角色"
               emptyText="没有可选择的项目成员"
               placeholder="未分配"
-              title={ownerReadOnly ? `已汇总 ${ownerNames.length} 名子任务负责人，请先调整子任务` : ownerNames.join("、") || "未分配"}
+              title={ownerReadOnly
+                ? ownerNames.length > 0
+                  ? `已汇总 ${ownerNames.length} 名子任务负责人，请先调整子任务`
+                  : "父任务负责人由子任务自动汇总，请先在末级任务设置负责人"
+                : ownerNames.join("、") || "未分配"}
               onChange={(ownerMemberIds) => {
                 if (!canEdit || isSaving || ownerReadOnly) return;
                 const normalizedOwnerMemberIds = [...new Set(ownerMemberIds)];
@@ -2818,7 +3003,7 @@ const EditableTaskRow = ({
         </div>
       )}
       {isColumnVisible("durationDays") && (
-        <div data-gantt-column-key="durationDays">
+        <div data-gantt-column-key="durationDays" className="min-w-0 overflow-hidden">
           <DurationDaysInput
             value={draft.durationDays}
             disabled={durationReadOnly}
@@ -2841,20 +3026,21 @@ const EditableTaskRow = ({
         </div>
       )}
       {isColumnVisible("startDate") && (
-        <div data-gantt-column-key="startDate" className="flex min-w-0 items-center">
+        <div data-gantt-column-key="startDate" className="flex min-w-0 items-center overflow-hidden">
           <div className="min-w-0 flex-1">
             <GanttDateField
               value={draft.startDate}
+              displayValue={row.startDisplayLabel}
               onChange={(value) => updateDateDraft(withPlannedStart, value)}
               onCommit={(value) => commitDateDraft(withPlannedStart, value, "startDate")}
               disabled={startDateReadOnly}
-              readOnly={startDateReadOnly}
+              readOnly={startDateReadOnly || relativePlanReadOnly}
               slot={draft.startSlot}
               ariaLabel="计划开始"
               required
             />
           </div>
-          {!startDateReadOnly && draft.startDate && (
+          {!startDateReadOnly && !relativePlanReadOnly && draft.startDate && (
             <GanttHalfDaySlotControl
               disabled={false}
               label="计划开始"
@@ -2869,21 +3055,22 @@ const EditableTaskRow = ({
         </div>
       )}
       {isColumnVisible("endDate") && (
-        <div data-gantt-column-key="endDate" className="flex min-w-0 items-center">
+        <div data-gantt-column-key="endDate" className="flex min-w-0 items-center overflow-hidden">
           <div className="min-w-0 flex-1">
             <GanttDateField
               value={draft.endDate}
+              displayValue={row.finishDisplayLabel}
               onChange={(value) => updateDateDraft(withPlannedEnd, value)}
               onCommit={(value) => commitDateDraft(withPlannedEnd, value, "endDate")}
               disabled={endDateReadOnly}
-              readOnly={endDateReadOnly}
+              readOnly={endDateReadOnly || relativePlanReadOnly}
               slot={draft.finishSlot}
               ariaLabel="计划完成"
               min={draft.startDate}
               required={draft.durationDays > 0}
             />
           </div>
-          {!endDateReadOnly && draft.endDate && (
+          {!endDateReadOnly && !relativePlanReadOnly && draft.endDate && (
             <GanttHalfDaySlotControl
               disabled={false}
               label="计划完成"
@@ -2898,7 +3085,7 @@ const EditableTaskRow = ({
         </div>
       )}
       {isColumnVisible("actualStartDate") && (
-        <div data-gantt-column-key="actualStartDate" className="flex min-w-0 items-center">
+        <div data-gantt-column-key="actualStartDate" className="flex min-w-0 items-center overflow-hidden">
           <div className="min-w-0 flex-1">
             <GanttDateField
               value={draft.actualStartDate}
@@ -2925,7 +3112,7 @@ const EditableTaskRow = ({
         </div>
       )}
       {isColumnVisible("actualEndDate") && (
-        <div data-gantt-column-key="actualEndDate" className="flex min-w-0 items-center">
+        <div data-gantt-column-key="actualEndDate" className="flex min-w-0 items-center overflow-hidden">
           <div className="min-w-0 flex-1">
             <GanttDateField
               value={draft.actualEndDate}
@@ -2953,18 +3140,14 @@ const EditableTaskRow = ({
         </div>
       )}
       {isColumnVisible("estimatedWorkHours") && (
-          <Input
-            data-gantt-column-key="estimatedWorkHours"
-            type="text"
-            value={draft.estimatedWorkHours > 0 ? roundGanttHours(draft.estimatedWorkHours).toFixed(2) : "--"}
-            className={durationFieldClass}
-            readOnly
-            aria-label="预计工时"
-            title="按工期 × 7.5 小时自动计算"
-          />
+        <div data-gantt-column-key="estimatedWorkHours" className="min-w-0 overflow-hidden">
+          <output className="gantt-readonly-metric" aria-label="预计工时" title="按工期 × 7.5 小时自动计算">
+            {draft.estimatedWorkHours > 0 ? roundGanttHours(draft.estimatedWorkHours).toFixed(2) : "--"}
+          </output>
+        </div>
       )}
       {isColumnVisible("actualWorkHours") && (
-        <div data-gantt-column-key="actualWorkHours">
+        <div data-gantt-column-key="actualWorkHours" className="min-w-0 overflow-hidden">
           <ActualWorkHoursInput
             value={draft.actualWorkHours}
             disabled={actualReadOnly}
@@ -3140,14 +3323,17 @@ const TimelineHeader = ({
   visibleDays,
   visibleStartDate,
   width,
+  relative = false,
 }: {
   config: { dayWidth: number; tickEvery: number };
   visibleDays: number;
   visibleStartDate: string;
   width: number;
+  relative?: boolean;
 }) => {
   const ticks = Array.from({ length: visibleDays }, (_, index) => ({
     date: addCalendarDays(visibleStartDate, index),
+    offset: index,
     x: index * config.dayWidth,
   })).filter((_, index) => index % config.tickEvery === 0);
 
@@ -3168,7 +3354,7 @@ const TimelineHeader = ({
         {ticks.map((tick) => {
           const date = parseGanttDate(tick.date);
           const isWeekend = [0, 6].includes(date.getUTCDay());
-          const label = formatDate(tick.date);
+          const label = relative ? formatGanttRelativeOffset(tick.offset) : formatDate(tick.date);
           return (
             <g key={tick.date}>
               <line x1={tick.x} x2={tick.x} y1={0} y2={HEADER_HEIGHT} className="stroke-border" />
@@ -3193,11 +3379,13 @@ const TimelineGrid = ({
   height,
   visibleDays,
   visibleStartDate,
+  relative = false,
 }: {
   config: { dayWidth: number; tickEvery: number };
   height: number;
   visibleDays: number;
   visibleStartDate: string;
+  relative?: boolean;
 }) => (
   <>
     {Array.from({ length: visibleDays }, (_, index) => {
@@ -3206,7 +3394,7 @@ const TimelineGrid = ({
       const x = index * config.dayWidth;
       return (
         <g key={index}>
-          {isWeekend && (
+          {isWeekend && !relative && (
             <rect x={x} y={0} width={config.dayWidth} height={height} className="fill-muted opacity-20" />
           )}
           {index % config.tickEvery === 0 && (
@@ -3234,20 +3422,24 @@ const DependencyConnector = ({
   fromY,
   toX,
   toY,
+  tone = "dependency",
 }: {
   fromX: number;
   fromY: number;
   toX: number;
   toY: number;
+  tone?: "dependency" | "resource";
 }) => {
   const elbow = Math.max(fromX + 12, Math.min(toX - 12, fromX + 28));
   const endX = Math.max(toX - 4, 0);
   const path = `M ${fromX} ${fromY} L ${elbow} ${fromY} L ${elbow} ${toY} L ${endX} ${toY}`;
 
+  const resource = tone === "resource";
+  const color = resource ? "#38bdf8" : "#94a3b8";
   return (
     <g>
-      <path d={path} fill="none" stroke="#94a3b8" strokeDasharray="4 3" strokeWidth={1.4} />
-      <polygon points={`${endX},${toY - 4} ${endX},${toY + 4} ${toX + 3},${toY}`} fill="#94a3b8" />
+      <path d={path} fill="none" stroke={color} strokeDasharray={resource ? undefined : "4 3"} strokeWidth={resource ? 2 : 1.4} />
+      <polygon points={`${endX},${toY - 4} ${endX},${toY + 4} ${toX + 3},${toY}`} fill={color} />
     </g>
   );
 };

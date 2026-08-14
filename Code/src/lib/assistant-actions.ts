@@ -31,7 +31,7 @@ import {
   deleteGanttTasksAtOrBeyondDepth,
   getOrderedGanttTasks,
   getProjectGanttCalendarMode,
-  recalculateProjectGanttSchedule,
+  refreshProjectGanttDerivedState,
   renumberProjectGanttTaskCodes,
 } from "@/lib/gantt-task-service";
 import {
@@ -147,13 +147,10 @@ const normalizeResourceScheduleCandidateKind = (value: unknown): ResourceSchedul
 };
 
 export const parseResourceOptimizationIntent = (message: string) => {
-  const asksToApply = /(应用|采用|执行|确认|选用|使用|按).{0,18}(方案|优化|排期)|(直接|现在).{0,8}(优化|调整).{0,8}(资源|排期)/u.test(message);
-  const mentionsResource = /(资源冲突|人员冲突|资源优化|资源排期|排期优化|候选方案|最少改动|最早完成|按期优先)/u.test(message);
-  if (!asksToApply || !mentionsResource) return null;
-  if (/最少改动|最小改动|少改/u.test(message)) return { candidateKind: "MINIMAL_CHANGE" as const };
-  if (/最早完成|尽早完成|最快完成/u.test(message)) return { candidateKind: "EARLIEST_FINISH" as const };
-  if (/按期优先|按时优先|结项优先|期限优先/u.test(message)) return { candidateKind: "ON_TIME" as const };
-  return null;
+  const asksToApply = /(应用|采用|执行|确认|选用|使用|启动|运行).{0,18}(正式)?(自动)?(方案|排期)|(直接|现在).{0,8}(自动|正式|资源|调整).{0,8}(排期|排程|优化)?/u.test(message);
+  const mentionsSchedule = /(自动排期|正式排期|资源冲突|人员冲突|资源排期|排期优化|排程|排期方案)/u.test(message);
+  if (!asksToApply || !mentionsSchedule) return null;
+  return { candidateKind: "FORMAL" as const };
 };
 
 const parseCommandField = (message: string, labels: readonly string[]) => {
@@ -923,8 +920,8 @@ export const proposeAssistantAction = async (params: {
           revision: context.currentProject.ganttRevision,
           snapshotHash: result.snapshotHash,
         },
-        title: `应用“${candidate.title}”资源优化方案`,
-        description: `将调整 ${candidate.changes.length} 个未开始且可自动排程的任务，累计移动 ${candidate.metrics.totalShiftDays} 天，预计完成日期 ${candidate.metrics.completionDate || "未确定"}${remainingText}；确认时会再次校验 WBS 版本，过期方案不会写入`,
+        title: "应用正式自动排期",
+        description: `将按 T0、FS 紧前关系、日历、负责人容量和硬边界计算并调整 ${candidate.changes.length} 个未开始叶子任务，累计移动 ${candidate.metrics.totalShiftDays} 天，预计完成日期 ${candidate.metrics.completionDate || "未确定"}${remainingText}；确认时会再次校验 WBS 版本，过期方案不会写入`,
       });
     }
   }
@@ -1537,7 +1534,7 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     const revision = Number(args.revision);
     const snapshotHash = String(args.snapshotHash || "");
     if (!candidateKind || !Number.isInteger(revision) || revision < 0 || !snapshotHash) {
-      throw new Error("资源优化方案参数无效，请重新生成建议");
+      throw new Error("正式自动排期方案参数无效，请重新生成预览");
     }
     const result = await applyProjectResourceScheduleCandidate({
       projectId: action.projectId,
@@ -1626,7 +1623,7 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
       return task;
     });
     await renumberProjectGanttTaskCodes(action.projectId);
-    await recalculateProjectGanttSchedule(action.projectId, calendarMode);
+    await refreshProjectGanttDerivedState(action.projectId, calendarMode);
     const normalizedTask = (await getOrderedGanttTasks(action.projectId)).find((task) => task.id === created.id);
     return prisma.assistantActionRun.update({
       where: { id: action.id },

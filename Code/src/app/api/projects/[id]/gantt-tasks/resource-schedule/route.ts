@@ -4,6 +4,7 @@ import { ensureMutableProject, err, notFound, ok } from "@/lib/api-utils";
 import { getGanttPlanMutationBlockReasonForActor } from "@/lib/gantt-baseline-service";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import {
+  applyProjectDurationSuggestions,
   applyProjectResourceScheduleCandidate,
   RESOURCE_SCHEDULE_CANDIDATE_KINDS,
   resourceConflictAnalysis,
@@ -39,6 +40,8 @@ export async function GET(
         scope,
         conflicts: result.conflicts.map((conflict) => serializeResourceConflict(conflict, context.summaries, isAdmin)),
         issues: result.issues ?? [],
+        durationSuggestions: result.durationSuggestions ?? [],
+        durationSuggestionIssues: result.durationSuggestionIssues ?? [],
         candidates: result.candidates.map((candidate) => serializeResourceCandidate(candidate, context.summaries, isAdmin)),
       });
     }
@@ -72,10 +75,27 @@ export async function POST(
   });
   if (baselineLockReason) return err(baselineLockReason, 409, "GANTT_BASELINE_LOCKED");
   const body = await req.json() as Record<string, unknown>;
-  const candidateKind = String(body.candidateKind ?? "") as ResourceScheduleCandidateKind;
-  if (!candidateKinds.has(candidateKind)) return err("优化排期方案无效");
+  const action = String(body.action ?? "APPLY_SCHEDULE");
   const requestedRevision = Number(body.revision);
   const requestedSnapshotHash = String(body.snapshotHash ?? "");
+  if (action === "APPLY_DURATION_SUGGESTIONS") {
+    const taskIds = Array.isArray(body.taskIds)
+      ? body.taskIds.map((value) => String(value).trim()).filter(Boolean)
+      : [];
+    try {
+      return ok(await applyProjectDurationSuggestions({
+        projectId: id,
+        taskIds,
+        expectedRevision: requestedRevision,
+        expectedSnapshotHash: requestedSnapshotHash,
+        operator: user.displayName,
+      }));
+    } catch (error) {
+      return err(error instanceof Error ? error.message : "系统建议工期应用失败", 409, "DURATION_SUGGESTION_APPLY_FAILED");
+    }
+  }
+  const candidateKind = String(body.candidateKind ?? "") as ResourceScheduleCandidateKind;
+  if (!candidateKinds.has(candidateKind)) return err("正式自动排期方案无效");
   const modeOverride = String(body.modeOverride ?? "PRESERVE") as ResourceScheduleModeOverride;
   if (!["PRESERVE", "AUTO", "DURATION_FORWARD", "DURATION_BACKWARD"].includes(modeOverride)) {
     return err("子任务排期方式覆盖无效");
@@ -94,6 +114,6 @@ export async function POST(
       modeOverride,
     }));
   } catch (error) {
-    return err(error instanceof Error ? error.message : "优化排期应用失败", 409, "RESOURCE_SCHEDULE_APPLY_FAILED");
+    return err(error instanceof Error ? error.message : "正式自动排期应用失败", 409, "RESOURCE_SCHEDULE_APPLY_FAILED");
   }
 }

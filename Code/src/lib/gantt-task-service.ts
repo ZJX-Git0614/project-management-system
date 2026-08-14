@@ -14,11 +14,17 @@ import {
 } from "@/lib/gantt-hierarchy";
 import {
   calculateTaskDurationDays,
+  materializeGanttOffsetDate,
   normalizeGanttCalendarMode,
   type GanttCalendarMode,
 } from "@/lib/gantt-calendar";
+import {
+  abstractDateFromGanttOffset,
+  isGanttRelativeOffset,
+  normalizeGanttRelativeOffset,
+} from "@/lib/gantt-relative-time";
 import { calculateGanttCpm, type GanttCpmMetrics } from "@/lib/gantt-cpm";
-import { scheduleGanttTasks } from "@/lib/gantt-schedule";
+import { fixedSuccessorTaskIdsBlockedByActualCompletion } from "@/lib/gantt-schedule";
 import {
   deriveGanttPriority,
   ganttSchedulePriorityFor,
@@ -81,12 +87,23 @@ type GanttActualRollupUpdate = {
   progress: number;
 };
 
+type GanttRelativeScheduleUpdate = {
+  id: string;
+  relativeStartOffsetDays: number | null;
+  relativeFinishOffsetDays: number | null;
+  durationDays: number;
+  durationMinutes: number;
+  estimatedWorkHours: number;
+};
+
 type ParentRollupTask = {
   id: string;
   parentId: string | null;
   parentBoundaryMode?: string;
   startDate: string;
   finishDate: string;
+  relativeStartOffsetDays?: number | null;
+  relativeFinishOffsetDays?: number | null;
   durationDays: number;
   durationMinutes: number;
   estimatedWorkHours: number;
@@ -112,7 +129,7 @@ const isGanttPlanDate = (value: string | null | undefined) => /^\d{4}-\d{2}-\d{2
  * derived from direct and indirect child work, unless the user explicitly
  * changes the parent to a target/locked boundary.
  */
-const rollupGanttParentSchedules = <T extends ParentRollupTask>(
+export const rollupGanttParentSchedules = <T extends ParentRollupTask>(
   tasks: T[],
   mode: GanttCalendarMode,
 ): T[] => {
@@ -145,6 +162,80 @@ const rollupGanttParentSchedules = <T extends ParentRollupTask>(
           durationDays,
           durationMinutes: Math.round(durationDays * 450),
           estimatedWorkHours: Math.round(children.reduce((sum, child) => sum + Math.max(0, Number(child.estimatedWorkHours) || 0), 0) * 100) / 100,
+        });
+      }
+    }
+    visiting.delete(taskId);
+    visited.add(taskId);
+  };
+
+  tasks.forEach((task) => rollup(task.id));
+  return tasks.map((task) => taskById.get(task.id) ?? task);
+};
+
+/**
+ * Relative T0 schedules use abstract working-day indexes. No concrete calendar
+ * is consulted until a real project T0 is supplied. Summary rows therefore
+ * roll up the minimum/maximum child offsets directly.
+ */
+export const rollupGanttParentRelativeSchedules = <T extends ParentRollupTask>(tasks: T[]): T[] => {
+  const taskById = new Map(tasks.map((task) => [task.id, { ...task }]));
+  const childrenByParentId = new Map<string, string[]>();
+  tasks.forEach((task) => {
+    if (!task.parentId) return;
+    childrenByParentId.set(task.parentId, [...(childrenByParentId.get(task.parentId) ?? []), task.id]);
+  });
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+
+  const rollup = (taskId: string) => {
+    if (visited.has(taskId) || visiting.has(taskId)) return;
+    visiting.add(taskId);
+    const task = taskById.get(taskId);
+    const childIds = childrenByParentId.get(taskId) ?? [];
+    childIds.forEach(rollup);
+    if (task && childIds.length > 0) {
+      const children = childIds.map((childId) => taskById.get(childId)).filter((child): child is T => Boolean(child));
+      const scheduledChildren = children.filter((child) => (
+        isGanttRelativeOffset(child.relativeStartOffsetDays)
+        && isGanttRelativeOffset(child.relativeFinishOffsetDays)
+      ));
+      const preservesBoundary = task.parentBoundaryMode === "TARGET" || task.parentBoundaryMode === "LOCKED";
+      const hasExplicitRelativeBoundary = isGanttRelativeOffset(task.relativeStartOffsetDays)
+        && isGanttRelativeOffset(task.relativeFinishOffsetDays);
+
+      // A target/locked parent only remains independent when it actually has
+      // a T0 boundary. A legacy calendar date cannot define a relative
+      // schedule, so the task still exposes T0 coordinates. For a locked or
+      // target parent, its entered duration remains a hard boundary instead
+      // of being silently extended to the child envelope.
+      if (scheduledChildren.length > 0 && !hasExplicitRelativeBoundary) {
+        const childStartOffsetDays = Math.min(...scheduledChildren.map((child) => child.relativeStartOffsetDays!));
+        const childFinishOffsetDays = Math.max(...scheduledChildren.map((child) => child.relativeFinishOffsetDays!));
+        const preservesDuration = preservesBoundary && Number.isFinite(task.durationDays) && task.durationDays > 0;
+        const relativeStartOffsetDays = isGanttRelativeOffset(task.relativeStartOffsetDays)
+          ? task.relativeStartOffsetDays
+          : isGanttRelativeOffset(task.relativeFinishOffsetDays) && preservesDuration
+            ? normalizeGanttRelativeOffset(task.relativeFinishOffsetDays - task.durationDays + 1)
+            : childStartOffsetDays;
+        const relativeFinishOffsetDays = isGanttRelativeOffset(task.relativeFinishOffsetDays)
+          ? task.relativeFinishOffsetDays
+          : preservesDuration
+            ? normalizeGanttRelativeOffset(relativeStartOffsetDays + task.durationDays - 1)
+            : childFinishOffsetDays;
+        const durationDays = preservesDuration
+          ? task.durationDays
+          : normalizeGanttRelativeOffset(relativeFinishOffsetDays - relativeStartOffsetDays + 1);
+        taskById.set(taskId, {
+          ...task,
+          relativeStartOffsetDays,
+          relativeFinishOffsetDays,
+          durationDays,
+          durationMinutes: Math.round(durationDays * 450),
+          estimatedWorkHours: Math.round(children.reduce(
+            (sum, child) => sum + Math.max(0, Number(child.estimatedWorkHours) || 0),
+            0,
+          ) * 100) / 100,
         });
       }
     }
@@ -300,17 +391,15 @@ const bulkUpdateGanttSchedule = async (
   client: GanttWriteClient,
   rows: GanttScheduleUpdate[],
   calculatedAt: Date,
-  options: { preservePlannedDates?: boolean } = {},
 ) => {
   if (rows.length === 0) return;
-  const preservePlannedDates = options.preservePlannedDates === true;
   await client.$executeRaw(Prisma.sql`
     UPDATE "ProjectGanttTask" AS target
-    SET "startDate" = CASE WHEN ${preservePlannedDates} THEN target."startDate" ELSE source."startDate" END,
-        "finishDate" = CASE WHEN ${preservePlannedDates} THEN target."finishDate" ELSE source."finishDate" END,
-        "durationDays" = CASE WHEN ${preservePlannedDates} THEN target."durationDays" ELSE source."durationDays" END,
-        "durationMinutes" = CASE WHEN ${preservePlannedDates} THEN target."durationMinutes" ELSE source."durationMinutes" END,
-        "estimatedWorkHours" = CASE WHEN ${preservePlannedDates} THEN target."estimatedWorkHours" ELSE source."estimatedWorkHours" END,
+    SET "startDate" = source."startDate",
+        "finishDate" = source."finishDate",
+        "durationDays" = source."durationDays",
+        "durationMinutes" = source."durationMinutes",
+        "estimatedWorkHours" = source."estimatedWorkHours",
         "schedulePriority" = source."schedulePriority",
         "effectivePriority" = source."effectivePriority",
         "earlyStartDate" = source."earlyStartDate",
@@ -371,6 +460,34 @@ const bulkUpdateGanttActualRollups = async (
       ${row.progress}::integer
     )`) )}) AS source(
       "id", "actualStartDate", "actualEndDate", "actualStartSlot", "actualFinishSlot", "actualWorkHours", "progress"
+    )
+    WHERE target."id" = source."id"
+  `);
+};
+
+const bulkUpdateGanttRelativeSchedules = async (
+  client: GanttWriteClient,
+  rows: GanttRelativeScheduleUpdate[],
+) => {
+  if (rows.length === 0) return;
+  await client.$executeRaw(Prisma.sql`
+    UPDATE "ProjectGanttTask" AS target
+    SET "relativeStartOffsetDays" = source."relativeStartOffsetDays",
+        "relativeFinishOffsetDays" = source."relativeFinishOffsetDays",
+        "durationDays" = source."durationDays",
+        "durationMinutes" = source."durationMinutes",
+        "estimatedWorkHours" = source."estimatedWorkHours",
+        "updatedAt" = NOW()
+    FROM (VALUES ${Prisma.join(rows.map((row) => Prisma.sql`(
+      ${row.id}::text,
+      ${row.relativeStartOffsetDays ?? null}::double precision,
+      ${row.relativeFinishOffsetDays ?? null}::double precision,
+      ${row.durationDays}::double precision,
+      ${row.durationMinutes}::integer,
+      ${row.estimatedWorkHours}::double precision
+    )`) )}) AS source(
+      "id", "relativeStartOffsetDays", "relativeFinishOffsetDays",
+      "durationDays", "durationMinutes", "estimatedWorkHours"
     )
     WHERE target."id" = source."id"
   `);
@@ -456,7 +573,9 @@ export const serializeGanttTaskList = (tasks: GanttTaskRecord[]) => {
     return {
       ...serializeGanttTask(task),
       ownerMembers,
-      ownerReadOnly: parentTaskIds.has(task.id) && ownerMembers.length > 0,
+      // A parent owner is always a roll-up from leaves. It remains readonly
+      // even before its descendants receive their first assignment.
+      ownerReadOnly: parentTaskIds.has(task.id),
     };
   });
 };
@@ -490,11 +609,63 @@ export const getProjectGanttCalendarMode = async (
   return normalizeGanttCalendarMode(project?.ganttCalendarMode);
 };
 
-export const recalculateProjectGanttSchedule = async (
+export const convertFixedSuccessorsBlockedByActualCompletion = async (
+  projectId: string,
+  changedPredecessorTaskIds: string[],
+  mode: GanttCalendarMode,
+  client: GanttWriteClient = prisma,
+) => {
+  if (changedPredecessorTaskIds.length === 0) return [];
+  const tasks = await client.projectGanttTask.findMany({
+    where: { projectId },
+    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+    select: {
+      id: true,
+      projectId: true,
+      parentId: true,
+      taskCode: true,
+      taskName: true,
+      startDate: true,
+      finishDate: true,
+      durationDays: true,
+      durationMinutes: true,
+      estimatedWorkHours: true,
+      taskMode: true,
+      progress: true,
+      actualEndDate: true,
+      predecessorDependencies: {
+        select: { predecessorTaskId: true, type: true, lag: true, lagFormat: true },
+      },
+    },
+  });
+  const blockedIds = fixedSuccessorTaskIdsBlockedByActualCompletion(
+    tasks,
+    mode,
+    changedPredecessorTaskIds,
+  );
+  if (blockedIds.length === 0) return [];
+  await client.projectGanttTask.updateMany({
+    where: { projectId, id: { in: blockedIds } },
+    data: { taskMode: "AUTO" },
+  });
+  const blockedIdSet = new Set(blockedIds);
+  return tasks
+    .filter((task) => blockedIdSet.has(task.id))
+    .map((task) => ({ id: task.id, taskCode: task.taskCode, taskName: task.taskName }));
+};
+
+/**
+ * Refreshes derived WBS state after an ordinary data mutation.
+ *
+ * This is deliberately not a scheduler: leaf plan dates, durations and work
+ * remain exactly as entered or as last applied by the formal scheduling
+ * workflow. Only parent rollups, actual rollups, CPM metrics and derived
+ * priorities are refreshed here.
+ */
+export const refreshProjectGanttDerivedState = async (
   projectId: string,
   requestedMode?: GanttCalendarMode,
   client: GanttWriteClient = prisma,
-  options: { preservePlannedDates?: boolean } = {},
 ) => {
   const mode = requestedMode ?? await getProjectGanttCalendarMode(projectId, client);
   const [project, currentTasks] = await Promise.all([
@@ -538,7 +709,7 @@ export const recalculateProjectGanttSchedule = async (
       data: { unsupportedReason: UNSUPPORTED_GANTT_DEPENDENCY_REASON },
     });
   }
-  const schedulerTasks = currentTasks.map((task) => ({
+  const derivedTasks = currentTasks.map((task) => ({
     ...task,
     // Preserve imported non-FS data in the database, but never let it silently
     // drive the FS-only scheduler. The affected task stays fixed until the
@@ -551,11 +722,30 @@ export const recalculateProjectGanttSchedule = async (
   const schedulingFinishBoundary = isGanttPlanDate(project?.ganttHardFinishDate)
     ? project!.ganttHardFinishDate
     : project?.expectedEndDate ?? "";
-  const scheduled = rollupGanttParentActuals(rollupGanttParentSchedules(scheduleGanttTasks(schedulerTasks, mode, {
-    projectStartDate: project?.startDate ?? "",
-    expectedEndDate: schedulingFinishBoundary,
-  }), mode));
-  const cpm = calculateGanttCpm(scheduled, mode, schedulingFinishBoundary);
+  const scheduled = rollupGanttParentActuals(
+    rollupGanttParentRelativeSchedules(rollupGanttParentSchedules(derivedTasks, mode)),
+  );
+  const hasConcreteT0 = isGanttPlanDate(project?.startDate);
+  const relativeSchedule = !hasConcreteT0 && scheduled.some((task) => (
+    isGanttRelativeOffset(task.relativeStartOffsetDays)
+    && isGanttRelativeOffset(task.relativeFinishOffsetDays)
+  ));
+  const cpmTasks = relativeSchedule
+    ? scheduled.map((task) => ({
+      ...task,
+      startDate: isGanttRelativeOffset(task.relativeStartOffsetDays)
+        ? abstractDateFromGanttOffset(task.relativeStartOffsetDays)
+        : "",
+      finishDate: isGanttRelativeOffset(task.relativeFinishOffsetDays)
+        ? abstractDateFromGanttOffset(task.relativeFinishOffsetDays)
+        : "",
+    }))
+    : scheduled;
+  const cpm = calculateGanttCpm(
+    cpmTasks,
+    relativeSchedule ? "CALENDAR_DAYS" : mode,
+    relativeSchedule ? "" : schedulingFinishBoundary,
+  );
   const currentById = new Map(currentTasks.map((task) => [task.id, task]));
   const childrenByParentId = new Map<string, string[]>();
   currentTasks.forEach((task) => {
@@ -607,7 +797,18 @@ export const recalculateProjectGanttSchedule = async (
         scheduleStatus: "INVALID_DEPENDENCY" as const,
         isCritical: false,
       }
-      : calculatedMetrics;
+      : calculatedMetrics && relativeSchedule
+        ? {
+          ...calculatedMetrics,
+          // Placeholder dates exist only inside the CPM calculation. Keeping
+          // them out of persistence prevents 2000-era implementation details
+          // from appearing in APIs, exports or the WBS table.
+          earlyStartDate: "",
+          earlyFinishDate: "",
+          lateStartDate: "",
+          lateFinishDate: "",
+        }
+        : calculatedMetrics;
     if (!metrics) return [];
     const effectivePriority = resolveEffectivePriority(task.id);
     const schedulePriority = ganttSchedulePriorityFor(effectivePriority);
@@ -625,7 +826,7 @@ export const recalculateProjectGanttSchedule = async (
       || current.scheduleStatus !== metrics.scheduleStatus
       || current.effectivePriority !== effectivePriority
       || current.schedulePriority !== schedulePriority;
-    const changed = (!options.preservePlannedDates && plannedValuesChanged) || calculatedValuesChanged;
+    const changed = plannedValuesChanged || calculatedValuesChanged;
     return changed ? [{
       id: task.id,
       startDate: task.startDate,
@@ -661,11 +862,98 @@ export const recalculateProjectGanttSchedule = async (
     }] : [];
   });
 
+  const relativeScheduleUpdates = scheduled.flatMap((task) => {
+    const current = currentById.get(task.id)!;
+    const relativeStartOffsetDays = isGanttRelativeOffset(task.relativeStartOffsetDays)
+      ? normalizeGanttRelativeOffset(task.relativeStartOffsetDays)
+      : null;
+    const relativeFinishOffsetDays = isGanttRelativeOffset(task.relativeFinishOffsetDays)
+      ? normalizeGanttRelativeOffset(task.relativeFinishOffsetDays)
+      : null;
+    const changed = current.relativeStartOffsetDays !== relativeStartOffsetDays
+      || current.relativeFinishOffsetDays !== relativeFinishOffsetDays
+      || current.durationDays !== task.durationDays
+      || current.durationMinutes !== task.durationMinutes
+      || Math.abs(current.estimatedWorkHours - task.estimatedWorkHours) > 0.001;
+    return changed ? [{
+      id: task.id,
+      relativeStartOffsetDays,
+      relativeFinishOffsetDays,
+      durationDays: task.durationDays,
+      durationMinutes: task.durationMinutes,
+      estimatedWorkHours: task.estimatedWorkHours,
+    }] : [];
+  });
+
   await Promise.all([
-    bulkUpdateGanttSchedule(client, updates, new Date(), options),
+    bulkUpdateGanttSchedule(client, updates, new Date()),
     bulkUpdateGanttActualRollups(client, actualRollupUpdates),
+    bulkUpdateGanttRelativeSchedules(client, relativeScheduleUpdates),
   ]);
   return mode;
+};
+
+/**
+ * Converts a previously accepted T0-relative schedule to concrete project
+ * dates. The caller owns the surrounding transaction so the project T0 and all
+ * task dates become visible atomically.
+ */
+export const materializeProjectGanttRelativeSchedule = async (
+  projectId: string,
+  concreteT0: string,
+  requestedMode?: GanttCalendarMode,
+  client: GanttWriteClient = prisma,
+) => {
+  if (!isGanttPlanDate(concreteT0)) throw new Error("项目 T0 格式应为 YYYY-MM-DD");
+  const mode = requestedMode ?? await getProjectGanttCalendarMode(projectId, client);
+  const tasks = await client.projectGanttTask.findMany({
+    where: { projectId },
+    select: { id: true, relativeStartOffsetDays: true, relativeFinishOffsetDays: true },
+  });
+  const rows = tasks.flatMap((task) => (
+    isGanttRelativeOffset(task.relativeStartOffsetDays)
+    && isGanttRelativeOffset(task.relativeFinishOffsetDays)
+      ? [{
+        id: task.id,
+        startDate: materializeGanttOffsetDate(concreteT0, task.relativeStartOffsetDays, mode),
+        finishDate: materializeGanttOffsetDate(concreteT0, task.relativeFinishOffsetDays, mode),
+      }]
+      : []
+  ));
+  if (rows.length > 0) {
+    await client.$executeRaw(Prisma.sql`
+      UPDATE "ProjectGanttTask" AS target
+      SET "startDate" = source."startDate",
+          "finishDate" = source."finishDate",
+          "relativeStartOffsetDays" = NULL,
+          "relativeFinishOffsetDays" = NULL,
+          "updatedAt" = NOW()
+      FROM (VALUES ${Prisma.join(rows.map((row) => Prisma.sql`(
+        ${row.id}::text,
+        ${row.startDate}::text,
+        ${row.finishDate}::text
+      )`) )}) AS source("id", "startDate", "finishDate")
+      WHERE target."id" = source."id"
+    `);
+  }
+  await refreshProjectGanttDerivedState(projectId, mode, client);
+  return { materializedTaskCount: rows.length, calendarMode: mode };
+};
+
+/**
+ * Kept for existing routes and extensions. Despite its historical name, this
+ * path only refreshes derived WBS state; it never performs automatic scheduling.
+ */
+export const recalculateProjectGanttSchedule = async (
+  projectId: string,
+  requestedMode?: GanttCalendarMode,
+  client: GanttWriteClient = prisma,
+  _options?: { preservePlannedDates?: boolean },
+) => {
+  // Kept only for third-party extensions compiled against the old API.
+  // The old option never affects scheduling any more.
+  void _options;
+  return refreshProjectGanttDerivedState(projectId, requestedMode, client);
 };
 
 export const replaceGanttTaskDependencies = async (
@@ -1677,7 +1965,7 @@ const deleteGanttTaskIds = async (params: {
     };
   });
   await renumberProjectGanttTaskCodes(params.projectId);
-  await recalculateProjectGanttSchedule(params.projectId);
+  await refreshProjectGanttDerivedState(params.projectId);
   return result;
 };
 
@@ -2001,7 +2289,7 @@ export const restoreGanttTaskDeletionBatch = async (params: {
   });
 
   await renumberProjectGanttTaskCodes(params.projectId);
-  await recalculateProjectGanttSchedule(params.projectId);
+  await refreshProjectGanttDerivedState(params.projectId);
   return result;
 };
 
@@ -2352,7 +2640,7 @@ export const copyProjectGanttTasks = async (params: {
     return ids;
   }, { timeout: 30_000, maxWait: 10_000 });
   await renumberProjectGanttTaskCodes(params.projectId);
-  await recalculateProjectGanttSchedule(params.projectId);
+  await refreshProjectGanttDerivedState(params.projectId);
   return { tasks: serializeGanttTaskList(await getOrderedGanttTasks(params.projectId)), createdTaskIds };
 };
 

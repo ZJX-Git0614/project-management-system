@@ -23,6 +23,15 @@ export type GanttEffectivePriority = GanttUserPriority | "HIGHEST";
 export const GANTT_FS_DEPENDENCY_TYPE = 1;
 export const UNSUPPORTED_GANTT_DEPENDENCY_REASON = "当前阶段仅支持完成-开始（FS）关系";
 
+/**
+ * The WBS editor, automatic scheduler, CPM calculation, and baseline release
+ * must agree on the same dependency contract. Keep the check here instead of
+ * letting each caller infer Project's numeric relationship values differently.
+ */
+export const isGanttFsDependency = (dependency: { type?: number | null }) => (
+  Number(dependency.type ?? GANTT_FS_DEPENDENCY_TYPE) === GANTT_FS_DEPENDENCY_TYPE
+);
+
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 export const isValidPlanningDate = (value: unknown): value is string => (
@@ -437,7 +446,7 @@ export const findGanttHardBoundaryConflicts = <T extends {
       const parent = byId.get(parentId);
       if (!parent) break;
       if (
-        ["TARGET", "LOCKED"].includes(String(parent.parentBoundaryMode))
+        String(parent.parentBoundaryMode) === "LOCKED"
         && isValidPlanningDate(parent.startDate)
         && isValidPlanningDate(parent.finishDate)
         && (task.startDate < parent.startDate || task.finishDate > parent.finishDate)
@@ -447,7 +456,7 @@ export const findGanttHardBoundaryConflicts = <T extends {
           parentId,
           taskCode: task.taskCode ?? task.id,
           parentCode: parent.taskCode ?? parent.id,
-          message: `任务 ${task.taskCode ?? task.id} 超出父任务 ${parent.taskCode ?? parent.id} 的硬边界`,
+          message: `任务 ${task.taskCode ?? task.id} 超出父任务 ${parent.taskCode ?? parent.id} 的锁定边界`,
         });
       }
       parentId = parent.parentId ?? "";
@@ -458,7 +467,7 @@ export const findGanttHardBoundaryConflicts = <T extends {
 
 export const validateFsDependencies = (dependencies: Array<{ type?: number | null }>) => (
   dependencies.flatMap((dependency, index) => (
-    Number(dependency.type ?? GANTT_FS_DEPENDENCY_TYPE) === GANTT_FS_DEPENDENCY_TYPE
+    isGanttFsDependency(dependency)
       ? []
       : [{ index, message: `${UNSUPPORTED_GANTT_DEPENDENCY_REASON}，请先处理其他关系后再自动排期或发布基线` }]
   ))

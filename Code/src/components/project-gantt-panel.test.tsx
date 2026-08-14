@@ -37,6 +37,7 @@ vi.mock("@/components/gantt-timeline", () => ({
     onDeleteSelected,
     onCreateTask,
     onInsertTasks,
+    onReassignBranch,
     onUpdateTask,
     projectMembers,
     tasks,
@@ -45,6 +46,7 @@ vi.mock("@/components/gantt-timeline", () => ({
     onDeleteSelected?: (taskIds: string[]) => void | Promise<void>;
     onCreateTask?: (parentTask?: ProjectGanttTask) => void;
     onInsertTasks?: (anchorTaskId: string, placement: "SIBLING_AFTER", count: number) => void | Promise<void>;
+    onReassignBranch?: (taskId: string, ownerMemberId: string | null) => void | Promise<void>;
     onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft, columnKey?: string) => void | Promise<void>;
     projectMembers: Array<{ id: string }>;
     tasks: ProjectGanttTask[];
@@ -97,6 +99,42 @@ vi.mock("@/components/gantt-timeline", () => ({
         }, "startDate")}
       >
         测试编辑父任务计划
+      </button>
+      <button
+        type="button"
+        onClick={() => void onUpdateTask?.(tasks[0], {
+          taskCategory: tasks[0].taskCategory,
+          taskName: tasks[0].taskName,
+          taskDescription: tasks[0].taskDescription || "无",
+          startDate: tasks[0].startDate,
+          startSlot: "AM",
+          endDate: tasks[0].finishDate ?? "",
+          finishSlot: "PM",
+          durationDays: tasks[0].durationDays,
+          actualStartDate: tasks[0].actualStartDate ?? "",
+          actualStartSlot: "AM",
+          actualEndDate: tasks[0].actualEndDate ?? "",
+          actualFinishSlot: "PM",
+          estimatedWorkHours: tasks[0].estimatedWorkHours ?? 0,
+          actualWorkHours: tasks[0].actualWorkHours ?? 0,
+          progress: tasks[0].progress ?? 0,
+          taskMode: "AUTO",
+          parentBoundaryMode: "ROLLUP",
+          schedulePriority: 500,
+          userPriority: "MEDIUM",
+          effortDriven: false,
+          parallelizable: false,
+          isMilestone: false,
+          ownerMemberId: "member-1",
+          ownerMemberIds: ["member-1"],
+          predecessorTaskIds: [],
+          remark: tasks[0].remark ?? "",
+        }, "owner")}
+      >
+        测试编辑负责人
+      </button>
+      <button type="button" onClick={() => void onReassignBranch?.(tasks[0].id, "member-1")}>
+        测试批量改派负责人
       </button>
     </div>
   ),
@@ -181,6 +219,42 @@ describe("ProjectGanttPanel", () => {
     mocks.post.mockReset();
     mocks.put.mockReset();
     mocks.delete.mockReset();
+  });
+
+  it("shows the WBS load error instead of silently presenting an empty task list", async () => {
+    mocks.get.mockImplementation((url: string) => {
+      const backgroundResponse = backgroundGanttGet(url);
+      if (backgroundResponse) return backgroundResponse;
+      if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      if (url.endsWith("/deletions")) return Promise.resolve([]);
+      return Promise.reject(new Error("接口暂时不可用"));
+    });
+
+    render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
+
+    expect(await screen.findByText("加载项目 WBS 失败")).toBeInTheDocument();
+    expect(screen.getByText("接口暂时不可用")).toBeInTheDocument();
+  });
+
+  it("revalidates an initially empty WBS response before showing an empty plan", async () => {
+    let taskRequestCount = 0;
+    mocks.get.mockImplementation((url: string) => {
+      const backgroundResponse = backgroundGanttGet(url);
+      if (backgroundResponse) return backgroundResponse;
+      if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      if (url.endsWith("/deletions")) return Promise.resolve([]);
+      taskRequestCount += 1;
+      return Promise.resolve(taskRequestCount === 1 ? [] : [rootTask]);
+    });
+
+    render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
+
+    await waitFor(() => expect(screen.getByTestId("task-count")).toHaveTextContent("1"));
+    expect(mocks.get).toHaveBeenCalledWith(expect.stringMatching(/\/api\/projects\/project-1\/gantt-tasks\?refresh=/));
   });
 
   it.each([
@@ -347,6 +421,111 @@ describe("ProjectGanttPanel", () => {
       }),
     ));
   });
+
+  it("saves an owner change directly without opening the manual schedule impact flow", async () => {
+    mocks.get.mockImplementation((url: string) => {
+      const backgroundResponse = backgroundGanttGet(url);
+      if (backgroundResponse) return backgroundResponse;
+      if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      if (url.endsWith("/deletions")) return Promise.resolve([]);
+      return Promise.resolve([rootTask]);
+    });
+    mocks.post.mockResolvedValue({ snapshotId: "owner-snapshot" });
+    mocks.put.mockResolvedValue({ ...rootTask, ownerMemberId: "member-1" });
+
+    render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
+
+    const user = userEvent.setup();
+    await screen.findByTestId("gantt-timeline");
+    await user.click(screen.getByRole("button", { name: "测试编辑负责人" }));
+
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith(
+      "/api/projects/project-1/gantt-tasks/task-1",
+      expect.objectContaining({ ownerMemberId: "member-1", ownerMemberIds: ["member-1"] }),
+    ));
+    expect(mocks.put.mock.calls.some(([, body]) => Boolean((body as Record<string, unknown>).previewScheduleImpact))).toBe(false);
+  });
+
+  it("sends branch reassignment as an explicit owner operation", async () => {
+    mocks.get.mockImplementation((url: string) => {
+      const backgroundResponse = backgroundGanttGet(url);
+      if (backgroundResponse) return backgroundResponse;
+      if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      if (url.endsWith("/deletions")) return Promise.resolve([]);
+      return Promise.resolve([rootTask, childTask]);
+    });
+    mocks.post.mockResolvedValue({ snapshotId: "branch-owner-snapshot" });
+    mocks.put.mockResolvedValue({ ...rootTask, ownerMemberId: "member-1" });
+
+    render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
+
+    const user = userEvent.setup();
+    await screen.findByTestId("gantt-timeline");
+    await user.click(screen.getByRole("button", { name: "测试批量改派负责人" }));
+
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith(
+      "/api/projects/project-1/gantt-tasks/task-1",
+      { ownerMemberId: "member-1", ownerChangeMode: "BRANCH_REASSIGN" },
+    ));
+  });
+
+  it("does not let a stalled history snapshot block applying duration suggestions", async () => {
+    mocks.get.mockImplementation((url: string) => {
+      if (url.includes("/gantt-tasks/resource-schedule") && url.includes("includeCandidates=1")) {
+        return Promise.resolve({
+          revision: 0,
+          snapshotHash: "duration-suggestion-test",
+          conflicts: [],
+          issues: [],
+          candidates: [],
+          durationSuggestions: [{
+            taskId: rootTask.id,
+            parentTaskId: "",
+            ownerKey: "member-1",
+            suggestedDurationDays: 2,
+            source: "SYSTEM_SUGGESTED",
+            reason: "测试建议",
+          }],
+          durationSuggestionIssues: [],
+        });
+      }
+      const backgroundResponse = backgroundGanttGet(url);
+      if (backgroundResponse) return backgroundResponse;
+      if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      if (url.endsWith("/deletions")) return Promise.resolve([]);
+      return Promise.resolve([rootTask]);
+    });
+    mocks.post.mockImplementation((url: string) => {
+      if (url.endsWith("/history/snapshots")) return new Promise(() => {});
+      if (url.endsWith("/resource-schedule")) return Promise.resolve({ message: "已确认 1 条系统建议工期" });
+      return Promise.resolve({});
+    });
+
+    render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
+
+    const user = userEvent.setup();
+    await screen.findByTestId("gantt-timeline");
+    await user.click(screen.getByRole("button", { name: /自动排期/ }));
+    await screen.findByText("系统建议工期");
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "确认选中建议 1" }));
+
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledWith(
+      "/api/projects/project-1/gantt-tasks/resource-schedule",
+      expect.objectContaining({
+        action: "APPLY_DURATION_SUGGESTIONS",
+        taskIds: [rootTask.id],
+      }),
+    ), { timeout: 7_000 });
+    expect(await screen.findByText("操作已完成，但未加入撤销历史", {}, { timeout: 7_000 })).toBeInTheDocument();
+    expect(screen.queryByText("正式自动排期预览")).not.toBeInTheDocument();
+  }, 10_000);
 
   it("records structure changes as snapshots and restores the before snapshot on undo", async () => {
     mocks.get.mockImplementation((url: string) => {

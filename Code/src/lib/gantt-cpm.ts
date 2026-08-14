@@ -5,6 +5,8 @@ import {
   shiftTaskDate,
   type GanttCalendarMode,
 } from "@/lib/gantt-calendar";
+import { isGanttFsDependency } from "@/lib/gantt-planning-rules";
+import { buildGanttLeafScheduleNetwork } from "@/lib/gantt-schedule-network";
 
 export const GANTT_MINUTES_PER_DAY = GANTT_HOURS_PER_DAY * 60;
 export const GANTT_NEAR_CRITICAL_MINUTES = GANTT_MINUTES_PER_DAY * 2;
@@ -155,16 +157,10 @@ const finishDateFromMinutes = (
 
 const dependencyWeight = (
   predecessorDuration: number,
-  successorDuration: number,
   dependency: CpmGanttDependency,
 ) => {
   const lag = ganttDependencyLagMinutes(dependency);
-  switch (Number.isInteger(dependency.type) ? dependency.type : 1) {
-    case 0: return predecessorDuration - successorDuration + lag; // FF
-    case 2: return -successorDuration + lag; // SF
-    case 3: return lag; // SS
-    default: return predecessorDuration + lag; // FS
-  }
+  return predecessorDuration + lag;
 };
 
 const emptyMetrics = (status: GanttScheduleStatus = "UNSCHEDULED"): GanttCpmMetrics => ({
@@ -240,7 +236,9 @@ export const calculateGanttCpm = (
     childrenByParentId.set(task.parentId, [...(childrenByParentId.get(task.parentId) ?? []), task.id]);
   });
   const taskById = new Map(tasks.map((task) => [task.id, task]));
-  const networkTasks = tasks.filter((task) => !childrenByParentId.has(task.id));
+  const expandedNetwork = buildGanttLeafScheduleNetwork(tasks);
+  const leafTaskIdSet = new Set(expandedNetwork.leafTaskIds);
+  const networkTasks = expandedNetwork.tasks.filter((task) => leafTaskIdSet.has(task.id));
   const networkTaskById = new Map(networkTasks.map((task) => [task.id, task]));
   const durationById = new Map(networkTasks.map((task) => [task.id, taskDurationMinutes(task, mode)]));
   const schedulableIds = new Set(networkTasks
@@ -253,6 +251,10 @@ export const calculateGanttCpm = (
   for (const successor of networkTasks) {
     for (const dependency of successor.predecessorDependencies ?? []) {
       if (!schedulableIds.has(successor.id)) continue;
+      if (!isGanttFsDependency(dependency)) {
+        invalidDependencyIds.add(successor.id);
+        continue;
+      }
       if (!schedulableIds.has(dependency.predecessorTaskId)) {
         if (taskById.has(dependency.predecessorTaskId)) invalidDependencyIds.add(successor.id);
         continue;
@@ -262,7 +264,6 @@ export const calculateGanttCpm = (
         successorTaskId: successor.id,
         weightMinutes: dependencyWeight(
           durationById.get(dependency.predecessorTaskId) ?? 0,
-          durationById.get(successor.id) ?? 0,
           dependency,
         ),
       };
