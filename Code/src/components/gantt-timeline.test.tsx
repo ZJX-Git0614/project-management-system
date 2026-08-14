@@ -43,6 +43,30 @@ describe("GanttTimeline performance", () => {
     expect(screen.getAllByTitle(/抽象阶段:/).length).toBeGreaterThan(0);
   });
 
+  it("uses the remaining timeline width for task and owner labels", () => {
+    const ownerName = "赵佳鑫（项目经理兼总体负责人）";
+    render(<GanttTimeline tasks={[
+      task(1, {
+        taskName: "跨阶段总体任务",
+        startDate: "2026-07-01",
+        finishDate: "2026-07-10",
+        durationDays: 10,
+        ownerMembers: [{
+          id: "member-1",
+          accountId: "account-1",
+          personName: ownerName,
+          roleName: "项目经理",
+          roleNames: ["项目经理"],
+        }],
+      }),
+    ]} canEdit />);
+
+    const label = screen.getByText(`跨阶段总体任务 · ${ownerName}`);
+    expect(label).toHaveClass("absolute", "left-full");
+    expect(label).not.toHaveClass("max-w-[220px]");
+    expect(Number.parseFloat(label.getAttribute("style")?.match(/width:\s*([\d.]+)px/)?.[1] ?? "0")).toBeGreaterThan(220);
+  });
+
   it("renders an unscheduled WBS instead of treating it as an empty project", () => {
     render(<GanttTimeline
       tasks={[
@@ -181,8 +205,7 @@ describe("GanttTimeline performance", () => {
     expect(within(childRow!).getByRole("button", { name: "负责人" })).toBeEnabled();
   });
 
-  it("does not submit a parent owner rollup when changing its scheduling mode", async () => {
-    const onUpdateTask = vi.fn();
+  it("keeps task settings limited to priority and parent boundaries", async () => {
     render(<GanttTimeline
       tasks={[
         task(1, {
@@ -197,22 +220,98 @@ describe("GanttTimeline performance", () => {
         task(2, { parentId: "task-1", taskCode: "Task001.001", taskName: "子任务" }),
       ]}
       canEdit
-      onUpdateTask={onUpdateTask}
     />);
 
     fireEvent.contextMenu(screen.getByText("Task001"));
-    await userEvent.hover(screen.getByRole("menuitem", { name: "排期设置" }));
-    await userEvent.click(screen.getByRole("menuitemradio", { name: /工期固定 · 正排/ }));
+    await userEvent.hover(screen.getByRole("menuitem", { name: "任务设置" }));
 
-    expect(onUpdateTask).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "task-1" }),
-      expect.objectContaining({
-        taskMode: "DURATION_FORWARD",
-        ownerMemberId: null,
-        ownerMemberIds: [],
-      }),
-      "taskMode",
-    );
+    const submenu = screen.getByRole("menu", { name: "任务设置" });
+    expect(within(submenu).getByText("任务优先级")).toBeInTheDocument();
+    expect(within(submenu).getByText("父任务边界")).toBeInTheDocument();
+    expect(within(submenu).queryByText("任务排期方式")).not.toBeInTheDocument();
+    expect(within(submenu).queryByText("自动排期")).not.toBeInTheDocument();
+    expect(within(submenu).queryByText("工期固定 · 正排")).not.toBeInTheDocument();
+    expect(within(submenu).queryByText("工期固定 · 倒排")).not.toBeInTheDocument();
+    expect(within(submenu).queryByText("日期固定")).not.toBeInTheDocument();
+  });
+
+  it("filters to every critical path while retaining the required ancestors", async () => {
+    render(<GanttTimeline
+      tasks={[
+        task(1, { taskName: "关键父任务", totalFloatMinutes: 450 }),
+        task(2, {
+          parentId: "task-1",
+          taskCode: "Task001.001",
+          taskName: "关键子任务",
+          totalFloatMinutes: 0,
+        }),
+        task(3, { taskName: "普通任务", totalFloatMinutes: 450 }),
+      ]}
+      canEdit
+    />);
+
+    const criticalButton = screen.getByRole("button", { name: "关键路径 1 条" });
+    await userEvent.click(criticalButton);
+
+    expect(screen.getByDisplayValue("关键父任务")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("关键子任务")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("普通任务")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "显示全部 1 条" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("renders FS and resource-chain connectors as solid lines with distinct tones", () => {
+    render(<GanttTimeline
+      tasks={[
+        task(1, { totalFloatMinutes: 0 }),
+        task(2, {
+          startDate: "2026-07-29",
+          finishDate: "2026-07-29",
+          predecessorTaskIds: ["task-1"],
+          totalFloatMinutes: 0,
+        }),
+        task(3, { startDate: "2026-07-30", finishDate: "2026-07-30", totalFloatMinutes: 450 }),
+        task(4, {
+          startDate: "2026-07-31",
+          finishDate: "2026-07-31",
+          predecessorTaskIds: ["task-3"],
+          totalFloatMinutes: 450,
+        }),
+      ]}
+      resourceCriticalChainLinks={[{
+        predecessorTaskId: "task-2",
+        successorTaskId: "task-3",
+        ownerKey: "account:user-1",
+      }]}
+    />);
+
+    const criticalFs = document.querySelector('[data-gantt-link-tone="critical"]');
+    const regularFs = document.querySelector('[data-gantt-link-tone="dependency"]');
+    const resourceChain = document.querySelector('[data-gantt-link-tone="resource"]');
+    expect(criticalFs).toHaveAttribute("stroke", "#ef4444");
+    expect(regularFs).toHaveAttribute("stroke", "#cbd5e1");
+    expect(resourceChain).toHaveAttribute("stroke", "#38bdf8");
+    expect(criticalFs).not.toHaveAttribute("stroke-dasharray");
+    expect(regularFs).not.toHaveAttribute("stroke-dasharray");
+    expect(resourceChain).not.toHaveAttribute("stroke-dasharray");
+  });
+
+  it("fits the timeline zoom to the visible project duration and viewport", async () => {
+    render(<GanttTimeline
+      tasks={[
+        task(1, {
+          startDate: "2026-07-01",
+          finishDate: "2026-08-29",
+          durationDays: 60,
+        }),
+      ]}
+      canEdit
+    />);
+
+    const viewport = screen.getByTestId("gantt-scroll-viewport");
+    Object.defineProperty(viewport, "clientWidth", { configurable: true, value: 1_000 });
+    fireEvent.scroll(viewport);
+
+    await waitFor(() => expect(screen.getByText("30天")).toBeInTheDocument());
   });
 
   it("hides optional columns from both the header and task rows", async () => {

@@ -124,6 +124,55 @@ describe("gantt baseline contracts", () => {
     }));
   });
 
+  it("does not treat the backward WBS anchor as a permanent baseline deadline", async () => {
+    const client = {
+      project: {
+        findUnique: async () => ({
+          ganttCalendarMode: "CALENDAR_DAYS",
+          ganttHardFinishDate: "2026-08-10",
+        }),
+      },
+      projectGanttTask: {
+        findMany: async () => [{
+          id: "task-1",
+          parentId: null,
+          taskCode: "Task1",
+          taskName: "任务 A",
+          startDate: "2026-08-11",
+          finishDate: "2026-08-12",
+          relativeStartOffsetDays: null,
+          relativeFinishOffsetDays: null,
+          durationDays: 2,
+          durationMinutes: 960,
+          estimatedWorkHours: 15,
+          progress: 0,
+          taskMode: "AUTO",
+          effortDriven: false,
+          parallelizable: false,
+          sortOrder: 1,
+          isMilestone: false,
+          parentBoundaryMode: "ROLLUP",
+          scheduleStatus: "SCHEDULED",
+          ownerMemberId: null,
+          ownerLinks: [],
+        }],
+      },
+      projectGanttDependency: {
+        findMany: async () => [],
+      },
+      projectMember: {
+        findMany: async () => [],
+      },
+    } as unknown as Parameters<typeof validateProjectGanttBaseline>[1];
+
+    const result = await validateProjectGanttBaseline("project-1", client);
+
+    expect(result.valid).toBe(true);
+    expect(result.blockers).not.toContainEqual(expect.objectContaining({
+      message: expect.stringContaining("WBS 完成"),
+    }));
+  });
+
   it("blocks baseline publication when a single member exceeds capacity", async () => {
     const client = {
       project: {
@@ -200,6 +249,91 @@ describe("gantt baseline contracts", () => {
     expect(result.blockers).toContainEqual(expect.objectContaining({
       code: "RESOURCE_CONFLICT",
       taskIds: expect.arrayContaining(["task-1", "task-2"]),
+    }));
+  });
+
+  it("keeps shared-person conflicts from other projects as publication warnings", async () => {
+    const currentTask = {
+      id: "current-task",
+      parentId: null,
+      taskCode: "Task1",
+      taskName: "当前项目任务",
+      startDate: "2026-08-10",
+      finishDate: "2026-08-10",
+      relativeStartOffsetDays: null,
+      relativeFinishOffsetDays: null,
+      durationDays: 1,
+      durationMinutes: 480,
+      estimatedWorkHours: 7.5,
+      progress: 0,
+      taskMode: "AUTO",
+      effortDriven: false,
+      parallelizable: false,
+      sortOrder: 1,
+      isMilestone: false,
+      parentBoundaryMode: "ROLLUP",
+      scheduleStatus: "SCHEDULED",
+      ownerMemberId: "member-current",
+      ownerLinks: [{ projectMemberId: "member-current", unitsPercent: 100, plannedWorkHours: 7.5 }],
+    };
+    const otherTask = {
+      ...currentTask,
+      id: "other-task",
+      projectId: "project-2",
+      taskCode: "Task2",
+      taskName: "其他项目任务",
+      ownerMemberId: "member-other",
+      ownerLinks: [{ projectMemberId: "member-other", unitsPercent: 100, plannedWorkHours: 7.5 }],
+    };
+    const client = {
+      project: {
+        findUnique: async () => ({ ganttHardFinishDate: "", ganttCalendarMode: "CALENDAR_DAYS" }),
+        findMany: async () => [
+          { id: "project-1", name: "当前项目" },
+          { id: "project-2", name: "其他项目" },
+        ],
+      },
+      projectGanttTask: {
+        findMany: async (args: { where: { projectId: string | { in: string[] } } }) => (
+          args.where.projectId === "project-1" ? [currentTask] : [otherTask]
+        ),
+      },
+      projectGanttDependency: {
+        findMany: async () => [],
+      },
+      projectMember: {
+        findMany: async (args: { where: { projectId: string | { in: string[] } } }) => (
+          args.where.projectId === "project-1"
+            ? [{
+              id: "member-current",
+              projectId: "project-1",
+              accountId: "account-shared",
+              personName: "王工",
+              capacityHoursPerDay: 7.5,
+              productivityRate: 1,
+              maxConcurrentAssignments: 1,
+            }]
+            : [{
+              id: "member-other",
+              projectId: "project-2",
+              accountId: "account-shared",
+              personName: "王工",
+              capacityHoursPerDay: 7.5,
+              productivityRate: 1,
+              maxConcurrentAssignments: 1,
+            }]
+        ),
+      },
+    } as unknown as Parameters<typeof validateProjectGanttBaseline>[1];
+
+    const result = await validateProjectGanttBaseline("project-1", client);
+
+    expect(result.valid).toBe(true);
+    expect(result.blockers).not.toContainEqual(expect.objectContaining({ code: "RESOURCE_CONFLICT" }));
+    expect(result.warnings).toContainEqual(expect.objectContaining({
+      code: "CROSS_PROJECT_RESOURCE_CONFLICT",
+      taskIds: ["current-task"],
+      projectIds: ["project-2"],
     }));
   });
 });

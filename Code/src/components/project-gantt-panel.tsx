@@ -74,7 +74,11 @@ interface GanttTransferCapabilities {
 interface GanttSettings {
   calendarMode: GanttCalendarMode;
   hoursPerDay: number;
-  hardFinishDate: string;
+  /** Optional backward-scheduling anchor. Stored in the legacy hard-finish column. */
+  wbsFinishDate: string;
+  projectStartDate: string;
+  /** Backward compatibility for a client that has not yet switched to wbsFinishDate. */
+  hardFinishDate?: string;
 }
 
 interface GanttDeleteResult {
@@ -287,6 +291,8 @@ type ResourceScheduleRequest = {
   scopeRootTaskIds: string[];
   modeOverride: ResourceScheduleModeOverride;
   scopeLabel: string;
+  /** A calendar switch is previewed first and persisted only when a candidate is applied. */
+  calendarModeOverride?: GanttCalendarMode;
 };
 
 const DEFAULT_RESOURCE_SCHEDULE_REQUEST: ResourceScheduleRequest = {
@@ -414,8 +420,9 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([]);
   const [calendarMode, setCalendarMode] = useState<GanttCalendarMode>("CALENDAR_DAYS");
   const [savingCalendarMode, setSavingCalendarMode] = useState(false);
-  const [hardFinishDate, setHardFinishDate] = useState("");
-  const [savingHardFinishDate, setSavingHardFinishDate] = useState(false);
+  const [projectStartDate, setProjectStartDate] = useState("");
+  const [wbsFinishDate, setWbsFinishDate] = useState("");
+  const [savingScheduleAnchor, setSavingScheduleAnchor] = useState(false);
   const [loading, setLoading] = useState(true);
   const [creatingParentId, setCreatingParentId] = useState<string | null>(null);
   const [savingTaskId, setSavingTaskId] = useState<string | null>(null);
@@ -448,6 +455,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const [baselineDialogOpen, setBaselineDialogOpen] = useState(false);
   const [baselineReason, setBaselineReason] = useState("");
   const [baselineBusy, setBaselineBusy] = useState(false);
+  const [baselinePendingAction, setBaselinePendingAction] = useState<"VALIDATE" | "BEGIN_CHANGE" | "PUBLISH" | "REQUEST_APPROVAL" | null>(null);
   const historyFocusRequestIdRef = useRef(0);
   const resourceAnalysisRequestIdRef = useRef(0);
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -501,6 +509,9 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       request.scopeRootTaskIds.forEach((taskId) => query.append("scopeRootTaskId", taskId));
       if (includeCandidates && request.modeOverride !== "PRESERVE") {
         query.set("modeOverride", request.modeOverride);
+      }
+      if (includeCandidates && request.calendarModeOverride) {
+        query.set("calendarMode", request.calendarModeOverride);
       }
       const data = await api.get<ResourceScheduleAnalysisView>(
         `/api/projects/${projectId}/gantt-tasks/resource-schedule${query.size > 0 ? `?${query.toString()}` : ""}`,
@@ -592,13 +603,15 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       api.get<ProjectMember[]>(`/api/projects/${projectId}/members`).then(setProjectMembers),
       api.get<GanttSettings>(`/api/projects/${projectId}/gantt-settings`).then((settings) => {
         setCalendarMode(settings.calendarMode);
-        setHardFinishDate(settings.hardFinishDate || "");
+        setProjectStartDate(settings.projectStartDate || "");
+        setWbsFinishDate(settings.wbsFinishDate || settings.hardFinishDate || "");
       }),
       fetchBaselineOverview(),
     ]).catch(() => {
       setProjectMembers([]);
       setCalendarMode("CALENDAR_DAYS");
-      setHardFinishDate("");
+      setProjectStartDate("");
+      setWbsFinishDate("");
     });
   }, [fetchBaselineOverview, projectId]);
 
@@ -672,22 +685,24 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       });
       return;
     }
-    const defaultRequest = (scopeRootTaskIds: string[], scopeLabel: string): ResourceScheduleRequest => ({
-      scopeRootTaskIds,
-      modeOverride: "PRESERVE",
+    // Formal scheduling always solves the entire project network.  A parent
+    // context-menu entry is only a convenient entry point; treating all other
+    // branches as fixed reservations produced invalid results for cross-branch
+    // FS dependencies and shared owners.
+    const defaultRequest = (scopeLabel: string): ResourceScheduleRequest => ({
+      scopeRootTaskIds: [],
+      modeOverride: autoScheduleModeOverride,
       scopeLabel,
     });
     if (candidates.length === 1) {
       const scopeTask = candidates[0];
       void openResourceScheduleDialog(defaultRequest(
-        [scopeTask.id],
-        `${scopeTask.taskCode || "父任务"} · ${scopeTask.taskName || "未命名任务"}及其子任务`,
+        `全项目正式排期（从 ${scopeTask.taskCode || "父任务"} · ${scopeTask.taskName || "未命名任务"} 发起）`,
       ));
       return;
     }
     setAutoScheduleScopeTask(parentTask);
     setAutoScheduleScopeIds(candidates.map((task) => task.id));
-    setAutoScheduleModeOverride("PRESERVE");
   };
   const toggleAutoScheduleScopeTask = (taskId: string) => {
     setAutoScheduleScopeIds((current) => current.includes(taskId)
@@ -701,9 +716,9 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     if (selected.length === 0) return;
     setAutoScheduleScopeTask(null);
     void openResourceScheduleDialog({
-      scopeRootTaskIds: selected.map((task) => task.id),
+      scopeRootTaskIds: [],
       modeOverride: autoScheduleModeOverride,
-      scopeLabel: `${parentTask.taskCode || "父任务"} · ${parentTask.taskName || "未命名任务"}下 ${selected.length} 个末级父任务`,
+      scopeLabel: `全项目正式排期（关注 ${parentTask.taskCode || "父任务"} 下 ${selected.length} 个末级父任务）`,
     });
   };
   const importPreviewDepthById = useMemo(
@@ -831,7 +846,13 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
             snapshotHash: resourceAnalysis.snapshotHash,
             scopeRootTaskIds: resourceScheduleRequest.scopeRootTaskIds,
             modeOverride: resourceScheduleRequest.modeOverride,
+            ...(resourceScheduleRequest.calendarModeOverride
+              ? { calendarMode: resourceScheduleRequest.calendarModeOverride }
+              : {}),
           });
+          if (resourceScheduleRequest.calendarModeOverride) {
+            setCalendarMode(resourceScheduleRequest.calendarModeOverride);
+          }
           await fetchTasks();
         },
       );
@@ -1301,44 +1322,48 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
 
   const changeCalendarMode = async (nextMode: GanttCalendarMode) => {
     if (nextMode === calendarMode || savingCalendarMode || !canEdit) return;
+    const accepted = await confirm("切换排期方式时导致资源重新计算，是否继续？\n\n系统会先计算正式自动排期预览；只有在预览中点击“应用正式排期”后才会写入项目。 ");
+    if (!accepted) return;
     setSavingCalendarMode(true);
     try {
-      await runWithSnapshotHistory("修改工期计算方式", { taskIds: [] }, async () => {
-        const settings = await api.put<GanttSettings>(`/api/projects/${projectId}/gantt-settings`, {
-          calendarMode: nextMode,
-        });
-        setCalendarMode(settings.calendarMode);
-        await fetchTasks();
+      await openResourceScheduleDialog({
+        scopeRootTaskIds: [],
+        modeOverride: autoScheduleModeOverride,
+        calendarModeOverride: nextMode,
+        scopeLabel: `全项目 · ${nextMode === "WORKING_DAYS" ? "工作日" : "自然日"}排期预览`,
       });
     } catch (error) {
-      alert(error instanceof Error ? error.message : "工期计算方式保存失败");
+      setOperationError({
+        title: "排期方式预览失败",
+        message: error instanceof Error ? error.message : "无法计算工期方式切换后的排期预览",
+      });
     } finally {
       setSavingCalendarMode(false);
     }
   };
 
-  const changeHardFinishDate = async (nextValue: string) => {
-    if (savingHardFinishDate || !canEdit) return;
-    const normalized = nextValue.trim();
-    setSavingHardFinishDate(true);
+  const updateScheduleAnchors = async (changes: Partial<Pick<GanttSettings, "projectStartDate" | "wbsFinishDate">>) => {
+    if (savingScheduleAnchor || !canEdit) return;
+    setSavingScheduleAnchor(true);
     try {
-      await runWithSnapshotHistory("修改项目硬完成时间", { taskIds: [] }, async () => {
-        const settings = await api.put<GanttSettings>(`/api/projects/${projectId}/gantt-settings`, {
-          hardFinishDate: normalized,
-        });
-        setCalendarMode(settings.calendarMode);
-        setHardFinishDate(settings.hardFinishDate || "");
-        await fetchTasks();
+      const settings = await api.put<GanttSettings>(`/api/projects/${projectId}/gantt-settings`, {
+        ...changes,
       });
+      setCalendarMode(settings.calendarMode);
+      setProjectStartDate(settings.projectStartDate || "");
+      setWbsFinishDate(settings.wbsFinishDate || settings.hardFinishDate || "");
     } catch (error) {
       setOperationError({
-        title: "项目硬完成时间保存失败",
+        title: "项目排期锚点保存失败",
         message: error instanceof Error ? error.message : "保存失败",
       });
       const settings = await api.get<GanttSettings>(`/api/projects/${projectId}/gantt-settings`).catch(() => null);
-      if (settings) setHardFinishDate(settings.hardFinishDate || "");
+      if (settings) {
+        setProjectStartDate(settings.projectStartDate || "");
+        setWbsFinishDate(settings.wbsFinishDate || settings.hardFinishDate || "");
+      }
     } finally {
-      setSavingHardFinishDate(false);
+      setSavingScheduleAnchor(false);
     }
   };
 
@@ -1347,16 +1372,21 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   ) => {
     if (baselineBusy) return;
     setBaselineBusy(true);
+    setBaselinePendingAction(action);
     try {
       await api.post(`/api/projects/${projectId}/gantt-tasks/baseline`, {
         action,
         reason: baselineReason.trim(),
       });
-      await Promise.all([fetchTasks(), fetchBaselineOverview()]);
       if (action === "PUBLISH") {
         setBaselineDialogOpen(false);
         setBaselineReason("");
+        // Publishing may rebuild every derived field. Close the modal as soon
+        // as the server confirms publication, then refresh in the background.
+        void Promise.all([fetchTasks({ forceFresh: true }), fetchBaselineOverview()]);
+        return;
       }
+      await Promise.all([fetchTasks(), fetchBaselineOverview()]);
     } catch (error) {
       setOperationError({
         title: action === "PUBLISH" ? "发布 WBS 基线失败" : "WBS 基线操作失败",
@@ -1364,6 +1394,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       });
     } finally {
       setBaselineBusy(false);
+      setBaselinePendingAction(null);
     }
   };
 
@@ -1497,7 +1528,12 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                     type="button"
                     size="icon"
                     variant="ghost"
-                    className={cn("size-8 rounded-none", scheduleView === value && "bg-primary/12 text-foreground")}
+                    className={cn(
+                      "size-8 rounded-none border transition-colors",
+                      scheduleView === value
+                        ? "app-control-selected"
+                        : "border-transparent text-muted-foreground hover:bg-muted/70 hover:text-foreground",
+                    )}
                     aria-pressed={scheduleView === value}
                     aria-label={label}
                     title={label}
@@ -1532,7 +1568,11 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   resourceAttentionCount > 0 && "text-destructive hover:bg-destructive/8 hover:text-destructive",
                 )}
                 disabled={resourceAnalysisLoading}
-                onClick={() => void openResourceScheduleDialog()}
+                onClick={() => void openResourceScheduleDialog({
+                  scopeRootTaskIds: [],
+                  modeOverride: autoScheduleModeOverride,
+                  scopeLabel: "全项目正式排期",
+                })}
                 title={resourceAttentionCount > 0 ? "查看正式自动排期预览、资源冲突和排期约束" : "计算正式自动排期预览"}
               >
                 <WandSparkles className="size-3.5" />
@@ -1579,7 +1619,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   className={cn(
                     "h-8 rounded-r-none px-3 text-xs shadow-none",
                     calendarMode === "CALENDAR_DAYS"
-                      ? "z-10 border-primary/45 bg-primary/10 text-foreground"
+                      ? "app-control-selected z-10"
                       : "bg-background/35 text-muted-foreground",
                   )}
                   aria-pressed={calendarMode === "CALENDAR_DAYS"}
@@ -1595,7 +1635,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   className={cn(
                     "-ml-px h-8 rounded-l-none px-3 text-xs shadow-none",
                     calendarMode === "WORKING_DAYS"
-                      ? "z-10 border-primary/45 bg-primary/10 text-foreground"
+                      ? "app-control-selected z-10"
                       : "bg-background/35 text-muted-foreground",
                   )}
                   aria-pressed={calendarMode === "WORKING_DAYS"}
@@ -1605,27 +1645,62 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   <BriefcaseBusiness className="size-3.5" />工作日
                 </Button>
               </div>
-              <label className="flex h-8 items-center gap-2 rounded-md border border-border/70 bg-background/35 px-2 text-xs text-muted-foreground" title="设置后，任何任务及其子任务都不能超过该完成日期；存在冲突时不能发布基线">
-                <span className="whitespace-nowrap">项目硬完成</span>
-                <Input
-                  type="date"
-                  value={hardFinishDate}
-                  onChange={(event) => setHardFinishDate(event.target.value)}
-                  onBlur={(event) => void changeHardFinishDate(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") event.currentTarget.blur();
-                    if (event.key === "Escape") {
-                      event.preventDefault();
-                      void api.get<GanttSettings>(`/api/projects/${projectId}/gantt-settings`)
-                        .then((settings) => setHardFinishDate(settings.hardFinishDate || ""));
-                      event.currentTarget.blur();
-                    }
-                  }}
-                  className="h-6 w-[132px] border-0 bg-transparent px-0 text-xs shadow-none focus-visible:ring-0"
-                  disabled={!canEdit || savingHardFinishDate}
-                  aria-label="项目硬完成时间"
-                />
-              </label>
+              <Select
+                value={autoScheduleModeOverride}
+                onChange={(event) => setAutoScheduleModeOverride(event.target.value as ResourceScheduleModeOverride)}
+                className="app-control-selected h-8 w-[156px] text-xs"
+                disabled={!canEditPlanning}
+                aria-label="全局排期方式"
+                title="选择后点击“自动排期”生成全项目预览；预览应用前不会写入正式计划"
+              >
+                <option value="PRESERVE">排期方式：不变</option>
+                <option value="DURATION_FORWARD">工期固定 · 正排</option>
+                <option value="DURATION_BACKWARD">工期固定 · 倒排</option>
+              </Select>
+              {autoScheduleModeOverride === "DURATION_FORWARD" && (
+                <label className="flex h-8 items-center gap-2 rounded-md border border-border/70 bg-background/35 px-2 text-xs text-muted-foreground" title="正排以项目 T0 为起点；未填写时预览以 T0+N 工作日显示">
+                  <span className="whitespace-nowrap">项目 T0</span>
+                  <Input
+                    type="date"
+                    value={projectStartDate}
+                    onChange={(event) => setProjectStartDate(event.target.value)}
+                    onBlur={(event) => void updateScheduleAnchors({ projectStartDate: event.target.value })}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") event.currentTarget.blur();
+                      if (event.key === "Escape") {
+                        event.preventDefault();
+                        setProjectStartDate(projectStartDate);
+                        event.currentTarget.blur();
+                      }
+                    }}
+                    className="h-6 w-[132px] border-0 bg-transparent px-0 text-xs shadow-none focus-visible:ring-0"
+                    disabled={!canEditPlanning || savingScheduleAnchor}
+                    aria-label="项目 T0 日期"
+                  />
+                </label>
+              )}
+              {autoScheduleModeOverride === "DURATION_BACKWARD" && (
+                <label className="flex h-8 items-center gap-2 rounded-md border border-border/70 bg-background/35 px-2 text-xs text-muted-foreground" title="倒排以 WBS 完成锚点为终点；未填写时预览以 T0+N 工作日显示">
+                  <span className="whitespace-nowrap">WBS 完成</span>
+                  <Input
+                    type="date"
+                    value={wbsFinishDate}
+                    onChange={(event) => setWbsFinishDate(event.target.value)}
+                    onBlur={(event) => void updateScheduleAnchors({ wbsFinishDate: event.target.value })}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") event.currentTarget.blur();
+                      if (event.key === "Escape") {
+                        event.preventDefault();
+                        setWbsFinishDate(wbsFinishDate);
+                        event.currentTarget.blur();
+                      }
+                    }}
+                    className="h-6 w-[132px] border-0 bg-transparent px-0 text-xs shadow-none focus-visible:ring-0"
+                    disabled={!canEditPlanning || savingScheduleAnchor}
+                    aria-label="WBS 完成日期"
+                  />
+                </label>
+              )}
               {canCreate && (
                 <>
                   <input
@@ -1764,7 +1839,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
           <DialogHeader>
             <DialogTitle>WBS 基线管理</DialogTitle>
             <DialogDescription>
-              基线发布前可自由调整计划。发布后任务结构、计划日期、工期、负责人、依赖关系和项目硬完成时间将锁定；实际工时、实际日期和进度仍可持续更新。
+              基线发布前可自由调整计划。发布后任务结构、计划日期、工期、负责人、依赖关系以及项目排期锚点将锁定；实际工时、实际日期和进度仍可持续更新。
             </DialogDescription>
           </DialogHeader>
           {!baselineOverview ? (
@@ -1838,6 +1913,21 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   </div>
                 </section>
               )}
+              {baselineBusy && (
+                <section
+                  className="rounded-md border border-blue-500/30 bg-blue-500/5 px-3 py-2.5 text-xs leading-5 text-blue-700 dark:text-blue-300"
+                  role="status"
+                  aria-live="polite"
+                >
+                  {baselinePendingAction === "PUBLISH"
+                    ? "正在发布基线并固化当前 WBS，任务较多时可能需要数秒，请勿重复操作。"
+                    : baselinePendingAction === "VALIDATE"
+                      ? "正在重新计算关键路径、资源冲突和发布条件。"
+                      : baselinePendingAction === "BEGIN_CHANGE"
+                        ? "正在创建变更基线草案。"
+                        : "正在发起基线发布审批。"}
+                </section>
+              )}
             </div>
           )}
           <DialogFooter>
@@ -1847,7 +1937,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
               disabled={baselineBusy}
               onClick={() => void performBaselineAction("VALIDATE")}
             >
-              重新校验
+              {baselinePendingAction === "VALIDATE" ? "校验中..." : "重新校验"}
             </Button>
             {baselineOverview?.permissions.canPrepareDraft && baselineState === "PUBLISHED" && (
               <Button
@@ -1856,7 +1946,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                 disabled={baselineBusy}
                 onClick={() => void performBaselineAction("BEGIN_CHANGE")}
               >
-                创建变更草案
+                {baselinePendingAction === "BEGIN_CHANGE" ? "创建中..." : "创建变更草案"}
               </Button>
             )}
             {baselineOverview && !baselineOverview.permissions.canPublish && can("project-gantt:baseline-request") && (
@@ -1866,7 +1956,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                 disabled={baselineBusy}
                 onClick={() => void performBaselineAction("REQUEST_APPROVAL")}
               >
-                申请发布审批
+                {baselinePendingAction === "REQUEST_APPROVAL" ? "申请中..." : "申请发布审批"}
               </Button>
             )}
             {baselineOverview?.permissions.canPublish && baselineState !== "PUBLISHED" && (
@@ -1875,7 +1965,9 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                 disabled={baselineBusy || baselineBlockers.length > 0}
                 onClick={() => void performBaselineAction("PUBLISH")}
               >
-                {baselineState === "CHANGE_DRAFT" ? "发布变更基线" : "发布基线"}
+                {baselinePendingAction === "PUBLISH"
+                  ? "发布中..."
+                  : baselineState === "CHANGE_DRAFT" ? "发布变更基线" : "发布基线"}
               </Button>
             )}
           </DialogFooter>
@@ -2013,20 +2105,9 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
               </div>
               <div className="mt-2 text-xs text-muted-foreground">已选择 {autoScheduleScopeIds.length} 个末级父任务</div>
             </section>
-            <label className="block space-y-1.5">
-              <span className="text-sm font-medium">子任务排期方式</span>
-              <Select
-                value={autoScheduleModeOverride}
-                onChange={(event) => setAutoScheduleModeOverride(event.target.value as ResourceScheduleModeOverride)}
-                className="h-9 text-sm"
-              >
-                <option value="PRESERVE">保留现有方式，仅排期自动任务</option>
-                <option value="AUTO">覆盖为自动排期</option>
-                <option value="DURATION_FORWARD">覆盖为工期固定 · 正排</option>
-                <option value="DURATION_BACKWARD">覆盖为工期固定 · 倒排</option>
-              </Select>
-              <span className="block text-xs leading-5 text-muted-foreground">日期固定、已经开始和已完成任务始终保留，不会被覆盖。</span>
-            </label>
+            <div className="rounded-md border border-border/70 bg-muted/20 px-3 py-2.5 text-xs leading-5 text-muted-foreground">
+              正式计算始终统一求解项目内全部未开始的自动末级任务，避免跨父级 FS 关系和共享负责人被遗漏。上方选择仅用于标注本次从哪些父级发起预览；日期固定、已开始和已完成任务保持不变。
+            </div>
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setAutoScheduleScopeTask(null)}>取消</Button>

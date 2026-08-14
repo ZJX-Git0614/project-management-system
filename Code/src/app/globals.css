@@ -1201,6 +1201,17 @@ button:hover:not(:disabled) {
   background: #171a1f;
 }
 
+button.app-control-selected,
+button.app-control-selected:hover:not(:disabled) {
+  border-color: #3b82f6 !important;
+  background: #2563eb !important;
+  color: #fff !important;
+}
+
+button.app-control-selected svg {
+  color: #fff !important;
+}
+
 button[data-slot="select"][data-variant="ghost"] {
   min-height: 1.75rem;
   border-color: transparent !important;

@@ -41,7 +41,9 @@ import {
 } from "@/lib/gantt-owner-service";
 import { previewProjectManualScheduleImpact, resourceConflictAnalysis } from "@/lib/gantt-resource-service";
 
-const PARENT_BOUNDARY_MODES = new Set(["ROLLUP", "TARGET", "LOCKED"]);
+const normalizeParentBoundaryMode = (value: unknown) => (
+  String(value ?? "").trim().toUpperCase() === "LOCKED" ? "LOCKED" : "ROLLUP"
+);
 
 export async function PUT(
   req: NextRequest,
@@ -129,10 +131,9 @@ export async function PUT(
     today: new Date().toISOString().slice(0, 10),
   });
   const isMilestone = "isMilestone" in body ? Boolean(body.isMilestone) : existing.isMilestone;
-  const parentBoundaryMode = "parentBoundaryMode" in body
-    ? String(body.parentBoundaryMode ?? "").trim().toUpperCase()
-    : existing.parentBoundaryMode;
-  if (!PARENT_BOUNDARY_MODES.has(parentBoundaryMode)) return err("父任务边界方式无效");
+  const parentBoundaryMode = normalizeParentBoundaryMode(
+    "parentBoundaryMode" in body ? body.parentBoundaryMode : existing.parentBoundaryMode,
+  );
   // `schedulePriority` is an effective, system-derived value. The inline
   // editor sends a complete draft, so retain the current stored value here
   // and let the project-wide recalculation update it after the mutation.

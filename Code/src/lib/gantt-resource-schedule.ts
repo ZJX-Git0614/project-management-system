@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   GANTT_HOURS_PER_DAY,
+  calculateTaskDurationDays,
   calculateTaskFinishDate,
   calculateTaskStartDate,
   ganttTaskWorkSlots,
@@ -42,7 +43,7 @@ export type ResourceScheduleTaskMode =
   | "MANUAL"
   | "LOCKED"
   | "FIXED";
-export type ParentBoundaryMode = "ROLLUP" | "TARGET" | "LOCKED";
+export type ParentBoundaryMode = "ROLLUP" | "LOCKED";
 /**
  * There is intentionally one scheduling policy. The preview/apply split is a
  * safety boundary, not a choice between different algorithms.
@@ -58,7 +59,6 @@ export type ResourceScheduleIssueCode =
   | "MISSING_START_DATE"
   | "MISSING_DURATION"
   | "PARENT_BOUNDARY_VIOLATION"
-  | "TARGET_BOUNDARY_MISS"
   | "PROJECT_HARD_FINISH_VIOLATION"
   | "RESOURCE_CAPACITY_EXCEEDED"
   | "RESOURCE_ASSIGNMENT_EXCEEDS_ALLOCATION"
@@ -211,7 +211,6 @@ export type ResourceScheduleReasonCode =
   | "DEPENDENCY"
   | "RESOURCE_CAPACITY"
   | "HARD_BOUNDARY"
-  | "TARGET_WINDOW"
   | "INITIAL_FLOAT"
   | "DOWNSTREAM_IMPACT"
   | "BUSINESS_PRIORITY"
@@ -273,7 +272,7 @@ const validDateRange = (task: Pick<ResourceSchedulingTask, "startDate" | "finish
   && normalizeGanttDurationDays(task.durationDays) > 0
 );
 const isLockedTask = (task: ResourceSchedulingTask) => (
-  normalizeGanttScheduleMode(task.taskMode) !== "AUTO" || task.progress > 0
+  normalizeGanttScheduleMode(task.taskMode) === "DATES_FIXED" || task.progress > 0
 );
 const isMovableTask = (task: ResourceSchedulingTask) => (
   task.isCurrentProject
@@ -282,13 +281,23 @@ const isMovableTask = (task: ResourceSchedulingTask) => (
   && normalizeGanttDurationDays(task.durationDays) > 0
 );
 const normalizeBoundaryMode = (value: unknown): ParentBoundaryMode => (
-  value === "TARGET" || value === "LOCKED" ? value : "ROLLUP"
+  value === "LOCKED" ? "LOCKED" : "ROLLUP"
 );
 const dateMax = (values: Array<string | null | undefined>) => values.filter(validDate).sort().at(-1) ?? "";
 const dateMin = (values: Array<string | null | undefined>) => values.filter(validDate).sort().at(0) ?? "";
 const dateDiff = (startDate: string, finishDate: string) => {
   if (!validDate(startDate) || !validDate(finishDate)) return 0;
   return Math.round((Date.parse(`${finishDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`)) / 86_400_000);
+};
+const lockedBoundaryOvertimeHours = (
+  task: Pick<ResourceSchedulingTask, "finishDate">,
+  latestFinish: string,
+  mode: GanttCalendarMode,
+) => {
+  if (!validDate(task.finishDate) || !validDate(latestFinish) || task.finishDate <= latestFinish) return 0;
+  const firstOvertimeDate = nextTaskStartDate(latestFinish, mode);
+  if (!validDate(firstOvertimeDate) || firstOvertimeDate > task.finishDate) return 0;
+  return Math.round(calculateTaskDurationDays(firstOvertimeDate, task.finishDate, mode) * GANTT_HOURS_PER_DAY * 100) / 100;
 };
 const nextCalendarDate = (date: string) => new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) === date
   ? new Date(Date.parse(`${date}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10)
@@ -590,11 +599,7 @@ type ParentBounds = {
   /** Explicit LOCKED boundaries. Only these may block scheduling or baseline release. */
   earliestStart: string;
   latestFinish: string;
-  /** TARGET boundaries are preferred planning windows and yield warnings when missed. */
-  targetEarliestStart: string;
-  targetLatestFinish: string;
   lockedTaskIds: string[];
-  targetTaskIds: string[];
 };
 
 const parentBoundsFor = (
@@ -604,10 +609,7 @@ const parentBoundsFor = (
   const bounds: ParentBounds = {
     earliestStart: "",
     latestFinish: "",
-    targetEarliestStart: "",
-    targetLatestFinish: "",
     lockedTaskIds: [],
-    targetTaskIds: [],
   };
   const seen = new Set<string>([task.id]);
   let parentId = task.parentId ?? null;
@@ -620,10 +622,6 @@ const parentBoundsFor = (
       if (validDate(parent.startDate)) bounds.earliestStart = dateMax([bounds.earliestStart, parent.startDate]);
       if (validDate(parent.finishDate)) bounds.latestFinish = dateMin([bounds.latestFinish, parent.finishDate]);
       bounds.lockedTaskIds.push(parent.id);
-    } else if (boundaryMode === "TARGET") {
-      if (validDate(parent.startDate)) bounds.targetEarliestStart = dateMax([bounds.targetEarliestStart, parent.startDate]);
-      if (validDate(parent.finishDate)) bounds.targetLatestFinish = dateMin([bounds.targetLatestFinish, parent.finishDate]);
-      bounds.targetTaskIds.push(parent.id);
     }
     parentId = parent.parentId ?? null;
   }
@@ -772,33 +770,16 @@ const dependencyIssuesFor = (
       });
     }
     if (bounds.latestFinish && task.finishDate && task.finishDate > bounds.latestFinish) {
+      const overtimeHours = lockedBoundaryOvertimeHours(task, bounds.latestFinish, mode);
       issues.push({
         id: `parent-finish:${task.id}:${bounds.latestFinish}`,
         code: "PARENT_BOUNDARY_VIOLATION",
         severity: "ERROR",
         taskIds: [task.id, ...bounds.lockedTaskIds],
-        message: `任务「${task.taskName || task.id}」超出父任务锁定完成边界。`,
-        suggestion: "增加父任务可用工期、缩短子任务工期或解除父任务锁定边界。",
-      });
-    }
-    if (bounds.targetEarliestStart && task.startDate && task.startDate < bounds.targetEarliestStart) {
-      issues.push({
-        id: `target-start:${task.id}:${bounds.targetEarliestStart}`,
-        code: "TARGET_BOUNDARY_MISS",
-        severity: "WARNING",
-        taskIds: [task.id, ...bounds.targetTaskIds],
-        message: `任务「${task.taskName || task.id}」早于父任务目标开始时间。`,
-        suggestion: "可接受该偏差继续排期，或调整父任务目标窗口。",
-      });
-    }
-    if (bounds.targetLatestFinish && task.finishDate && task.finishDate > bounds.targetLatestFinish) {
-      issues.push({
-        id: `target-finish:${task.id}:${bounds.targetLatestFinish}`,
-        code: "TARGET_BOUNDARY_MISS",
-        severity: "WARNING",
-        taskIds: [task.id, ...bounds.targetTaskIds],
-        message: `任务「${task.taskName || task.id}」晚于父任务目标完成时间。`,
-        suggestion: "可接受该偏差继续排期，或调整父任务目标窗口。",
+        message: `任务「${task.taskName || task.id}」超出父任务锁定完成边界${overtimeHours > 0 ? `；维持锁定边界需要加班 +${overtimeHours}h` : ""}。`,
+        suggestion: overtimeHours > 0
+          ? `方案 A：加班 +${overtimeHours}h，保持父任务锁定边界；方案 B：改派给同角色且当前空闲的项目成员，影响为负责人变更及资源链重新计算；方案 C：扩大父任务边界。`
+          : "增加父任务可用工期、缩短子任务工期或解除父任务锁定边界。",
       });
     }
   });
@@ -954,7 +935,7 @@ const scheduleWithPriority = (params: {
       dependencyFinishDate(successor, dependency, params.mode)
     ));
     // Rollup dates are derived output, never a scheduling input. Only explicit
-    // target/locked boundaries, T0 and FS dependencies may anchor AUTO work.
+    // locked boundaries, T0 and FS dependencies may anchor automatic work.
     const bounds = parentBoundsFor(task, byId);
     const baseStart = "";
     const notBefore = "";
@@ -966,7 +947,6 @@ const scheduleWithPriority = (params: {
     ]);
     const preferredLatestFinish = dateMin([
       hardLatestFinish,
-      bounds.targetLatestFinish,
       validDate(task.finishDate) && params.direction === "BACKWARD" ? task.finishDate : "",
     ]);
     const hardEarliestStart = dateMax([
@@ -981,7 +961,7 @@ const scheduleWithPriority = (params: {
       continue;
     }
     const latestFinishDate = hardLatestFinish;
-    let placement = shouldScheduleBackward
+    const placement = shouldScheduleBackward
       ? findResourceStartDateBackward({
         task,
         requestedFinishDate: preferredLatestFinish,
@@ -990,17 +970,6 @@ const scheduleWithPriority = (params: {
         mode: params.mode,
       })
       : findResourceStartDate({ task, requestedStartDate, latestFinishDate, calendar, mode: params.mode });
-    // A target date is a planning preference, not a hard constraint. When a
-    // predecessor requires a later start, keep the dependency valid and report
-    // a target miss instead of manufacturing a boundary failure.
-    if (
-      !placement.startDate
-      && shouldScheduleBackward
-      && Boolean(bounds.targetLatestFinish)
-      && validDate(requestedStartDate)
-    ) {
-      placement = findResourceStartDate({ task, requestedStartDate, latestFinishDate, calendar, mode: params.mode });
-    }
     if (!placement.startDate) {
       const code = hardFinishCeiling ? "PROJECT_HARD_FINISH_VIOLATION"
         : placement.reason === "PARENT_BOUNDARY_VIOLATION" ? "PARENT_BOUNDARY_VIOLATION"
@@ -1012,7 +981,7 @@ const scheduleWithPriority = (params: {
         severity: code === "PROJECT_HARD_FINISH_VIOLATION" || (code === "PARENT_BOUNDARY_VIOLATION" && bounds.lockedTaskIds.length > 0) ? "ERROR" : "WARNING",
         taskIds: [task.id, ...bounds.lockedTaskIds],
         message: code === "PROJECT_HARD_FINISH_VIOLATION"
-            ? `任务「${task.taskName || task.id}」无法在项目硬完成时间 ${hardFinishCeiling} 前满足依赖和资源约束。`
+            ? `任务「${task.taskName || task.id}」无法在 WBS 完成锚点 ${hardFinishCeiling} 前满足依赖和资源约束。`
             : code === "PARENT_BOUNDARY_VIOLATION"
             ? `任务「${task.taskName || task.id}」无法在父任务锁定边界内满足依赖和资源约束。`
             : `任务「${task.taskName || task.id}」没有可用的资源容量排期位置。`,
@@ -1176,25 +1145,18 @@ const normalizeModeOverride = (value: unknown): ResourceScheduleModeOverride => 
 const scopedSchedulingTasks = (params: {
   tasks: ResourceSchedulingTask[];
   currentProjectId: string;
-  scopeTaskIds: Set<string>;
-  modeOverride: ResourceScheduleModeOverride;
 }) => params.tasks.map((task) => {
   if (task.projectId !== params.currentProjectId || !task.isLeaf) return task;
   if (task.progress > 0 || normalizeGanttScheduleMode(task.taskMode) === "DATES_FIXED") return task;
-  // A selected range controls only which tasks receive a bulk mode override.
-  // The formal solver always evaluates every otherwise movable AUTO task in
-  // the project so cross-branch FS links and shared-person capacity cannot be
-  // silently treated as fixed anchors.
-  if (!params.scopeTaskIds.has(task.id) || params.modeOverride === "PRESERVE") return task;
-  // The scheduler calculates dates using AUTO semantics, while the selected
-  // forward/backward mode is persisted only after the user applies a preview.
+  // Scheduling direction belongs to the current project-wide run. Older
+  // per-task forward/backward flags are intentionally read as automatic so
+  // they cannot leave stale anchors in a later formal calculation.
   return { ...task, taskMode: "AUTO" };
 });
 
 const scopedSchedulingPrerequisites = (params: {
   tasks: ResourceSchedulingTask[];
   currentProjectId: string;
-  scopeTaskIds: Set<string>;
   modeOverride: ResourceScheduleModeOverride;
   projectStartDate: string;
   hardFinishDate: string;
@@ -1204,13 +1166,7 @@ const scopedSchedulingPrerequisites = (params: {
   return params.tasks.flatMap((task): ResourceScheduleIssue[] => {
     if (task.projectId !== params.currentProjectId || !task.isLeaf) return [];
     if (task.progress > 0) return [];
-    const currentMode = normalizeGanttScheduleMode(task.taskMode);
-    const becomesAutomatic = currentMode === "AUTO"
-      || (
-        params.scopeTaskIds.has(task.id)
-        && params.modeOverride !== "PRESERVE"
-        && currentMode !== "DATES_FIXED"
-      );
+    const becomesAutomatic = normalizeGanttScheduleMode(task.taskMode) !== "DATES_FIXED";
     if (!becomesAutomatic) return [];
     if (!task.isMilestone && normalizeGanttDurationDays(task.durationDays) <= 0) {
       return [{
@@ -1250,7 +1206,6 @@ const scopedSchedulingPrerequisites = (params: {
       ? validDate(task.finishDate)
         || hasSuccessorAnchor
         || validDate(bounds.latestFinish)
-        || validDate(bounds.targetLatestFinish)
         || validDate(params.hardFinishDate)
       : hasDependencyAnchor
         || validDate(bounds.earliestStart)
@@ -1413,9 +1368,6 @@ const candidateTaskExplanations = (params: {
       if (bounds.earliestStart || bounds.latestFinish) {
         reasonCodes.push("HARD_BOUNDARY");
         details.push("排期受父任务锁定边界约束，不允许越界。");
-      } else if (bounds.targetEarliestStart || bounds.targetLatestFinish) {
-        reasonCodes.push("TARGET_WINDOW");
-        details.push("父任务目标日期用于偏差提示，不是正式排期的硬约束。");
       }
       if (initial?.totalFloatMinutes != null) {
         reasonCodes.push("INITIAL_FLOAT");
@@ -1484,28 +1436,31 @@ export const createResourceScheduleCandidates = (params: {
   projectStartDate?: string;
   /** Soft project target, used to show completion delay. */
   expectedEndDate: string;
-  /** Hard project deadline. Candidate dates cannot exceed this date. */
+  /** WBS completion anchor for backward scheduling. Candidate dates cannot exceed this date. */
   hardFinishDate?: string;
-  /**
-   * Leaf task ids whose non-fixed planning mode may be bulk-overridden.
-   * Formal scheduling itself always evaluates every movable leaf in the
-   * current project so cross-branch dependencies and shared resources remain
-   * globally consistent.
-   */
+  /** Scope controls preview and duration suggestions, not task-level modes. */
   scopeTaskIds?: Iterable<string>;
-  /** Optional bulk scheduling mode for eligible descendant leaves. */
+  /** Scheduling direction for this project-wide run. */
   modeOverride?: ResourceScheduleModeOverride;
 }): ResourceScheduleCandidateResult => {
   const projectStartDate = validDate(params.projectStartDate) ? params.projectStartDate! : "";
   const hardFinishCeiling = validDate(params.hardFinishDate) ? params.hardFinishDate! : "";
-  const relativeSchedule = !projectStartDate;
+  const modeOverride = normalizeModeOverride(params.modeOverride);
+  const requiresWbsFinishDate = modeOverride === "DURATION_BACKWARD";
+  // Forward scheduling does not require a concrete calendar date. Until the
+  // project T0 is known, the same formal algorithm runs against an abstract
+  // working-day calendar and persists only T0-relative offsets.
+  const relativeSchedule = !projectStartDate && !requiresWbsFinishDate;
   const effectiveCalendarMode: GanttCalendarMode = relativeSchedule ? "CALENDAR_DAYS" : params.calendarMode;
   const effectiveProjectStartDate = relativeSchedule ? GANTT_RELATIVE_T0_ANCHOR : projectStartDate;
-  const effectiveHardFinishCeiling = relativeSchedule ? "" : hardFinishCeiling;
+  // The legacy hard-finish column now stores only the WBS anchor used by a
+  // backward run. It must not become an implicit deadline for forward or
+  // unchanged scheduling modes.
+  const effectiveHardFinishCeiling = requiresWbsFinishDate ? hardFinishCeiling : "";
   const effectiveExpectedEndDate = relativeSchedule ? "" : params.expectedEndDate;
   const effectiveDirection: ResourceScheduleDirection = relativeSchedule
     ? "FORWARD"
-    : scheduleDirectionFor(normalizeModeOverride(params.modeOverride));
+    : scheduleDirectionFor(modeOverride);
   const snapshotHash = resourceScheduleSnapshotHash(params.tasks, {
     projectStartDate,
     expectedEndDate: params.expectedEndDate,
@@ -1528,17 +1483,16 @@ export const createResourceScheduleCandidates = (params: {
   const scopedDurationSuggestionIssues = durationSuggestionResult.issues
     .filter((issue) => issue.taskIds.some((taskId) => scopeTaskIds.has(taskId)));
   const suggestedDurationTaskIds = new Set(scopedDurationSuggestions.map((suggestion) => suggestion.taskId));
-  const modeOverride = normalizeModeOverride(params.modeOverride);
-  const relativeModeIssues: ResourceScheduleIssue[] = relativeSchedule && modeOverride === "DURATION_BACKWARD"
-    ? [{
-      id: "relative-schedule-backward-mode",
-      code: "MISSING_SCHEDULE_ANCHOR",
-      severity: "ERROR",
+  const modeAnchorIssues: ResourceScheduleIssue[] = [
+    ...(requiresWbsFinishDate && !hardFinishCeiling ? [{
+      id: "backward-schedule-missing-wbs-finish",
+      code: "MISSING_SCHEDULE_ANCHOR" as const,
+      severity: "ERROR" as const,
       taskIds: [...scopeTaskIds],
-      message: "项目 T0 尚未确定，无法计算倒排的完成边界。",
-      suggestion: "请先填写项目 T0 和完成边界后使用倒排，或在当前阶段改用工期固定正排。",
-    }]
-    : [];
+      message: "工期固定 · 倒排需要先填写 WBS 结束日期。",
+      suggestion: "在顶部排期设置中填写 WBS 结束日期后重新计算。",
+    }] : []),
+  ];
 
   // Without a concrete project T0, the date scheduler is deliberately run in
   // an isolated abstract calendar. Every day index is a working day and the
@@ -1572,13 +1526,10 @@ export const createResourceScheduleCandidates = (params: {
   const preliminarySchedulingTasks = scopedSchedulingTasks({
     tasks: expandedNetworkTasks,
     currentProjectId: params.currentProjectId,
-    scopeTaskIds,
-    modeOverride,
   });
   const prerequisites = scopedSchedulingPrerequisites({
     tasks: expandedNetworkTasks,
     currentProjectId: params.currentProjectId,
-    scopeTaskIds,
     modeOverride,
     projectStartDate: effectiveProjectStartDate,
     hardFinishDate: effectiveHardFinishCeiling,
@@ -1607,19 +1558,24 @@ export const createResourceScheduleCandidates = (params: {
   const schedulingTasks = scopedSchedulingTasks({
     tasks: networkTasks,
     currentProjectId: params.currentProjectId,
-    scopeTaskIds,
-    modeOverride,
   });
   const relevantConflicts = (tasks: ResourceSchedulingTask[]) => detectResourceConflicts(tasks, effectiveCalendarMode)
     .filter((conflict) => conflict.taskIds.some((taskId) => currentProjectTaskIds.has(taskId)));
   const conflicts = relevantConflicts(proposedScheduleSourceTasks);
   const allCurrentIssues = detectResourceScheduleIssues(proposedScheduleSourceTasks, effectiveCalendarMode);
+  const isSchedulableMissingStartIssue = (issue: ResourceScheduleIssue) => (
+    issue.code === "MISSING_START_DATE"
+    && issue.taskIds.every((taskId) => {
+      const task = originalById.get(taskId);
+      return Boolean(task && !isLockedTask(task));
+    })
+  );
   const currentIssues = [
     ...allCurrentIssues
-      .filter((issue) => !relativeSchedule || issue.code !== "MISSING_START_DATE")
+      .filter((issue) => !isSchedulableMissingStartIssue(issue))
       .filter((issue) => issue.taskIds.some((taskId) => currentProjectTaskIds.has(taskId))),
     ...prerequisites,
-    ...relativeModeIssues,
+    ...modeAnchorIssues,
   ];
   const scheduledResult = scheduleWithPriority({
     tasks: schedulingTasks,
@@ -1639,16 +1595,11 @@ export const createResourceScheduleCandidates = (params: {
           || ganttOffsetFromAbstractDate(task.startDate) !== original.relativeStartOffsetDays
           || ganttOffsetFromAbstractDate(task.finishDate) !== original.relativeFinishOffsetDays
         : task.startDate !== original.startDate || task.finishDate !== original.finishDate;
-      const modeChanged = scopeTaskIds.has(task.id)
-        && modeOverride !== "PRESERVE"
-        && normalizeGanttScheduleMode(original.taskMode) !== "DATES_FIXED"
-        && original.progress === 0;
       const durationChanged = suggestedDurationTaskIds.has(task.id)
         && Math.abs(normalizeGanttDurationDays(task.durationDays) - normalizeGanttDurationDays(original.durationDays)) > EPSILON;
-      return scheduleChanged || modeChanged || durationChanged;
+      return scheduleChanged || durationChanged;
     })
     .map((task) => {
-      const original = originalById.get(task.id)!;
       return {
         taskId: task.id,
         startDate: relativeSchedule ? "" : task.startDate,
@@ -1669,12 +1620,6 @@ export const createResourceScheduleCandidates = (params: {
             durationMinutes: task.durationMinutes ?? Math.round(task.durationDays * GANTT_HOURS_PER_DAY * 60),
             estimatedWorkHours: task.estimatedWorkHours ?? Math.round(task.durationDays * GANTT_HOURS_PER_DAY * 100) / 100,
           }
-          : {}),
-        ...(scopeTaskIds.has(task.id)
-          && modeOverride !== "PRESERVE"
-          && normalizeGanttScheduleMode(original.taskMode) !== "DATES_FIXED"
-          && original.progress === 0
-          ? { taskMode: modeOverride }
           : {}),
       };
     });
@@ -1731,13 +1676,13 @@ export const createResourceScheduleCandidates = (params: {
   };
   const remainingIssues = [
     ...preliminaryResult.issues
-      .filter((issue) => !relativeSchedule || issue.code !== "MISSING_START_DATE")
+      .filter((issue) => !isSchedulableMissingStartIssue(issue))
       .filter((issue) => issue.taskIds.some((taskId) => currentProjectTaskIds.has(taskId))),
     ...scheduledResult.issues
-      .filter((issue) => !relativeSchedule || issue.code !== "MISSING_START_DATE")
+      .filter((issue) => !isSchedulableMissingStartIssue(issue))
       .filter((issue) => issue.taskIds.some((taskId) => currentProjectTaskIds.has(taskId))),
     ...prerequisites,
-    ...relativeModeIssues,
+    ...modeAnchorIssues,
   ];
   const deduplicatedRemainingIssues = [...new Map(remainingIssues.map((issue) => [issue.id, issue])).values()];
   const hasBlockingIssue = deduplicatedRemainingIssues.some((issue) => issue.severity === "ERROR");

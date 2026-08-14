@@ -77,8 +77,8 @@ describe("gantt CPM", () => {
   it("aggregates summary metrics from leaf tasks without double-counting summary duration", () => {
     const result = calculateGanttCpm([
       task("summary", 10),
-      task("a", 2, [], { parentId: "summary" }),
-      task("b", 3, ["a"], { parentId: "summary" }),
+      task("a", 2, [], { parentId: "summary", ownerMemberIds: ["member-1"] }),
+      task("b", 3, ["a"], { parentId: "summary", ownerMemberIds: ["member-1"] }),
     ], "CALENDAR_DAYS");
 
     expect(result.metricsByTaskId.get("summary")).toMatchObject({
@@ -87,6 +87,22 @@ describe("gantt CPM", () => {
       totalFloatMinutes: 0,
       isCritical: true,
     });
+  });
+
+  it("only marks a summary critical when all descendant work resolves to one owner", () => {
+    const singleOwner = calculateGanttCpm([
+      task("summary", 5, [], { ownerMemberIds: [] }),
+      task("a", 2, [], { parentId: "summary", ownerMemberIds: ["member-1"] }),
+      task("b", 3, ["a"], { parentId: "summary", ownerMemberIds: ["member-1"] }),
+    ], "CALENDAR_DAYS");
+    const parallelOwners = calculateGanttCpm([
+      task("summary", 5, [], { ownerMemberIds: [] }),
+      task("a", 2, [], { parentId: "summary", ownerMemberIds: ["member-1"] }),
+      task("b", 3, ["a"], { parentId: "summary", ownerMemberIds: ["member-2"] }),
+    ], "CALENDAR_DAYS");
+
+    expect(singleOwner.metricsByTaskId.get("summary")?.isCritical).toBe(true);
+    expect(parallelOwners.metricsByTaskId.get("summary")?.isCritical).toBe(false);
   });
 
   it("keeps unscheduled zero-duration tasks separate from milestones", () => {

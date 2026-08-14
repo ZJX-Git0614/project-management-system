@@ -10,6 +10,7 @@ import {
   type ResourceScheduleModeOverride,
   type ResourceSchedulingTask,
 } from "@/lib/gantt-resource-schedule";
+import { normalizeGanttCalendarMode, type GanttCalendarMode } from "@/lib/gantt-calendar";
 import { refreshProjectGanttDerivedState } from "@/lib/gantt-task-service";
 
 export const RESOURCE_SCHEDULE_CANDIDATE_KINDS: readonly ResourceScheduleCandidateKind[] = [
@@ -43,9 +44,13 @@ export interface ProjectResourceScheduleContext {
 }
 
 export interface ProjectResourceScheduleScope {
-  /** Parent tasks selected by the user; empty means the whole current project. */
+  /**
+   * Parent tasks selected as the user's preview focus. Formal scheduling always
+   * solves every eligible leaf task in the current project so cross-branch FS
+   * relationships and shared people cannot be silently missed.
+   */
   rootTaskIds: string[];
-  /** Eligible leaf tasks expanded from the selected parent roots. */
+  /** All eligible current-project leaf tasks participating in the calculation. */
   taskIds: string[];
   modeOverride: ResourceScheduleModeOverride;
 }
@@ -278,33 +283,24 @@ const resolveResourceScheduleScope = (
     childrenByParentId.set(task.parentId, [...(childrenByParentId.get(task.parentId) ?? []), task.id]);
   });
   const normalizedRoots = [...new Set(rootTaskIds.map((id) => String(id).trim()).filter(Boolean))];
-  if (normalizedRoots.length === 0) {
-    return {
-      rootTaskIds: [],
-      taskIds: projectTasks.filter((task) => task.isLeaf).map((task) => task.id),
-      modeOverride,
-    };
-  }
   normalizedRoots.forEach((rootId) => {
     if (!taskById.has(rootId)) throw new Error("自动排期范围包含不属于当前项目的任务");
     if ((childrenByParentId.get(rootId) ?? []).length === 0) throw new Error("自动排期只能选择父级任务范围");
   });
-  const leafIds = new Set<string>();
-  const visit = (taskId: string) => {
-    const childIds = childrenByParentId.get(taskId) ?? [];
-    if (childIds.length === 0) {
-      leafIds.add(taskId);
-      return;
-    }
-    childIds.forEach(visit);
+  return {
+    rootTaskIds: normalizedRoots,
+    taskIds: projectTasks.filter((task) => task.isLeaf).map((task) => task.id),
+    modeOverride,
   };
-  normalizedRoots.forEach(visit);
-  return { rootTaskIds: normalizedRoots, taskIds: [...leafIds], modeOverride };
 };
 
 export const resourceScheduleAnalysis = async (
   projectId: string,
-  options: { scopeRootTaskIds?: string[]; modeOverride?: ResourceScheduleModeOverride } = {},
+  options: {
+    scopeRootTaskIds?: string[];
+    modeOverride?: ResourceScheduleModeOverride;
+    calendarModeOverride?: GanttCalendarMode;
+  } = {},
 ) => {
   const context = await loadProjectResourceScheduleContext(projectId);
   const scope = resolveResourceScheduleScope(
@@ -312,10 +308,13 @@ export const resourceScheduleAnalysis = async (
     options.scopeRootTaskIds,
     options.modeOverride ?? "PRESERVE",
   );
+  const calendarMode = options.calendarModeOverride
+    ? normalizeGanttCalendarMode(options.calendarModeOverride)
+    : normalizeGanttCalendarMode(context.currentProject.ganttCalendarMode);
   const result = createResourceScheduleCandidates({
     tasks: context.tasks,
     currentProjectId: projectId,
-    calendarMode: context.currentProject.ganttCalendarMode === "WORKING_DAYS" ? "WORKING_DAYS" : "CALENDAR_DAYS",
+    calendarMode,
     projectStartDate: context.currentProject.startDate,
     expectedEndDate: context.currentProject.expectedEndDate,
     hardFinishDate: context.currentProject.ganttHardFinishDate,
@@ -495,6 +494,7 @@ export const applyProjectResourceScheduleCandidate = async (params: {
   operator: string;
   scopeRootTaskIds?: string[];
   modeOverride?: ResourceScheduleModeOverride;
+  calendarModeOverride?: GanttCalendarMode;
 }) => {
   if (!RESOURCE_SCHEDULE_CANDIDATE_KINDS.includes(params.candidateKind)) {
     throw new Error("正式自动排期方案无效");
@@ -502,6 +502,7 @@ export const applyProjectResourceScheduleCandidate = async (params: {
   const { context, result, scope } = await resourceScheduleAnalysis(params.projectId, {
     scopeRootTaskIds: params.scopeRootTaskIds,
     modeOverride: params.modeOverride,
+    calendarModeOverride: params.calendarModeOverride,
   });
   if (["COMPLETED", "VOIDED"].includes(context.currentProject.status)) {
     throw new Error("项目已作废或已完成，不允许修改");
@@ -522,7 +523,12 @@ export const applyProjectResourceScheduleCandidate = async (params: {
   await prisma.$transaction(async (tx) => {
     const revision = await tx.project.updateMany({
       where: { id: params.projectId, ganttRevision: params.expectedRevision },
-      data: { ganttRevision: { increment: 1 } },
+      data: {
+        ganttRevision: { increment: 1 },
+        ...(params.calendarModeOverride
+          ? { ganttCalendarMode: normalizeGanttCalendarMode(params.calendarModeOverride) }
+          : {}),
+      },
     });
     if (revision.count !== 1) throw new Error("正式自动排期方案已过期，请重新计算");
     for (const change of candidate.changes) {
@@ -557,10 +563,14 @@ export const applyProjectResourceScheduleCandidate = async (params: {
         entityId: params.projectId,
         actionType: "UPDATE",
         operator: params.operator,
-        detail: `应用${candidate.relativeSchedule ? " T0 相对" : ""}正式自动排期，范围 ${scope.rootTaskIds.length > 0 ? `${scope.rootTaskIds.length} 个父级` : "全项目"}，调整 ${candidate.changes.length} 个任务，其中 ${candidate.changes.filter((change) => typeof change.durationDays === "number").length} 个任务写入系统拆分工期`,
+        detail: `应用${candidate.relativeSchedule ? " T0 相对" : ""}正式自动排期，全项目统一求解${scope.rootTaskIds.length > 0 ? `（从 ${scope.rootTaskIds.length} 个父级发起）` : ""}，调整 ${candidate.changes.length} 个任务，其中 ${candidate.changes.filter((change) => typeof change.durationDays === "number").length} 个任务写入系统拆分工期`,
       },
     });
-    await refreshProjectGanttDerivedState(params.projectId, undefined, tx);
+    await refreshProjectGanttDerivedState(
+      params.projectId,
+      params.calendarModeOverride ? normalizeGanttCalendarMode(params.calendarModeOverride) : undefined,
+      tx,
+    );
   }, { timeout: 30_000, maxWait: 10_000 });
 
   return {

@@ -93,6 +93,7 @@ describe("createResourceScheduleCandidates", () => {
       calendarMode: "WORKING_DAYS",
       projectStartDate: "",
       expectedEndDate: "",
+      modeOverride: "DURATION_FORWARD",
     });
     const candidate = formalCandidate(result);
     const applied = applyResourceScheduleCandidate(tasks, candidate);
@@ -132,7 +133,7 @@ describe("createResourceScheduleCandidates", () => {
     });
   });
 
-  it("项目 T0 未确定时阻止倒排，避免伪造完成边界", () => {
+  it("WBS 完成锚点未确定时阻止倒排，避免伪造完成边界", () => {
     const result = createFormalResourceScheduleCandidates({
       tasks: [task({ startDate: "", finishDate: "" })],
       currentProjectId: "project-1",
@@ -146,7 +147,8 @@ describe("createResourceScheduleCandidates", () => {
     expect(candidate.applicable).toBe(false);
     expect(candidate.changes).toEqual([]);
     expect(candidate.issues).toContainEqual(expect.objectContaining({
-      id: "relative-schedule-backward-mode",
+      id: "backward-schedule-missing-wbs-finish",
+      code: "MISSING_SCHEDULE_ANCHOR",
       severity: "ERROR",
     }));
   });
@@ -267,7 +269,7 @@ describe("createResourceScheduleCandidates", () => {
     expect(candidate.changes).not.toContainEqual(expect.objectContaining({ taskId: "manual" }));
   });
 
-  it("将四种新排期模式中的固定模式视为不可自动移动任务", () => {
+  it("全局排期不沿用历史任务级正倒排标记，但保留日期固定任务", () => {
     const result = createResourceScheduleCandidates({
       tasks: [
         task({ id: "forward", taskMode: "DURATION_FORWARD" }),
@@ -280,11 +282,15 @@ describe("createResourceScheduleCandidates", () => {
     });
     const candidate = formalCandidate(result);
 
-    expect(candidate.changes).toEqual([]);
-    expect(candidate.applicable).toBe(false);
+    expect(candidate.changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ taskId: "forward" }),
+      expect.objectContaining({ taskId: "backward" }),
+    ]));
+    expect(candidate.changes).not.toContainEqual(expect.objectContaining({ taskId: "fixed" }));
+    expect(candidate.applicable).toBe(true);
   });
 
-  it("项目硬完成时间会阻止自动任务越界", () => {
+  it("正排不会把历史 WBS 完成日期误当作项目硬截止线", () => {
     const result = createResourceScheduleCandidates({
       tasks: [
         task({ startDate: "2026-01-01", finishDate: "2026-01-02", durationDays: 2 }),
@@ -292,13 +298,15 @@ describe("createResourceScheduleCandidates", () => {
       ],
       currentProjectId: "project-1",
       calendarMode: "CALENDAR_DAYS",
+      projectStartDate: "2026-01-01",
       expectedEndDate: "2026-01-10",
       hardFinishDate: "2026-01-02",
+      modeOverride: "DURATION_FORWARD",
     });
     const candidate = formalCandidate(result);
 
-    expect(candidate.issues).toContainEqual(expect.objectContaining({ code: "PROJECT_HARD_FINISH_VIOLATION", severity: "ERROR" }));
-    expect(candidate.applicable).toBe(false);
+    expect(candidate.issues).not.toContainEqual(expect.objectContaining({ code: "PROJECT_HARD_FINISH_VIOLATION" }));
+    expect(candidate.applicable).toBe(true);
   });
 
   it("正式自动排期包含快照标识和可审计指标", () => {
@@ -566,7 +574,7 @@ describe("createResourceScheduleCandidates", () => {
     });
     const candidate = formalCandidate(result);
 
-    expect(result.issues).toContainEqual(expect.objectContaining({ code: "MISSING_START_DATE", taskIds: ["child"] }));
+    expect(result.issues).not.toContainEqual(expect.objectContaining({ code: "MISSING_START_DATE", taskIds: ["child"] }));
     expect(candidate.applicable).toBe(true);
     expect(candidate.changes).toContainEqual(expect.objectContaining({
       taskId: "child",
@@ -634,6 +642,7 @@ describe("createResourceScheduleCandidates", () => {
       ],
       currentProjectId: "project-1",
       calendarMode: "CALENDAR_DAYS",
+      projectStartDate: "2026-01-01",
       expectedEndDate: "2026-01-10",
     });
 
@@ -645,7 +654,7 @@ describe("createResourceScheduleCandidates", () => {
     expect(result.candidates.every((candidate) => !candidate.applicable)).toBe(true);
   });
 
-  it("目标父级边界仅预警，不会阻断可行排期", () => {
+  it("遗留的计划目标父级边界按自动汇总处理，不产生独立预警", () => {
     const issues = detectResourceScheduleIssues([
       task({
         id: "target-parent",
@@ -666,11 +675,7 @@ describe("createResourceScheduleCandidates", () => {
       }),
     ]);
 
-    expect(issues).toContainEqual(expect.objectContaining({
-      code: "TARGET_BOUNDARY_MISS",
-      severity: "WARNING",
-      taskIds: ["late-child", "target-parent"],
-    }));
+    expect(issues).not.toContainEqual(expect.objectContaining({ code: "TARGET_BOUNDARY_MISS" }));
     expect(issues).not.toContainEqual(expect.objectContaining({ code: "PARENT_BOUNDARY_VIOLATION" }));
   });
 
@@ -709,14 +714,15 @@ describe("createResourceScheduleCandidates", () => {
       currentProjectId: "project-1",
       calendarMode: "CALENDAR_DAYS",
       expectedEndDate: "2026-01-08",
+      hardFinishDate: "2026-01-08",
       scopeTaskIds: ["predecessor", "successor"],
       modeOverride: "DURATION_BACKWARD",
     });
     const candidate = formalCandidate(result);
 
     expect(candidate.changes).toEqual(expect.arrayContaining([
-      expect.objectContaining({ taskId: "predecessor", startDate: "2026-01-05", finishDate: "2026-01-06", taskMode: "DURATION_BACKWARD" }),
-      expect.objectContaining({ taskId: "successor", startDate: "2026-01-07", finishDate: "2026-01-08", taskMode: "DURATION_BACKWARD" }),
+      expect.objectContaining({ taskId: "predecessor", startDate: "2026-01-05", finishDate: "2026-01-06" }),
+      expect.objectContaining({ taskId: "successor", startDate: "2026-01-07", finishDate: "2026-01-08" }),
     ]));
     expect(candidate.issues).not.toContainEqual(expect.objectContaining({ code: "DEPENDENCY_CONSTRAINT" }));
   });
@@ -744,7 +750,7 @@ describe("createResourceScheduleCandidates", () => {
     expect(result.candidates.every((candidate) => !candidate.applicable)).toBe(true);
   });
 
-  it("选择范围只控制排期方式覆盖，仍统一求解跨分支自动任务", () => {
+  it("正式自动排期统一求解跨分支自动任务，不写回任务级排期模式", () => {
     const result = createResourceScheduleCandidates({
       tasks: [
         task({
@@ -787,27 +793,22 @@ describe("createResourceScheduleCandidates", () => {
       ],
       currentProjectId: "project-1",
       calendarMode: "CALENDAR_DAYS",
+      projectStartDate: "2026-01-01",
       expectedEndDate: "2026-01-10",
       scopeTaskIds: ["selected-leaf"],
       modeOverride: "DURATION_FORWARD",
     });
     const candidate = formalCandidate(result);
 
-    expect(candidate.changes).toContainEqual(expect.objectContaining({
+    expect(candidate.changes).not.toContainEqual(expect.objectContaining({
       taskId: "selected-leaf",
-      startDate: "2026-01-01",
-      finishDate: "2026-01-02",
-      taskMode: "DURATION_FORWARD",
     }));
     expect(candidate.changes).toContainEqual(expect.objectContaining({
       taskId: "other-leaf",
       startDate: "2026-01-03",
       finishDate: "2026-01-04",
     }));
-    expect(candidate.changes).not.toContainEqual(expect.objectContaining({
-      taskId: "other-leaf",
-      taskMode: "DURATION_FORWARD",
-    }));
+    expect(candidate.changes).not.toContainEqual(expect.objectContaining({ taskMode: "DURATION_FORWARD" }));
   });
 
   it("相对 T0 自动排期在负责人缺失时只给出阻断提示", () => {

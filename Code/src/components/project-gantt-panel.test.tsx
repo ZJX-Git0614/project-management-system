@@ -339,7 +339,7 @@ describe("ProjectGanttPanel", () => {
     await waitFor(() => expect(screen.getByTestId("task-count")).toHaveTextContent("0"));
   });
 
-  it("loads project members and applies the project-wide working-day mode", async () => {
+  it("loads project members and opens a working-day schedule preview before applying it", async () => {
     mocks.get.mockImplementation((url: string) => {
       const backgroundResponse = backgroundGanttGet(url);
       if (backgroundResponse) return backgroundResponse;
@@ -357,8 +357,6 @@ describe("ProjectGanttPanel", () => {
       }
       return Promise.resolve({});
     });
-    mocks.put.mockResolvedValue({ calendarMode: "WORKING_DAYS", hoursPerDay: 7.5 });
-
     render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
 
     const user = userEvent.setup();
@@ -371,14 +369,80 @@ describe("ProjectGanttPanel", () => {
     expect(calendarDayButton).toHaveClass("h-8", "text-xs");
     expect(workingDayButton).toHaveClass("h-8", "text-xs");
     expect(calendarDayButton).toHaveAttribute("aria-pressed", "true");
+    expect(calendarDayButton).toHaveClass("app-control-selected");
+    expect(screen.getByRole("button", { name: "WBS 与甘特" })).toHaveClass("app-control-selected");
+    expect(screen.getByLabelText("全局排期方式")).toHaveClass("app-control-selected");
 
     await user.click(workingDayButton);
 
-    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith(
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledWith(
+      expect.stringContaining("/api/projects/project-1/gantt-tasks/resource-schedule?includeCandidates=1&calendarMode=WORKING_DAYS"),
+    ));
+    expect(mocks.put).not.toHaveBeenCalledWith(
       "/api/projects/project-1/gantt-settings",
       { calendarMode: "WORKING_DAYS" },
+    );
+    expect(workingDayButton).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("switches the global scheduling mode locally without creating a WBS history snapshot", async () => {
+    mocks.get.mockImplementation((url: string) => {
+      const backgroundResponse = backgroundGanttGet(url);
+      if (backgroundResponse) return backgroundResponse;
+      if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) {
+        return Promise.resolve({
+          calendarMode: "WORKING_DAYS",
+          hoursPerDay: 7.5,
+          projectStartDate: "",
+          wbsFinishDate: "",
+        });
+      }
+      if (url.endsWith("/deletions")) return Promise.resolve([]);
+      return Promise.resolve([rootTask]);
+    });
+
+    render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
+
+    const user = userEvent.setup();
+    const modeSelect = await screen.findByLabelText("全局排期方式");
+    await user.click(modeSelect);
+    await user.click(await screen.findByText("工期固定 · 正排"));
+
+    expect(modeSelect).toHaveTextContent("工期固定 · 正排");
+    expect(modeSelect).toHaveClass("app-control-selected");
+    expect(mocks.post.mock.calls.some(([url]) => String(url).endsWith("/history/snapshots"))).toBe(false);
+    expect(mocks.put).not.toHaveBeenCalled();
+  });
+
+  it("shows publishing progress and closes the baseline dialog after the server confirms", async () => {
+    const publish = deferred<Record<string, unknown>>();
+    mocks.get.mockImplementation((url: string) => {
+      const backgroundResponse = backgroundGanttGet(url);
+      if (backgroundResponse) return backgroundResponse;
+      if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      if (url.endsWith("/deletions")) return Promise.resolve([]);
+      return Promise.resolve([rootTask]);
+    });
+    mocks.post.mockImplementation((url: string) => (
+      url.endsWith("/gantt-tasks/baseline") ? publish.promise : Promise.resolve({})
     ));
-    await waitFor(() => expect(workingDayButton).toHaveAttribute("aria-pressed", "true"));
+
+    render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "发布基线" }));
+    const dialog = await screen.findByRole("dialog", { name: "WBS 基线管理" });
+    await user.click(within(dialog).getByRole("button", { name: "发布基线" }));
+
+    expect(within(dialog).getByRole("button", { name: "发布中..." })).toBeDisabled();
+    expect(within(dialog).getByRole("status")).toHaveTextContent("正在发布基线并固化当前 WBS");
+
+    publish.resolve({ success: true });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "WBS 基线管理" })).not.toBeInTheDocument());
   });
 
   it("keeps a manually edited parent schedule in automatic summary mode until a boundary is explicitly locked", async () => {

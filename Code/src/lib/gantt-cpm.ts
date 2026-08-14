@@ -29,6 +29,9 @@ export interface CpmGanttDependency {
 export interface CpmGanttTask {
   id: string;
   parentId?: string | null;
+  /** Direct project-member assignments. Summary rows only participate in
+   * critical-path display when exactly one person owns that summary. */
+  ownerMemberIds?: string[];
   startDate: string;
   finishDate?: string;
   durationDays: number;
@@ -366,6 +369,27 @@ export const calculateGanttCpm = (
     });
   }
 
+  const rollupOwnerIdsByTaskId = new Map<string, Set<string>>();
+  const resolveRollupOwnerIds = (taskId: string, visiting = new Set<string>()): Set<string> => {
+    const existing = rollupOwnerIdsByTaskId.get(taskId);
+    if (existing) return existing;
+    if (visiting.has(taskId)) return new Set<string>();
+    const nextVisiting = new Set(visiting).add(taskId);
+    const directOwnerIds = new Set(taskById.get(taskId)?.ownerMemberIds?.filter(Boolean) ?? []);
+    const childIds = childrenByParentId.get(taskId) ?? [];
+    if (childIds.length === 0) {
+      rollupOwnerIdsByTaskId.set(taskId, directOwnerIds);
+      return directOwnerIds;
+    }
+    const childOwnerIds = new Set<string>();
+    childIds.forEach((childId) => resolveRollupOwnerIds(childId, nextVisiting).forEach((ownerId) => childOwnerIds.add(ownerId)));
+    // Parent owners are derived from descendants. When work is assigned below
+    // the summary, those descendants define whether it is one serial stream.
+    const resolved = childOwnerIds.size > 0 ? childOwnerIds : directOwnerIds;
+    rollupOwnerIdsByTaskId.set(taskId, resolved);
+    return resolved;
+  };
+
   const aggregateSummary = (taskId: string, visiting = new Set<string>()): GanttCpmMetrics => {
     const existing = metricsByTaskId.get(taskId);
     if (existing) return existing;
@@ -392,7 +416,12 @@ export const calculateGanttCpm = (
       totalFloatMinutes: Math.min(...calculated.map((item) => item.totalFloatMinutes!)),
       freeFloatMinutes: Math.min(...calculated.map((item) => item.freeFloatMinutes ?? Number.POSITIVE_INFINITY)),
       scheduleStatus: status,
-      isCritical: calculated.some((item) => item.isCritical),
+      // A parent with multiple direct owners represents parallel work streams.
+      // Marking it critical as well as each critical child produces overlapping
+      // red paths that are not actionable. Leaf tasks remain normal CPM nodes;
+      // only single-owner summaries may surface a rolled-up critical marker.
+      isCritical: resolveRollupOwnerIds(taskId).size === 1
+        && calculated.some((item) => item.isCritical),
     };
     if (metrics.freeFloatMinutes === Number.POSITIVE_INFINITY) metrics.freeFloatMinutes = null;
     metricsByTaskId.set(taskId, metrics);

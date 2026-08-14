@@ -21,7 +21,7 @@ const canManageProjectBaseline = async (projectId: string, user: NonNullable<Awa
 const getBaselinePermissionsForUser = async (
   projectId: string,
   user: NonNullable<Awaited<ReturnType<typeof getAuthenticatedUser>>>,
-  overview: Awaited<ReturnType<typeof getProjectGanttBaselineOverview>>,
+  project: Pick<Awaited<ReturnType<typeof getProjectGanttBaselineOverview>>["project"], "ganttBaselineState" | "ganttBaselineVersion">,
 ) => {
   const [canMaintainDraft, canPublishBaseline, manager] = await Promise.all([
     userHasPermission(user, "project-gantt:baseline-draft"),
@@ -29,8 +29,8 @@ const getBaselinePermissionsForUser = async (
     canManageProjectBaseline(projectId, user),
   ]);
   return getGanttBaselinePermissions({
-    baselineState: overview.project.ganttBaselineState,
-    baselineVersion: overview.project.ganttBaselineVersion,
+    baselineState: project.ganttBaselineState,
+    baselineVersion: project.ganttBaselineVersion,
     canMaintainDraft,
     canPublishBaseline,
     isProjectManager: manager,
@@ -48,11 +48,12 @@ export async function GET(
   const { id } = await params;
   try {
     const overview = await getProjectGanttBaselineOverview(id);
-    const permissions = await getBaselinePermissionsForUser(id, user, overview);
+    const permissions = await getBaselinePermissionsForUser(id, user, overview.project);
     return ok({
       ...overview,
       permissions,
       blockers: overview.validation.blockers,
+      warnings: overview.validation.warnings,
     });
   } catch (error) {
     return err(error instanceof Error ? error.message : "读取 WBS 基线状态失败", 404);
@@ -95,7 +96,8 @@ export async function POST(
         approvalInstance: serializeApprovalInstance(approval),
         validation: overview.validation,
         blockers: overview.validation.blockers,
-        permissions: await getBaselinePermissionsForUser(id, user, overview),
+        permissions: await getBaselinePermissionsForUser(id, user, overview.project),
+        warnings: overview.validation.warnings,
       }, 202);
     } catch (error) {
       return err(error instanceof Error ? error.message : "WBS 基线审批发起失败");
@@ -109,8 +111,9 @@ export async function POST(
       const overview = await getProjectGanttBaselineOverview(id);
       return ok({
         ...overview,
-        permissions: await getBaselinePermissionsForUser(id, user, overview),
+        permissions: await getBaselinePermissionsForUser(id, user, overview.project),
         blockers: overview.validation.blockers,
+        warnings: overview.validation.warnings,
       });
     } catch (error) {
       return err(error instanceof Error ? error.message : "WBS 基线校验失败");
@@ -120,7 +123,7 @@ export async function POST(
   if (action === "BEGIN_CHANGE") {
     try {
       const overview = await getProjectGanttBaselineOverview(id);
-      const permissions = await getBaselinePermissionsForUser(id, user, overview);
+      const permissions = await getBaselinePermissionsForUser(id, user, overview.project);
       if (!permissions.canPrepareDraft) {
         return err(
           project.ganttBaselineVersion > 0
@@ -139,7 +142,8 @@ export async function POST(
         ...result,
         validation: nextOverview.validation,
         blockers: nextOverview.validation.blockers,
-        permissions: await getBaselinePermissionsForUser(id, user, nextOverview),
+        permissions: await getBaselinePermissionsForUser(id, user, nextOverview.project),
+        warnings: nextOverview.validation.warnings,
       });
     } catch (error) {
       return err(error instanceof Error ? error.message : "创建 WBS 基线草案失败");
@@ -151,8 +155,7 @@ export async function POST(
       return err("当前基线已发布，请先创建变更基线草案后再发布新版本", 409);
     }
     try {
-      const overview = await getProjectGanttBaselineOverview(id);
-      const permissions = await getBaselinePermissionsForUser(id, user, overview);
+      const permissions = await getBaselinePermissionsForUser(id, user, project);
       if (!permissions.canPublish) return err("发布或变更 WBS 基线需要项目经理具备“发布或变更 WBS 基线”权限。", 403);
       await refreshProjectGanttDerivedState(id);
       const result = await publishProjectGanttBaseline({
@@ -160,12 +163,14 @@ export async function POST(
         actor: { userId: user.userId, displayName: user.displayName },
         reason,
       });
-      const nextOverview = await getProjectGanttBaselineOverview(id);
       return ok({
         ...result,
-        validation: nextOverview.validation,
-        blockers: nextOverview.validation.blockers,
-        permissions: await getBaselinePermissionsForUser(id, user, nextOverview),
+        blockers: result.validation.blockers,
+        warnings: result.validation.warnings,
+        permissions: await getBaselinePermissionsForUser(id, user, {
+          ganttBaselineState: "PUBLISHED",
+          ganttBaselineVersion: result.baseline.version,
+        }),
       });
     } catch (error) {
       return err(error instanceof Error ? error.message : "发布 WBS 基线失败", 409);

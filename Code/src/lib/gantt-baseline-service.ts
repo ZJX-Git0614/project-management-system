@@ -33,9 +33,16 @@ export type GanttBaselineActor = {
 };
 
 export type GanttBaselineBlocker = {
-  code: "UNSUPPORTED_DEPENDENCY" | "HARD_BOUNDARY" | "PROJECT_HARD_FINISH" | "INVALID_SCHEDULE" | "UNSCHEDULED" | "INVALID_OWNER_ASSIGNMENT" | "MISSING_DURATION" | "RESOURCE_CONFLICT";
+  code: "UNSUPPORTED_DEPENDENCY" | "HARD_BOUNDARY" | "INVALID_SCHEDULE" | "UNSCHEDULED" | "INVALID_OWNER_ASSIGNMENT" | "MISSING_DURATION" | "RESOURCE_CONFLICT";
   message: string;
   taskIds: string[];
+};
+
+export type GanttBaselineWarning = {
+  code: "CROSS_PROJECT_RESOURCE_CONFLICT";
+  message: string;
+  taskIds: string[];
+  projectIds: string[];
 };
 
 export type GanttBaselineValidation = {
@@ -43,6 +50,7 @@ export type GanttBaselineValidation = {
   taskCount: number;
   valid: boolean;
   blockers: GanttBaselineBlocker[];
+  warnings: GanttBaselineWarning[];
 };
 
 export type GanttBaselinePermissionInput = {
@@ -115,6 +123,229 @@ const normalizedOwnerIds = (task: Pick<BaselineComparableGanttTask, "ownerMember
     ? task.ownerLinks.map((link) => link.projectMemberId)
     : task.ownerMemberId ? [task.ownerMemberId] : [];
   return [...new Set(ids.filter(Boolean))].sort();
+};
+
+type BaselineResourceMember = {
+  id: string;
+  accountId: string | null;
+  personName: string;
+  capacityHoursPerDay: number | null;
+  productivityRate: number | null;
+  maxConcurrentAssignments: number | null;
+};
+
+type BaselineCrossProjectTask = {
+  id: string;
+  projectId: string;
+  parentId: string | null;
+  children?: Array<{ id: string }>;
+  taskName: string;
+  startDate: string;
+  finishDate: string;
+  durationDays: number;
+  durationMinutes: number | null;
+  estimatedWorkHours: number | null;
+  progress: number;
+  taskMode: string;
+  effortDriven: boolean;
+  parallelizable: boolean;
+  sortOrder: number;
+  ownerMemberId: string | null;
+  ownerLinks: Array<{
+    projectMemberId: string;
+    unitsPercent: number | null;
+    plannedWorkHours: number | null;
+  }>;
+};
+
+const resourceOwnerKey = (member: BaselineResourceMember | undefined, memberId: string) => {
+  if (member?.accountId) return `account:${member.accountId}`;
+  if (member?.personName) return `person:${member.personName}`;
+  return `member:${memberId}`;
+};
+
+const buildCrossProjectResourceTasks = (
+  tasks: BaselineCrossProjectTask[],
+  memberById: Map<string, BaselineResourceMember>,
+): ResourceSchedulingTask[] => {
+  const parentIdsByProject = new Map<string, Set<string>>();
+  tasks.forEach((task) => {
+    if (!task.parentId) return;
+    const parentIds = parentIdsByProject.get(task.projectId) ?? new Set<string>();
+    parentIds.add(task.parentId);
+    parentIdsByProject.set(task.projectId, parentIds);
+  });
+
+  return tasks.flatMap((task) => {
+    if (
+      (task.children?.length ?? 0) > 0
+      ||
+      parentIdsByProject.get(task.projectId)?.has(task.id)
+      || Number(task.durationDays) <= 0
+      || Number(task.progress) >= 100
+      || !isValidPlanningDate(task.startDate)
+      || !isValidPlanningDate(task.finishDate)
+    ) return [];
+    const ownerIds = normalizedOwnerIds(task);
+    const ownerAssignments = ownerIds.map((memberId) => {
+      const link = task.ownerLinks.find((ownerLink) => ownerLink.projectMemberId === memberId);
+      const member = memberById.get(memberId);
+      return {
+        ownerKey: resourceOwnerKey(member, memberId),
+        unitsPercent: link?.unitsPercent ?? 100,
+        plannedWorkHours: link?.plannedWorkHours ?? 0,
+        capacityHoursPerDay: member?.capacityHoursPerDay ?? 7.5,
+        productivityRate: member?.productivityRate ?? 1,
+        maxConcurrentAssignments: member?.maxConcurrentAssignments ?? 0,
+      };
+    });
+    if (ownerAssignments.length === 0) return [];
+    return [{
+      id: task.id,
+      projectId: task.projectId,
+      taskName: task.taskName,
+      parentId: task.parentId,
+      isLeaf: true,
+      ownerKeys: ownerAssignments.map((assignment) => assignment.ownerKey),
+      ownerAssignments,
+      startDate: task.startDate,
+      finishDate: task.finishDate,
+      durationDays: Number(task.durationDays),
+      durationMinutes: Number(task.durationMinutes ?? 0),
+      estimatedWorkHours: Number(task.estimatedWorkHours ?? 0),
+      progress: Number(task.progress ?? 0),
+      taskMode: task.taskMode,
+      effortDriven: Boolean(task.effortDriven),
+      parallelizable: Boolean(task.parallelizable),
+      sortOrder: Number(task.sortOrder ?? 0),
+      predecessorDependencies: [],
+      isCurrentProject: false,
+    } satisfies ResourceSchedulingTask];
+  });
+};
+
+const findCrossProjectResourceWarnings = async (params: {
+  projectId: string;
+  calendarMode: "CALENDAR_DAYS" | "WORKING_DAYS";
+  currentProjectResourceTasks: ResourceSchedulingTask[];
+  currentProjectMembers: BaselineResourceMember[];
+  client: GanttBaselineClient;
+}): Promise<GanttBaselineWarning[]> => {
+  if (params.currentProjectResourceTasks.length === 0) return [];
+  // Lightweight test doubles intentionally omit the cross-project query
+  // methods. In that case current-project validation still runs, while a
+  // cross-project warning cannot be derived without inventing external data.
+  if (
+    typeof params.client.project.findMany !== "function"
+    || typeof params.client.projectMember.findMany !== "function"
+  ) return [];
+
+  const currentOwnerKeys = new Set(
+    params.currentProjectResourceTasks.flatMap((task) => task.ownerKeys),
+  );
+  const sharedAccountIds = params.currentProjectMembers
+    .filter((member) => member.accountId && currentOwnerKeys.has(resourceOwnerKey(member, member.id)))
+    .map((member) => member.accountId as string);
+  const unlinkedPersonNames = params.currentProjectMembers
+    .filter((member) => !member.accountId && currentOwnerKeys.has(resourceOwnerKey(member, member.id)))
+    .map((member) => member.personName);
+  if (sharedAccountIds.length === 0 && unlinkedPersonNames.length === 0) return [];
+
+  const otherMembers = await params.client.projectMember.findMany({
+    where: {
+      projectId: { not: params.projectId },
+      OR: [
+        ...(sharedAccountIds.length > 0 ? [{ accountId: { in: sharedAccountIds } }] : []),
+        ...(unlinkedPersonNames.length > 0
+          ? [{ accountId: null, personName: { in: unlinkedPersonNames } }]
+          : []),
+      ],
+    },
+    select: {
+      id: true,
+      projectId: true,
+      accountId: true,
+      personName: true,
+      capacityHoursPerDay: true,
+      productivityRate: true,
+      maxConcurrentAssignments: true,
+    },
+  });
+  if (otherMembers.length === 0) return [];
+
+  const otherProjectIds = [...new Set(otherMembers.map((member) => member.projectId))];
+  const activeProjects = await params.client.project.findMany({
+    where: { id: { in: otherProjectIds }, status: { not: "VOIDED" } },
+    select: { id: true, name: true },
+  });
+  if (activeProjects.length === 0) return [];
+
+  const activeProjectIds = new Set(activeProjects.map((project) => project.id));
+  const activeOtherMembers = otherMembers.filter((member) => activeProjectIds.has(member.projectId));
+  if (activeOtherMembers.length === 0) return [];
+  const otherMemberIds = activeOtherMembers.map((member) => member.id);
+
+  const tasks = await params.client.projectGanttTask.findMany({
+    where: {
+      projectId: { in: [...activeProjectIds] },
+      OR: [
+        { ownerMemberId: { in: otherMemberIds } },
+        { ownerLinks: { some: { projectMemberId: { in: otherMemberIds } } } },
+      ],
+    },
+    select: {
+      id: true,
+      projectId: true,
+      parentId: true,
+      children: { select: { id: true }, take: 1 },
+      taskName: true,
+      startDate: true,
+      finishDate: true,
+      durationDays: true,
+      durationMinutes: true,
+      estimatedWorkHours: true,
+      progress: true,
+      taskMode: true,
+      effortDriven: true,
+      parallelizable: true,
+      sortOrder: true,
+      ownerMemberId: true,
+      ownerLinks: {
+        where: { projectMemberId: { in: otherMemberIds } },
+        select: { projectMemberId: true, unitsPercent: true, plannedWorkHours: true },
+      },
+    },
+  });
+  const otherProjectTasks = buildCrossProjectResourceTasks(
+    tasks as BaselineCrossProjectTask[],
+    new Map(activeOtherMembers.map((member) => [member.id, member] as const)),
+  );
+  if (otherProjectTasks.length === 0) return [];
+
+  const projectNameById = new Map(activeProjects.map((project) => [project.id, project.name] as const));
+  const crossProjectConflicts = detectResourceConflicts(
+    [...params.currentProjectResourceTasks, ...otherProjectTasks],
+    params.calendarMode,
+  ).filter((conflict) => (
+    conflict.projectIds.includes(params.projectId)
+    && conflict.projectIds.some((id) => id !== params.projectId)
+  ));
+  if (crossProjectConflicts.length === 0) return [];
+
+  const relatedProjectIds = [...new Set(crossProjectConflicts.flatMap((conflict) => conflict.projectIds))]
+    .filter((id) => id !== params.projectId)
+    .sort();
+  const relatedProjectNames = relatedProjectIds
+    .map((id) => projectNameById.get(id) || id)
+    .join("、");
+  const currentTaskIds = [...new Set(crossProjectConflicts.flatMap((conflict) => conflict.taskIds))]
+    .filter((taskId) => params.currentProjectResourceTasks.some((task) => task.id === taskId));
+  return [{
+    code: "CROSS_PROJECT_RESOURCE_CONFLICT",
+    message: `存在 ${crossProjectConflicts.length} 组与其他项目共享负责人的容量或并发冲突（${relatedProjectNames}）。该冲突不阻止当前基线发布，但应协调跨项目资源。`,
+    taskIds: currentTaskIds,
+    projectIds: relatedProjectIds,
+  }];
 };
 
 const normalizedDependencyKeys = (dependencies: Array<{
@@ -350,7 +581,7 @@ export const validateProjectGanttBaseline = async (
   const [project, tasks, dependencies, members] = await Promise.all([
     client.project.findUnique({
       where: { id: projectId },
-      select: { ganttHardFinishDate: true, ganttCalendarMode: true },
+      select: { ganttCalendarMode: true },
     }),
     client.projectGanttTask.findMany({
       where: { projectId },
@@ -396,6 +627,7 @@ export const validateProjectGanttBaseline = async (
   ]);
   if (!project) throw new Error("项目不存在");
   const blockers: GanttBaselineBlocker[] = [];
+  const warnings: GanttBaselineWarning[] = [];
   const unsupportedDependencies = dependencies.filter((dependency) => validateFsDependencies([dependency]).length > 0);
   if (unsupportedDependencies.length > 0) {
     blockers.push({
@@ -411,18 +643,6 @@ export const validateProjectGanttBaseline = async (
       message: `存在 ${hardBoundaryConflicts.length} 个任务超出父任务硬边界，发布基线前必须处理。`,
       taskIds: hardBoundaryConflicts.map((conflict) => conflict.taskId),
     });
-  }
-  if (isValidPlanningDate(project.ganttHardFinishDate)) {
-    const projectHardFinishConflicts = tasks.filter((task) => (
-      isValidPlanningDate(task.finishDate) && task.finishDate > project.ganttHardFinishDate
-    ));
-    if (projectHardFinishConflicts.length > 0) {
-      blockers.push({
-        code: "PROJECT_HARD_FINISH",
-        message: `存在 ${projectHardFinishConflicts.length} 个任务超出项目硬完成边界 ${project.ganttHardFinishDate}，发布基线前必须处理。`,
-        taskIds: projectHardFinishConflicts.map((task) => task.id),
-      });
-    }
   }
   const invalidScheduleTasks = tasks.filter((task) => task.scheduleStatus === "INVALID_DEPENDENCY");
   if (invalidScheduleTasks.length > 0) {
@@ -464,14 +684,14 @@ export const validateProjectGanttBaseline = async (
       taskIds: scheduledLeafTasks.map((task) => task.id),
     });
   } else if (scheduledLeafTasks.length > 0) {
-    const memberById = new Map(members.map((member) => [member.id, member] as const));
+    const memberById = new Map<string, BaselineResourceMember>(members.map((member) => [member.id, member]));
     const usesRelativeCalendar = hasRelativeDates && !hasConcreteDates;
     const resourceTasks: ResourceSchedulingTask[] = scheduledLeafTasks.flatMap((task) => {
       const assignments = normalizedOwnerIds(task).map((memberId) => {
         const member = memberById.get(memberId);
         const link = task.ownerLinks.find((ownerLink) => ownerLink.projectMemberId === memberId);
         return {
-          ownerKey: `member:${memberId}`,
+          ownerKey: resourceOwnerKey(member, memberId),
           unitsPercent: link?.unitsPercent ?? 100,
           plannedWorkHours: link?.plannedWorkHours ?? 0,
           capacityHoursPerDay: member?.capacityHoursPerDay ?? 7.5,
@@ -525,6 +745,15 @@ export const validateProjectGanttBaseline = async (
         taskIds: [...new Set(resourceConflicts.flatMap((conflict) => conflict.taskIds))],
       });
     }
+    if (!usesRelativeCalendar) {
+      warnings.push(...await findCrossProjectResourceWarnings({
+        projectId,
+        calendarMode: project.ganttCalendarMode === "WORKING_DAYS" ? "WORKING_DAYS" : "CALENDAR_DAYS",
+        currentProjectResourceTasks: resourceTasks,
+        currentProjectMembers: members,
+        client,
+      }));
+    }
   }
   const unscheduledLeafTasks = tasks.filter((task) => (
     isLeafTask(task, parentIds)
@@ -559,6 +788,7 @@ export const validateProjectGanttBaseline = async (
       message: "当前项目没有可发布的 WBS 任务。",
       taskIds: [],
     }],
+    warnings,
   };
 };
 

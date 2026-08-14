@@ -13,6 +13,7 @@ import {
   serializeResourceConflict,
 } from "@/lib/gantt-resource-service";
 import type { ResourceScheduleCandidateKind, ResourceScheduleModeOverride } from "@/lib/gantt-resource-schedule";
+import type { GanttCalendarMode } from "@/lib/gantt-calendar";
 
 const candidateKinds = new Set<ResourceScheduleCandidateKind>(RESOURCE_SCHEDULE_CANDIDATE_KINDS);
 
@@ -30,10 +31,19 @@ export async function GET(
     if (includeCandidates) {
       const modeOverride = String(req.nextUrl.searchParams.get("modeOverride") ?? "PRESERVE") as ResourceScheduleModeOverride;
       if (!["PRESERVE", "AUTO", "DURATION_FORWARD", "DURATION_BACKWARD"].includes(modeOverride)) {
-        return err("子任务排期方式覆盖无效");
+        return err("全局排期方式无效");
       }
       const scopeRootTaskIds = req.nextUrl.searchParams.getAll("scopeRootTaskId").map((value) => value.trim()).filter(Boolean);
-      const { context, result, scope } = await resourceScheduleAnalysis(id, { scopeRootTaskIds, modeOverride });
+      const requestedCalendarMode = req.nextUrl.searchParams.get("calendarMode");
+      const calendarModeOverride = requestedCalendarMode === "WORKING_DAYS" || requestedCalendarMode === "CALENDAR_DAYS"
+        ? requestedCalendarMode as GanttCalendarMode
+        : undefined;
+      if (requestedCalendarMode && !calendarModeOverride) return err("工期计算方式仅支持自然日或工作日");
+      const { context, result, scope } = await resourceScheduleAnalysis(id, {
+        scopeRootTaskIds,
+        modeOverride,
+        calendarModeOverride,
+      });
       return ok({
         revision: context.currentProject.ganttRevision,
         snapshotHash: result.snapshotHash,
@@ -98,11 +108,15 @@ export async function POST(
   if (!candidateKinds.has(candidateKind)) return err("正式自动排期方案无效");
   const modeOverride = String(body.modeOverride ?? "PRESERVE") as ResourceScheduleModeOverride;
   if (!["PRESERVE", "AUTO", "DURATION_FORWARD", "DURATION_BACKWARD"].includes(modeOverride)) {
-    return err("子任务排期方式覆盖无效");
+    return err("全局排期方式无效");
   }
   const scopeRootTaskIds = Array.isArray(body.scopeRootTaskIds)
     ? body.scopeRootTaskIds.map((value) => String(value).trim()).filter(Boolean)
     : [];
+  const calendarModeOverride = body.calendarMode === "WORKING_DAYS" || body.calendarMode === "CALENDAR_DAYS"
+    ? body.calendarMode as GanttCalendarMode
+    : undefined;
+  if (body.calendarMode !== undefined && !calendarModeOverride) return err("工期计算方式仅支持自然日或工作日");
   try {
     return ok(await applyProjectResourceScheduleCandidate({
       projectId: id,
@@ -112,6 +126,7 @@ export async function POST(
       operator: user.displayName,
       scopeRootTaskIds,
       modeOverride,
+      calendarModeOverride,
     }));
   } catch (error) {
     return err(error instanceof Error ? error.message : "正式自动排期应用失败", 409, "RESOURCE_SCHEDULE_APPLY_FAILED");

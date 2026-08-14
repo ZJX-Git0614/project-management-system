@@ -127,7 +127,7 @@ export async function PUT(
   if (body.ganttHardFinishDate !== undefined) {
     const ganttHardFinishDate = String(body.ganttHardFinishDate ?? "").trim()
     if (ganttHardFinishDate && !/^\d{4}-\d{2}-\d{2}$/.test(ganttHardFinishDate)) {
-      return err("项目硬完成时间格式应为 YYYY-MM-DD，或留空取消硬约束")
+      return err("WBS 完成锚点格式应为 YYYY-MM-DD，或留空取消倒排锚点")
     }
     updateData.ganttHardFinishDate = ganttHardFinishDate
   }

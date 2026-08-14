@@ -8,6 +8,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import type { ProjectGanttTask } from "@/domain/models";
 import { addCalendarDays, diffDays, findGanttCriticalTaskIds, getGanttDateRange } from "@/lib/gantt";
 import type { GanttCalendarMode } from "@/lib/gantt-calendar";
+import { formatGanttRelativeOffset, isGanttRelativeOffset } from "@/lib/gantt-relative-time";
 import { cn } from "@/lib/utils";
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -28,11 +29,26 @@ const taskOwnerLabels = (task: ProjectGanttTask) => {
   return ["未分配"];
 };
 
-const compareTasks = (left: ProjectGanttTask, right: ProjectGanttTask) => (
-  (left.startDate || "9999-12-31").localeCompare(right.startDate || "9999-12-31")
-  || left.taskCode.localeCompare(right.taskCode, "zh-CN", { numeric: true })
-  || left.id.localeCompare(right.id)
-);
+const relativeOffset = (task: ProjectGanttTask, key: "relativeStartOffsetDays" | "relativeFinishOffsetDays") => {
+  const value = task[key];
+  return isGanttRelativeOffset(value) ? value : null;
+};
+
+const compareTasks = (left: ProjectGanttTask, right: ProjectGanttTask) => {
+  const leftOffset = relativeOffset(left, "relativeStartOffsetDays");
+  const rightOffset = relativeOffset(right, "relativeStartOffsetDays");
+  const relativeCompare = leftOffset === null && rightOffset === null
+    ? 0
+    : leftOffset === null
+      ? 1
+      : rightOffset === null
+        ? -1
+        : leftOffset - rightOffset;
+  return relativeCompare
+    || (left.startDate || "9999-12-31").localeCompare(right.startDate || "9999-12-31")
+    || left.taskCode.localeCompare(right.taskCode, "zh-CN", { numeric: true })
+    || left.id.localeCompare(right.id);
+};
 
 export const buildResourceSwimlanes = (tasks: ProjectGanttTask[]) => {
   const lanes = new Map<string, ProjectGanttTask[]>();
@@ -57,7 +73,7 @@ const taskExplanation = (task: ProjectGanttTask, criticalIds: Set<string>) => {
     task.totalFloatMinutes == null
       ? "总浮动：尚未计算"
       : `总浮动：${Math.round(task.totalFloatMinutes / 450 * 10) / 10} 天`,
-    `父级边界：${task.parentBoundaryMode === "LOCKED" ? "锁定" : task.parentBoundaryMode === "TARGET" ? "目标" : "自动汇总"}`,
+    `父级边界：${task.parentBoundaryMode === "LOCKED" ? "锁定" : "自动汇总"}`,
   ];
   if (criticalIds.has(task.id)) details.push("关键路径：是");
   return details;
@@ -83,14 +99,34 @@ export function ResourceSwimlaneView({ tasks, calendarMode }: {
 }) {
   const lanes = useMemo(() => buildResourceSwimlanes(tasks), [tasks]);
   const executableTasks = useMemo(() => leafTasks(tasks), [tasks]);
-  const range = useMemo(() => getGanttDateRange(executableTasks), [executableTasks]);
+  const calendarRange = useMemo(() => getGanttDateRange(executableTasks), [executableTasks]);
+  const relativeRange = useMemo(() => {
+    const offsets = executableTasks.flatMap((task) => [
+      relativeOffset(task, "relativeStartOffsetDays"),
+      relativeOffset(task, "relativeFinishOffsetDays"),
+    ]).filter((value): value is number => value !== null);
+    if (offsets.length === 0) return null;
+    const startOffset = Math.min(...offsets);
+    const endOffset = Math.max(...offsets);
+    return { startOffset, endOffset, totalDays: Math.max(1, endOffset - startOffset + 1) };
+  }, [executableTasks]);
+  const unscheduledRelativeRange = useMemo(() => {
+    if (calendarRange || relativeRange || executableTasks.length === 0) return null;
+    const totalDays = Math.max(
+      1,
+      ...executableTasks.map((task) => Math.max(1, Number(task.durationDays) || 0)),
+    );
+    return { startOffset: 0, endOffset: totalDays - 1, totalDays };
+  }, [calendarRange, executableTasks, relativeRange]);
   const criticalIds = useMemo(() => findGanttCriticalTaskIds(tasks), [tasks]);
 
-  if (lanes.length === 0 || !range) {
+  if (lanes.length === 0) {
     return <div className="py-12 text-center text-sm text-muted-foreground">暂无可展示的负责人排期</div>;
   }
 
-  const totalDays = Math.max(1, range.totalDays);
+  const displayRelativeRange = relativeRange ?? unscheduledRelativeRange;
+  const relativeSchedule = Boolean(displayRelativeRange && !calendarRange);
+  const totalDays = relativeSchedule ? displayRelativeRange!.totalDays : Math.max(1, calendarRange!.totalDays);
   return (
     <TooltipProvider>
       <div className="min-h-0 overflow-auto border border-border/70">
@@ -98,9 +134,9 @@ export function ResourceSwimlaneView({ tasks, calendarMode }: {
           <div className="px-3 py-2">负责人 / 任务</div>
           <div className="px-3 py-2">计划区间</div>
           <div className="flex items-center justify-between px-3 py-2 text-muted-foreground">
-            <span>{range.startDate}</span>
-            <span>{calendarMode === "WORKING_DAYS" ? "工作日排期" : "自然日排期"}</span>
-            <span>{range.endDate}</span>
+            <span>{relativeSchedule ? formatGanttRelativeOffset(displayRelativeRange!.startOffset) : calendarRange!.startDate}</span>
+            <span>{relativeSchedule ? (relativeRange ? "T0 相对工作日排期" : "待自动排期") : calendarMode === "WORKING_DAYS" ? "工作日排期" : "自然日排期"}</span>
+            <span>{relativeSchedule ? formatGanttRelativeOffset(displayRelativeRange!.endOffset) : calendarRange!.endDate}</span>
           </div>
         </div>
         {lanes.map((lane) => (
@@ -111,10 +147,18 @@ export function ResourceSwimlaneView({ tasks, calendarMode }: {
               <div className="px-3 py-2 text-muted-foreground">负责人泳道</div>
             </div>
             {lane.tasks.map((task) => {
-              const hasDates = validDate(task.startDate) && validDate(task.finishDate);
-              const offset = hasDates ? Math.max(0, diffDays(range.startDate, task.startDate)) : 0;
+              const hasCalendarDates = validDate(task.startDate) && validDate(task.finishDate);
+              const relativeStart = relativeOffset(task, "relativeStartOffsetDays");
+              const relativeFinish = relativeOffset(task, "relativeFinishOffsetDays");
+              const hasRelativeDates = relativeStart !== null && relativeFinish !== null;
+              const hasDates = relativeSchedule ? hasRelativeDates : hasCalendarDates;
+              const offset = relativeSchedule
+                ? hasRelativeDates ? Math.max(0, relativeStart - displayRelativeRange!.startOffset) : 0
+                : hasCalendarDates ? Math.max(0, diffDays(calendarRange!.startDate, task.startDate)) : 0;
               const finishDate = task.finishDate || task.startDate;
-              const span = hasDates ? Math.max(1, diffDays(task.startDate, finishDate) + 1) : 0;
+              const span = relativeSchedule
+                ? hasRelativeDates ? Math.max(1, relativeFinish - relativeStart + 1) : 0
+                : hasCalendarDates ? Math.max(1, diffDays(task.startDate, finishDate) + 1) : 0;
               const left = Math.min(100, offset / totalDays * 100);
               const width = hasDates ? Math.max(0.8, Math.min(100 - left, span / totalDays * 100)) : 0;
               return (
@@ -124,7 +168,11 @@ export function ResourceSwimlaneView({ tasks, calendarMode }: {
                       <div className="truncate font-medium" title={`${task.taskCode} · ${task.taskName}`}>{task.taskCode} · {task.taskName || "未命名任务"}</div>
                     </div>
                     <div className="px-3 py-2 text-muted-foreground">
-                      {hasDates ? `${task.startDate} 至 ${task.finishDate}` : "尚未排期"}
+                      {hasDates
+                        ? relativeSchedule
+                          ? `${formatGanttRelativeOffset(relativeStart)} 至 ${formatGanttRelativeOffset(relativeFinish)}`
+                          : `${task.startDate} 至 ${task.finishDate}`
+                        : "尚未排期"}
                     </div>
                     <div className="relative mx-3 my-2 h-5 bg-muted/30">
                       {hasDates && (

@@ -148,7 +148,7 @@ export const rollupGanttParentSchedules = <T extends ParentRollupTask>(
     const task = taskById.get(taskId);
     const childIds = childrenByParentId.get(taskId) ?? [];
     childIds.forEach(rollup);
-    if (task && childIds.length > 0 && task.parentBoundaryMode !== "TARGET" && task.parentBoundaryMode !== "LOCKED") {
+    if (task && childIds.length > 0 && task.parentBoundaryMode !== "LOCKED") {
       const children = childIds.map((childId) => taskById.get(childId)).filter((child): child is T => Boolean(child));
       const datedChildren = children.filter((child) => isGanttPlanDate(child.startDate) && isGanttPlanDate(child.finishDate));
       if (datedChildren.length > 0) {
@@ -200,7 +200,7 @@ export const rollupGanttParentRelativeSchedules = <T extends ParentRollupTask>(t
         isGanttRelativeOffset(child.relativeStartOffsetDays)
         && isGanttRelativeOffset(child.relativeFinishOffsetDays)
       ));
-      const preservesBoundary = task.parentBoundaryMode === "TARGET" || task.parentBoundaryMode === "LOCKED";
+      const preservesBoundary = task.parentBoundaryMode === "LOCKED";
       const hasExplicitRelativeBoundary = isGanttRelativeOffset(task.relativeStartOffsetDays)
         && isGanttRelativeOffset(task.relativeFinishOffsetDays);
 
@@ -673,12 +673,15 @@ export const refreshProjectGanttDerivedState = async (
   const [project, currentTasks] = await Promise.all([
     client.project.findUnique({
       where: { id: projectId },
-      select: { startDate: true, expectedEndDate: true, ganttHardFinishDate: true },
+      select: { startDate: true, expectedEndDate: true },
     }),
     client.projectGanttTask.findMany({
     where: { projectId },
     orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
     include: {
+      ownerLinks: {
+        select: { projectMemberId: true },
+      },
       predecessorDependencies: {
         select: { predecessorTaskId: true, type: true, lag: true, lagFormat: true, unsupportedReason: true },
       },
@@ -721,9 +724,9 @@ export const refreshProjectGanttDerivedState = async (
       (dependency) => Number(dependency.type ?? GANTT_FS_DEPENDENCY_TYPE) === GANTT_FS_DEPENDENCY_TYPE,
     ),
   }));
-  const schedulingFinishBoundary = isGanttPlanDate(project?.ganttHardFinishDate)
-    ? project!.ganttHardFinishDate
-    : project?.expectedEndDate ?? "";
+  // A WBS completion date is a backward-run anchor, not a permanent project
+  // deadline. Ordinary derived-state refreshes use only the project target.
+  const schedulingFinishBoundary = project?.expectedEndDate ?? "";
   const scheduled = rollupGanttParentActuals(
     rollupGanttParentRelativeSchedules(rollupGanttParentSchedules(derivedTasks, mode)),
   );
@@ -735,6 +738,9 @@ export const refreshProjectGanttDerivedState = async (
   const cpmTasks = relativeSchedule
     ? scheduled.map((task) => ({
       ...task,
+      ownerMemberIds: task.ownerLinks.length > 0
+        ? task.ownerLinks.map((link) => link.projectMemberId)
+        : task.ownerMemberId ? [task.ownerMemberId] : [],
       startDate: isGanttRelativeOffset(task.relativeStartOffsetDays)
         ? abstractDateFromGanttOffset(task.relativeStartOffsetDays)
         : "",
@@ -742,7 +748,12 @@ export const refreshProjectGanttDerivedState = async (
         ? abstractDateFromGanttOffset(task.relativeFinishOffsetDays)
         : "",
     }))
-    : scheduled;
+    : scheduled.map((task) => ({
+      ...task,
+      ownerMemberIds: task.ownerLinks.length > 0
+        ? task.ownerLinks.map((link) => link.projectMemberId)
+        : task.ownerMemberId ? [task.ownerMemberId] : [],
+    }));
   const cpm = calculateGanttCpm(
     cpmTasks,
     relativeSchedule ? "CALENDAR_DAYS" : mode,
@@ -1422,9 +1433,7 @@ const taskSnapshotCreateData = (
     finishSlot: String(rawTask.finishSlot ?? "PM").toUpperCase() === "AM" ? "AM" : "PM",
     actualStartSlot: String(rawTask.actualStartSlot ?? "AM").toUpperCase() === "PM" ? "PM" : "AM",
     actualFinishSlot: String(rawTask.actualFinishSlot ?? "PM").toUpperCase() === "AM" ? "AM" : "PM",
-    parentBoundaryMode: ["ROLLUP", "TARGET", "LOCKED"].includes(String(rawTask.parentBoundaryMode))
-      ? String(rawTask.parentBoundaryMode)
-      : "ROLLUP",
+    parentBoundaryMode: String(rawTask.parentBoundaryMode) === "LOCKED" ? "LOCKED" : "ROLLUP",
     schedulePriority: Math.max(0, Math.min(1000, Math.round(Number(rawTask.schedulePriority ?? 500) || 500))),
     userPriority: ["LOW", "MEDIUM", "HIGH"].includes(String(rawTask.userPriority).toUpperCase())
       ? String(rawTask.userPriority).toUpperCase()
@@ -2154,9 +2163,7 @@ export const restoreGanttTaskDeletionBatch = async (params: {
           finishSlot: String(rawTask.finishSlot ?? "PM").toUpperCase() === "AM" ? "AM" : "PM",
           actualStartSlot: String(rawTask.actualStartSlot ?? "AM").toUpperCase() === "PM" ? "PM" : "AM",
           actualFinishSlot: String(rawTask.actualFinishSlot ?? "PM").toUpperCase() === "AM" ? "AM" : "PM",
-          parentBoundaryMode: ["ROLLUP", "TARGET", "LOCKED"].includes(String(rawTask.parentBoundaryMode))
-            ? String(rawTask.parentBoundaryMode)
-            : "ROLLUP",
+          parentBoundaryMode: String(rawTask.parentBoundaryMode) === "LOCKED" ? "LOCKED" : "ROLLUP",
           schedulePriority: Math.max(0, Math.min(1000, Math.round(Number(rawTask.schedulePriority ?? 500) || 500))),
           userPriority: ["LOW", "MEDIUM", "HIGH"].includes(String(rawTask.userPriority).toUpperCase())
             ? String(rawTask.userPriority).toUpperCase()

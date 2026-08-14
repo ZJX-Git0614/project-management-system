@@ -248,7 +248,80 @@ const GANTT_DEPTH_COLORS = [
   { hue: 24, saturation: 58, lightness: 58 },
   { hue: 228, saturation: 48, lightness: 66 },
 ] as const;
+type GanttRow = ReturnType<typeof buildGanttRows>[number];
+type GanttDependencyLink = ReturnType<typeof buildGanttDependencyLinks>[number];
+type GanttCriticalPath = { taskIds: string[] };
 type DropPosition = "before" | "after";
+
+const ganttDepthColor = (depth: number, alpha = 1) => {
+  const color = GANTT_DEPTH_COLORS[depth % GANTT_DEPTH_COLORS.length];
+  const cycle = Math.floor(depth / GANTT_DEPTH_COLORS.length);
+  const lightness = Math.max(42, color.lightness - cycle * 6);
+  return `hsl(${color.hue} ${color.saturation}% ${lightness}% / ${alpha})`;
+};
+
+/**
+ * A critical path is a contiguous FS chain made of critical tasks. Summary
+ * tasks and isolated critical activities are intentionally retained as paths
+ * of one so the timeline never hides a critical task without a dependency.
+ */
+const buildGanttCriticalPaths = (
+  rows: GanttRow[],
+  dependencyLinks: GanttDependencyLink[],
+): GanttCriticalPath[] => {
+  const criticalTaskIds = new Set(rows.filter((row) => row.isCritical).map((row) => row.id));
+  if (criticalTaskIds.size === 0) return [];
+
+  const rowOrder = new Map(rows.map((row, index) => [row.id, index]));
+  const successors = new Map<string, string[]>();
+  const predecessors = new Set<string>();
+
+  dependencyLinks.forEach((link) => {
+    if (!criticalTaskIds.has(link.predecessorId) || !criticalTaskIds.has(link.successorId)) return;
+    const next = successors.get(link.predecessorId) ?? [];
+    next.push(link.successorId);
+    successors.set(link.predecessorId, next);
+    predecessors.add(link.successorId);
+  });
+
+  successors.forEach((taskIds) => {
+    taskIds.sort((left, right) => (rowOrder.get(left) ?? 0) - (rowOrder.get(right) ?? 0));
+  });
+
+  const paths: string[][] = [];
+  const emitted = new Set<string>();
+  const appendPath = (taskIds: string[]) => {
+    const signature = taskIds.join("|");
+    if (emitted.has(signature)) return;
+    emitted.add(signature);
+    paths.push(taskIds);
+  };
+  const visit = (taskId: string, path: string[], seen: Set<string>) => {
+    // A malformed cyclic dependency must not make the visual layer recurse forever.
+    if (paths.length >= 128) return;
+    const nextTaskIds = (successors.get(taskId) ?? []).filter((nextTaskId) => !seen.has(nextTaskId));
+    if (nextTaskIds.length === 0) {
+      appendPath(path);
+      return;
+    }
+    nextTaskIds.forEach((nextTaskId) => {
+      const nextSeen = new Set(seen);
+      nextSeen.add(nextTaskId);
+      visit(nextTaskId, [...path, nextTaskId], nextSeen);
+    });
+  };
+
+  rows
+    .filter((row) => criticalTaskIds.has(row.id) && !predecessors.has(row.id))
+    .forEach((row) => visit(row.id, [row.id], new Set([row.id])));
+
+  const coveredTaskIds = new Set(paths.flat());
+  rows
+    .filter((row) => criticalTaskIds.has(row.id) && !coveredTaskIds.has(row.id))
+    .forEach((row) => appendPath([row.id]));
+
+  return paths.map((taskIds) => ({ taskIds }));
+};
 
 const escapeCssSelector = (value: string) => (
   typeof CSS !== "undefined" && typeof CSS.escape === "function"
@@ -550,6 +623,7 @@ const GanttTimelineContent = ({
 }: GanttTimelineProps) => {
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
   const [showFloat, setShowFloat] = useState(true);
+  const [criticalOnly, setCriticalOnly] = useState(false);
   const dayWidth = ZOOM_LEVELS[zoomIndex];
   const [detailsCollapsed, setDetailsCollapsed] = useState(false);
   const [explicitSelectedTaskIds, setExplicitSelectedTaskIds] = useState<string[]>([]);
@@ -579,8 +653,11 @@ const GanttTimelineContent = ({
   const [collapsedTaskIds, setCollapsedTaskIds] = useState<Set<string>>(() => new Set());
   const ganttSurfaceRef = useRef<HTMLDivElement>(null);
   const scrollViewportRef = useRef<HTMLDivElement>(null);
+  const autoZoomPlanKeyRef = useRef<string | null>(null);
+  const manuallyAdjustedZoomRef = useRef(false);
   const [virtualRange, setVirtualRange] = useState({ start: 0, end: 40 });
   const [embeddedViewportHeight, setEmbeddedViewportHeight] = useState<number | null>(null);
+  const [timelineViewportWidth, setTimelineViewportWidth] = useState(0);
   const range = getGanttDateRange(tasks);
   const rows = useMemo(() => buildGanttRows(tasks), [tasks]);
   const displayRange = range ?? (() => {
@@ -592,7 +669,23 @@ const GanttTimelineContent = ({
     };
   })();
   const relativeTimeline = !range && rows.some((row) => row.spanDays > 0);
-  const filteredRows = useMemo(
+  const maxFloatCalendarSpan = useMemo(() => rows.reduce((maximum, row) => Math.max(
+    maximum,
+    floatCalendarSpanDays(row.endDate, row.freeFloatMinutes, calendarMode),
+  ), 0), [calendarMode, rows]);
+  const visibleStartDate = useMemo(
+    () => addCalendarDays(displayRange.startDate, -1),
+    [displayRange.startDate],
+  );
+  const visibleEndDate = useMemo(
+    () => addCalendarDays(displayRange.endDate, Math.max(7, Math.ceil(maxFloatCalendarSpan) + 2)),
+    [displayRange.endDate, maxFloatCalendarSpan],
+  );
+  const visibleDays = relativeTimeline
+    ? Math.max(7, Math.max(...rows.map((row) => row.timelineEndDays), 0) + 2)
+    : diffDays(visibleStartDate, visibleEndDate) + 1;
+  const autoZoomPlanKey = `${projectId}:${relativeTimeline ? "relative" : `${visibleStartDate}:${visibleEndDate}`}:${visibleDays}:${Math.round(timelineViewportWidth)}`;
+  const columnFilteredRows = useMemo(
     () => filterGanttRowsWithAncestors(rows, columnFilters),
     [columnFilters, rows],
   );
@@ -612,6 +705,42 @@ const GanttTimelineContent = ({
     });
     return map;
   }, [rows]);
+  const criticalPaths = useMemo(
+    () => buildGanttCriticalPaths(rows, dependencyLinks),
+    [dependencyLinks, rows],
+  );
+  const criticalPathTaskIds = useMemo(
+    () => new Set(criticalPaths.flatMap((path) => path.taskIds)),
+    [criticalPaths],
+  );
+  const criticalPathNumbersByTaskId = useMemo(() => {
+    const pathNumbers = new Map<string, number[]>();
+    criticalPaths.forEach((path, pathIndex) => {
+      path.taskIds.forEach((taskId) => {
+        const numbers = pathNumbers.get(taskId) ?? [];
+        numbers.push(pathIndex + 1);
+        pathNumbers.set(taskId, numbers);
+      });
+    });
+    return pathNumbers;
+  }, [criticalPaths]);
+  const criticalVisibleTaskIds = useMemo(() => {
+    const visibleTaskIds = new Set(criticalPathTaskIds);
+    criticalPathTaskIds.forEach((taskId) => {
+      let parentId = rowByTaskId.get(taskId)?.parentId ?? null;
+      while (parentId) {
+        visibleTaskIds.add(parentId);
+        parentId = rowByTaskId.get(parentId)?.parentId ?? null;
+      }
+    });
+    return visibleTaskIds;
+  }, [criticalPathTaskIds, rowByTaskId]);
+  const filteredRows = useMemo(
+    () => criticalOnly
+      ? columnFilteredRows.filter((row) => criticalVisibleTaskIds.has(row.id))
+      : columnFilteredRows,
+    [columnFilteredRows, criticalOnly, criticalVisibleTaskIds],
+  );
   const unassignedLeafTasksByParentId = useMemo(
     () => buildGanttUnassignedLeafTasksByParentId(rows),
     [rows],
@@ -746,6 +875,10 @@ const GanttTimelineContent = ({
     const visibleCount = Math.ceil(viewport.clientHeight / ROW_HEIGHT) + overscan * 2;
     const end = Math.min(visibleRows.length, start + visibleCount);
     setVirtualRange((current) => current.start === start && current.end === end ? current : { start, end });
+    const availableTimelineWidth = Math.max(240, viewport.clientWidth - Math.min(leftWidth, Math.max(0, viewport.clientWidth - 240)));
+    setTimelineViewportWidth((current) => (
+      Math.abs(current - availableTimelineWidth) < 1 ? current : availableTimelineWidth
+    ));
     const viewportRect = viewport.getBoundingClientRect();
     if (!fullScreen) {
       const nextHeight = Math.max(260, Math.floor(window.innerHeight - viewportRect.top - 1));
@@ -771,6 +904,28 @@ const GanttTimelineContent = ({
       window.removeEventListener("resize", updateVirtualRange);
     };
   }, [updateVirtualRange]);
+
+  useEffect(() => {
+    if (rows.length === 0 || timelineViewportWidth <= 0) return;
+    const planChanged = autoZoomPlanKeyRef.current !== autoZoomPlanKey;
+    if (planChanged) {
+      autoZoomPlanKeyRef.current = autoZoomPlanKey;
+      manuallyAdjustedZoomRef.current = false;
+    }
+    if (manuallyAdjustedZoomRef.current) return;
+
+    const targetDayWidth = timelineViewportWidth / Math.max(visibleDays, 1);
+    const nextZoomIndex = ZOOM_LEVELS.reduce((bestIndex, level, index) => (
+      Math.abs(level - targetDayWidth) < Math.abs(ZOOM_LEVELS[bestIndex] - targetDayWidth)
+        ? index
+        : bestIndex
+    ), 0);
+    setZoomIndex((current) => current === nextZoomIndex ? current : nextZoomIndex);
+  }, [autoZoomPlanKey, rows.length, timelineViewportWidth, visibleDays]);
+
+  useEffect(() => {
+    if (criticalOnly && criticalPaths.length === 0) setCriticalOnly(false);
+  }, [criticalOnly, criticalPaths.length]);
 
   useEffect(() => {
     if (!historyFocusRequest) return;
@@ -964,9 +1119,9 @@ const GanttTimelineContent = ({
       setSelectionAnchorTaskId(taskId);
     }
     const menuWidth = 286;
-    // The schedule submenu is taller than the base menu. Reserve the larger
-    // footprint so the first-level menu never opens below the viewport.
-    const menuHeight = 620;
+    // The task settings submenu may still be taller than the base menu. Reserve
+    // enough space so the first-level menu does not open below the viewport.
+    const menuHeight = 520;
     const offset = 6;
     setInsertCount(1);
     setContextSubmenu(null);
@@ -1035,13 +1190,14 @@ const GanttTimelineContent = ({
     await onUpdateTask(contextTask, nextDraft, "isMilestone");
   };
 
-  const updateContextSchedule = async (changes: Partial<Pick<GanttTaskDraft,
-    "taskMode" | "parentBoundaryMode" | "schedulePriority" | "userPriority" | "effortDriven" | "parallelizable"
-  >>) => {
+  const updateContextTaskSettings = async (
+    changes: Partial<Pick<GanttTaskDraft, "parentBoundaryMode" | "userPriority">>,
+    columnKey: "parentBoundaryMode" | "userPriority",
+  ) => {
     if (!contextTask || !canEdit || !onUpdateTask) return;
     const nextDraft = { ...toTaskDraft(contextTask, calendarMode), ...changes };
     closeContextMenu();
-    await onUpdateTask(contextTask, nextDraft, "taskMode");
+    await onUpdateTask(contextTask, nextDraft, columnKey);
   };
 
   const selectTaskRange = useCallback((fromTaskId: string, toTaskId: string) => {
@@ -1259,15 +1415,6 @@ const GanttTimelineContent = ({
   }
 
   const config = { dayWidth, tickEvery: getTickEvery(dayWidth) };
-  const visibleStartDate = addCalendarDays(displayRange.startDate, -1);
-  const maxFloatCalendarSpan = rows.reduce((maximum, row) => Math.max(
-    maximum,
-    floatCalendarSpanDays(row.endDate, row.freeFloatMinutes, calendarMode),
-  ), 0);
-  const visibleEndDate = addCalendarDays(displayRange.endDate, Math.max(7, Math.ceil(maxFloatCalendarSpan) + 2));
-  const visibleDays = relativeTimeline
-    ? Math.max(7, Math.max(...rows.map((row) => row.timelineEndDays), 0) + 2)
-    : diffDays(visibleStartDate, visibleEndDate) + 1;
   const timelineWidth = Math.max(MIN_TIMELINE_WIDTH, visibleDays * config.dayWidth);
   const bodyHeight = visibleRows.length * ROW_HEIGHT;
   const todayOffset = diffDays(visibleStartDate, new Date().toISOString().slice(0, 10));
@@ -1276,7 +1423,6 @@ const GanttTimelineContent = ({
     visibleRows.map((row, index) => [row.id, { row, index }])
   );
   const categoryCount = new Set(rows.map((row) => row.taskCategory)).size;
-  const criticalCount = rows.filter((row) => row.isCritical).length;
   const resourceCriticalCount = resourceCriticalTaskIdSet.size;
   const activeFilterCount = Object.values(columnFilters).filter((values) => Array.isArray(values)).length;
   const updateColumnFilter = (key: GanttFilterKey, values?: string[]) => {
@@ -1327,10 +1473,20 @@ const GanttTimelineContent = ({
             </span>
             进度
           </div>
-          <div className="flex items-center gap-1 text-muted-foreground">
-            <span className="inline-block h-2.5 w-5 rounded-full bg-destructive" />
-              关键路径 {criticalCount}
-            </div>
+          <button
+            type="button"
+            className={cn(
+              "flex h-6 items-center gap-1 rounded border border-transparent px-2 text-muted-foreground transition-colors hover:border-destructive/35 hover:text-foreground disabled:cursor-default disabled:opacity-45",
+              criticalOnly && "border-destructive/45 bg-destructive text-destructive-foreground hover:text-destructive-foreground",
+            )}
+            onClick={() => setCriticalOnly((current) => !current)}
+            disabled={criticalPaths.length === 0}
+            aria-pressed={criticalOnly}
+            title={criticalOnly ? "显示全部任务" : "仅显示关键路径及其父任务"}
+          >
+            <span className={cn("inline-block h-2.5 w-5 rounded-full bg-destructive", criticalOnly && "bg-destructive-foreground")} />
+            {criticalOnly ? "显示全部" : "关键路径"} {criticalPaths.length} 条
+          </button>
           {resourceCriticalCount > 0 && (
             <div className="flex items-center gap-1 text-muted-foreground" title="同一负责人容量导致的串行关系，不会改写 FS 紧前关系">
               <span className="inline-block h-0 w-5 border-t-2 border-sky-400" />
@@ -1355,7 +1511,10 @@ const GanttTimelineContent = ({
           <div className="flex items-center gap-1 rounded-md border border-border bg-card">
             <button
               type="button"
-              onClick={() => setZoomIndex((i) => Math.max(0, i - 1))}
+              onClick={() => {
+                manuallyAdjustedZoomRef.current = true;
+                setZoomIndex((i) => Math.max(0, i - 1));
+              }}
               disabled={zoomIndex === 0}
               className="flex !h-6 !min-h-6 !w-6 items-center justify-center !border-0 !bg-transparent !p-0 text-muted-foreground !shadow-none transition hover:!bg-transparent hover:text-primary disabled:opacity-30"
               aria-label="缩小"
@@ -1366,7 +1525,10 @@ const GanttTimelineContent = ({
             <span className="w-10 text-center text-xs text-muted-foreground">{ZOOM_LABELS[zoomIndex]}</span>
             <button
               type="button"
-              onClick={() => setZoomIndex((i) => Math.min(ZOOM_LEVELS.length - 1, i + 1))}
+              onClick={() => {
+                manuallyAdjustedZoomRef.current = true;
+                setZoomIndex((i) => Math.min(ZOOM_LEVELS.length - 1, i + 1));
+              }}
               disabled={zoomIndex === ZOOM_LEVELS.length - 1}
               className="flex !h-6 !min-h-6 !w-6 items-center justify-center !border-0 !bg-transparent !p-0 text-muted-foreground !shadow-none transition hover:!bg-transparent hover:text-primary disabled:opacity-30"
               aria-label="放大"
@@ -1583,6 +1745,9 @@ const GanttTimelineContent = ({
                     fromY={fromY}
                     toX={toX}
                     toY={toY}
+                    tone={criticalPathTaskIds.has(link.predecessorId) && criticalPathTaskIds.has(link.successorId)
+                      ? "critical"
+                      : "dependency"}
                   />
                 );
               })}
@@ -1615,13 +1780,28 @@ const GanttTimelineContent = ({
               const left = (relativeTimeline ? row.timelineStartDays : diffDays(visibleStartDate, row.startDate)) * config.dayWidth;
               const width = config.dayWidth * row.spanDays;
               const showBarLabel = width >= 72;
+              const labelAvailableWidth = Math.max(0, timelineWidth - left - width - 12);
               const barLabel = row.taskName || row.taskCode;
+              const ownerLabel = (row.ownerMembers ?? (row.ownerMember ? [row.ownerMember] : []))
+                .map((owner) => owner.personName)
+                .filter(Boolean)
+                .join("、");
+              const timelineLabel = ownerLabel ? `${barLabel} · ${ownerLabel}` : barLabel;
               const progress = Math.min(100, Math.max(0, row.progress ?? 0));
               const floatSpanDays = showFloat
                 ? floatCalendarSpanDays(row.endDate, row.freeFloatMinutes, calendarMode)
                 : 0;
               const floatWidth = config.dayWidth * floatSpanDays;
               const scheduleStatus = row.scheduleStatus as GanttScheduleStatus | undefined;
+              const taskDepth = taskDepthById.get(row.id) ?? 0;
+              const hasChildren = childIdsByParentId.has(row.id);
+              const barColor = ganttDepthColor(taskDepth);
+              const barSurfaceColor = ganttDepthColor(taskDepth, hasChildren ? 0.38 : 0.24);
+              const barBorderColor = ganttDepthColor(taskDepth, hasChildren ? 0.98 : 0.84);
+              const criticalPathNumbers = criticalPathNumbersByTaskId.get(row.id) ?? [];
+              const criticalPathLabel = criticalPathNumbers.length > 0
+                ? `关键路径 P${criticalPathNumbers.join(" / P")}`
+                : "";
               return (
                 <div
                   key={row.id}
@@ -1635,38 +1815,57 @@ const GanttTimelineContent = ({
                 >
                   <div
                     className={cn(
-                      "relative h-full w-full overflow-hidden rounded-sm border shadow-sm",
-                      row.isCritical
-                        ? "border-destructive/60 bg-destructive/25"
-                        : resourceCriticalTaskIdSet.has(row.id)
-                          ? "border-sky-400/75 bg-sky-400/20"
-                          : "border-primary/60 bg-primary/25"
+                      "relative h-full w-full overflow-hidden rounded-sm border shadow-sm transition-[box-shadow,border-color] duration-150",
+                      row.isCritical && "shadow-[inset_0_2px_0_hsl(var(--destructive)),0_0_0_1px_hsl(var(--destructive)/0.32)]",
+                      resourceCriticalTaskIdSet.has(row.id) && "shadow-[inset_0_-2px_0_#38bdf8]",
                     )}
-                    title={`${barLabel}: ${row.startDate} ~ ${row.endDate}，当前进度 ${progress}%\n最早 ${row.earlyStartDate || "--"} ~ ${row.earlyFinishDate || "--"}\n最迟 ${row.lateStartDate || "--"} ~ ${row.lateFinishDate || "--"}\n总浮动 ${formatFloat(row.totalFloatMinutes)}，自由浮动 ${formatFloat(row.freeFloatMinutes)}`}
+                    style={{
+                      backgroundColor: barSurfaceColor,
+                      borderColor: row.isCritical ? "hsl(var(--destructive) / 0.9)" : barBorderColor,
+                    }}
+                    title={`${timelineLabel}: ${row.startDate} ~ ${row.endDate}，当前进度 ${progress}%${criticalPathLabel ? `\n${criticalPathLabel}` : ""}\n最早 ${row.earlyStartDate || "--"} ~ ${row.earlyFinishDate || "--"}\n最迟 ${row.lateStartDate || "--"} ~ ${row.lateFinishDate || "--"}\n总浮动 ${formatFloat(row.totalFloatMinutes)}，自由浮动 ${formatFloat(row.freeFloatMinutes)}`}
                   >
                     <div
-                      className={cn(
-                        "h-full rounded-sm",
-                        row.isCritical ? "bg-destructive" : resourceCriticalTaskIdSet.has(row.id) ? "bg-sky-500" : "bg-primary"
-                      )}
-                      style={{ width: `${progress}%` }}
+                      className="h-full rounded-sm transition-[width] duration-150"
+                      style={{
+                        width: `${progress}%`,
+                        backgroundColor: row.isCritical ? "hsl(var(--destructive))" : barColor,
+                      }}
                     />
                   </div>
                   {floatWidth > 0 && (
                     <span
                       aria-hidden="true"
-                      className="pointer-events-none absolute left-full top-1/2 h-0 border-t border-dashed border-sky-400/70"
+                      className="pointer-events-none absolute left-full top-1/2 z-10 h-0 border-t-2 border-dashed border-sky-300/95 drop-shadow-[0_0_2px_rgba(56,189,248,0.95)]"
                       style={{ width: floatWidth }}
                     >
-                      <span className="absolute -right-0.5 -top-1 size-1.5 rounded-full bg-sky-400/75" />
+                      <span className="absolute -left-0.5 -top-1.5 size-2 rounded-full border border-background bg-sky-200" />
+                      <span className="absolute -right-0.5 -top-1.5 size-2 rounded-full border border-background bg-sky-300" />
+                      {floatWidth >= 40 && (
+                        <span className="absolute left-1 top-1 whitespace-nowrap rounded-sm bg-sky-950/95 px-1 py-px text-[9px] leading-3 text-sky-100 shadow-sm">
+                          浮动 {formatFloat(row.freeFloatMinutes)}
+                        </span>
+                      )}
+                    </span>
+                  )}
+                  {criticalPathNumbers.length > 0 && (
+                    <span
+                      className="pointer-events-none absolute -top-4 left-0 z-20 max-w-[72px] truncate rounded-sm bg-destructive px-1 font-mono text-[9px] leading-3 text-destructive-foreground shadow-sm"
+                      title={criticalPathLabel}
+                    >
+                      P{criticalPathNumbers.join("/")}
                     </span>
                   )}
                   {scheduleStatus === "NEGATIVE_FLOAT" && (
                     <span className="pointer-events-none absolute -right-1 top-0 size-2 rounded-full bg-destructive shadow-[0_0_0_2px_hsl(var(--background))]" />
                   )}
-                  {showBarLabel && (
-                    <span className="pointer-events-none ml-2 max-w-[180px] truncate text-[11px] text-muted-foreground">
-                      {barLabel}
+                  {showBarLabel && labelAvailableWidth >= 24 && (
+                    <span
+                      className="absolute left-full ml-2 truncate text-[11px] text-muted-foreground"
+                      style={{ width: labelAvailableWidth }}
+                      title={timelineLabel}
+                    >
+                      {timelineLabel}
                     </span>
                   )}
                 </div>
@@ -1857,39 +2056,16 @@ const GanttTimelineContent = ({
                     onClick={(event) => openContextSubmenu("schedule", event.currentTarget)}
                   >
                     <CalendarClock className="size-4 shrink-0" />
-                    <span>排期设置</span>
+                    <span>任务设置</span>
                     <MenuChevronRight className="ml-auto size-3.5" />
                   </button>
                   <GanttContextSubmenuPortal
                     active={contextSubmenu === "schedule"}
-                    ariaLabel="排期设置"
+                    ariaLabel="任务设置"
                     className="min-w-52"
                     portalContainer={portalContainer}
                     position={contextSubmenuPosition}
                   >
-                      <div className="px-3 py-1.5 text-[11px] text-muted-foreground">任务排期方式</div>
-                      {([
-                        ["AUTO", "自动排期", "由依赖、资源和父级边界计算"],
-                        ["DURATION_FORWARD", "工期固定 · 正排", "可修改开始时间和工期，计划完成自动计算"],
-                        ["DURATION_BACKWARD", "工期固定 · 倒排", "可修改计划完成和工期，计划开始自动计算"],
-                        ["DATES_FIXED", "日期固定", "可修改计划开始和计划完成，工期自动计算"],
-                      ] as const).map(([taskMode, label, description]) => (
-                        <button
-                          key={taskMode}
-                          type="button"
-                          role="menuitemradio"
-                          aria-checked={normalizeTaskMode(contextTask.taskMode) === taskMode}
-                          className="gantt-context-menu-item flex-col items-start gap-0.5 py-2"
-                          onClick={() => void updateContextSchedule({ taskMode })}
-                        >
-                          <span className="flex w-full items-center gap-2">
-                            <span>{normalizeTaskMode(contextTask.taskMode) === taskMode ? "✓" : ""}</span>
-                            {label}
-                          </span>
-                          <span className="pl-5 text-[11px] font-normal text-muted-foreground">{description}</span>
-                        </button>
-                      ))}
-                      <div className="gantt-context-menu-separator" />
                       <div className="px-3 py-1.5 text-[11px] text-muted-foreground">任务优先级</div>
                       {contextPriorityReadOnly ? (
                         <div className="px-3 py-2 text-sm text-muted-foreground" aria-label={`任务优先级只读：${contextPriorityReadOnlyLabel}`}>
@@ -1906,7 +2082,7 @@ const GanttTimelineContent = ({
                           role="menuitemradio"
                           aria-checked={normalizeGanttUserPriority(contextTask.userPriority) === userPriority}
                           className="gantt-context-menu-item"
-                          onClick={() => void updateContextSchedule({ userPriority })}
+                          onClick={() => void updateContextTaskSettings({ userPriority }, "userPriority")}
                         >
                           <span>{normalizeGanttUserPriority(contextTask.userPriority) === userPriority ? "✓" : ""}</span>
                           <span>{label}</span>
@@ -1927,7 +2103,7 @@ const GanttTimelineContent = ({
                               role="menuitemradio"
                               aria-checked={normalizeParentBoundaryMode(contextTask.parentBoundaryMode) === parentBoundaryMode}
                               className="gantt-context-menu-item"
-                              onClick={() => void updateContextSchedule({ parentBoundaryMode })}
+                              onClick={() => void updateContextTaskSettings({ parentBoundaryMode }, "parentBoundaryMode")}
                             >
                               <span>{normalizeParentBoundaryMode(contextTask.parentBoundaryMode) === parentBoundaryMode ? "✓" : ""}</span>
                               <span>{label}</span>
@@ -2593,13 +2769,10 @@ const EditableTaskRow = ({
   const relativePlanReadOnly = row.relativeStartOffsetDays != null && row.relativeFinishOffsetDays != null;
   const hasUnassignedLeafTasks = unassignedLeafTasks.length > 0;
   const hasResourceConflict = resourceConflictMessages.length > 0;
-  const levelColor = GANTT_DEPTH_COLORS[taskDepth % GANTT_DEPTH_COLORS.length];
-  const levelCycle = Math.floor(taskDepth / GANTT_DEPTH_COLORS.length);
-  const levelLightness = Math.max(42, levelColor.lightness - levelCycle * 6);
   const levelRowStyle = {
-    "--gantt-level-row": `hsl(${levelColor.hue} ${levelColor.saturation}% ${levelLightness}% / ${hasChildren ? 0.11 : 0.06})`,
-    "--gantt-level-hover": `hsl(${levelColor.hue} ${levelColor.saturation}% ${levelLightness}% / ${hasChildren ? 0.17 : 0.12})`,
-    "--gantt-level-accent": `hsl(${levelColor.hue} ${levelColor.saturation}% ${levelLightness}% / 0.68)`,
+    "--gantt-level-row": ganttDepthColor(taskDepth, hasChildren ? 0.11 : 0.06),
+    "--gantt-level-hover": ganttDepthColor(taskDepth, hasChildren ? 0.17 : 0.12),
+    "--gantt-level-accent": ganttDepthColor(taskDepth, 0.68),
   } as CSSProperties & Record<"--gantt-level-row" | "--gantt-level-hover" | "--gantt-level-accent", string>;
 
   const updateDraft = <K extends keyof GanttTaskDraft>(key: K, value: GanttTaskDraft[K]) => {
@@ -2920,41 +3093,52 @@ const EditableTaskRow = ({
         />
       ))}
       {isColumnVisible("owner") && (
-        <div data-gantt-column-key="owner" className="flex min-w-0 items-center gap-1">
-          <div className="min-w-0 flex-1">
-            <HierarchicalMultiSelect
-              options={ownerSelectOptions}
-              value={ownerSelectValue}
-              multiple={false}
-              ariaLabel="负责人"
-              searchPlaceholder="搜索项目成员或角色"
-              emptyText="没有可选择的项目成员"
-              placeholder="未分配"
-              title={ownerReadOnly
+        <div data-gantt-column-key="owner" className="flex min-w-0 items-center gap-1 px-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="min-w-0 flex-1">
+                <HierarchicalMultiSelect
+                  options={ownerSelectOptions}
+                  value={ownerSelectValue}
+                  multiple={false}
+                  ariaLabel="负责人"
+                  searchPlaceholder="搜索项目成员或角色"
+                  emptyText="没有可选择的项目成员"
+                  placeholder="未分配"
+                  title={ownerReadOnly
+                    ? ownerNames.length > 0
+                      ? `已汇总 ${ownerNames.length} 名子任务负责人，请先调整子任务`
+                      : "父任务负责人由子任务自动汇总，请先在末级任务设置负责人"
+                    : ownerNames.join("、") || "未分配"}
+                  onChange={(ownerMemberIds) => {
+                    if (!canEdit || isSaving || ownerReadOnly) return;
+                    const normalizedOwnerMemberIds = [...new Set(ownerMemberIds)];
+                    const nextDraft = {
+                      ...draft,
+                      ownerMemberIds: normalizedOwnerMemberIds,
+                      ownerMemberId: normalizedOwnerMemberIds.length === 1 ? normalizedOwnerMemberIds[0] : null,
+                    };
+                    setDraft(nextDraft);
+                    if (!taskDraftEquals(row, nextDraft, calendarMode)) {
+                      void onUpdateTask?.(row, nextDraft, "owner");
+                    }
+                  }}
+                  applyOnClose
+                  className={cn(inlineSelectClass, "w-full text-left")}
+                  contentClassName="w-[360px]"
+                  portalContainer={portalContainer}
+                  disabled={!canEdit || isSaving || ownerReadOnly}
+                />
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="top" align="start" className="max-w-80 break-words">
+              {ownerReadOnly
                 ? ownerNames.length > 0
-                  ? `已汇总 ${ownerNames.length} 名子任务负责人，请先调整子任务`
-                  : "父任务负责人由子任务自动汇总，请先在末级任务设置负责人"
-                : ownerNames.join("、") || "未分配"}
-              onChange={(ownerMemberIds) => {
-                if (!canEdit || isSaving || ownerReadOnly) return;
-                const normalizedOwnerMemberIds = [...new Set(ownerMemberIds)];
-                const nextDraft = {
-                  ...draft,
-                  ownerMemberIds: normalizedOwnerMemberIds,
-                  ownerMemberId: normalizedOwnerMemberIds.length === 1 ? normalizedOwnerMemberIds[0] : null,
-                };
-                setDraft(nextDraft);
-                if (!taskDraftEquals(row, nextDraft, calendarMode)) {
-                  void onUpdateTask?.(row, nextDraft, "owner");
-                }
-              }}
-              applyOnClose
-              className={cn(inlineSelectClass, "text-left")}
-              contentClassName="w-[360px]"
-              portalContainer={portalContainer}
-              disabled={!canEdit || isSaving || ownerReadOnly}
-            />
-          </div>
+                  ? `已汇总：${ownerNames.join("、")}`
+                  : "父任务负责人由子任务自动汇总"
+                : ownerNames.join("、") || "未分配负责人"}
+            </TooltipContent>
+          </Tooltip>
           {hasResourceConflict && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -3428,18 +3612,29 @@ const DependencyConnector = ({
   fromY: number;
   toX: number;
   toY: number;
-  tone?: "dependency" | "resource";
+  tone?: "dependency" | "critical" | "resource";
 }) => {
   const elbow = Math.max(fromX + 12, Math.min(toX - 12, fromX + 28));
   const endX = Math.max(toX - 4, 0);
   const path = `M ${fromX} ${fromY} L ${elbow} ${fromY} L ${elbow} ${toY} L ${endX} ${toY}`;
 
   const resource = tone === "resource";
-  const color = resource ? "#38bdf8" : "#94a3b8";
+  const critical = tone === "critical";
+  const color = resource ? "#38bdf8" : critical ? "#ef4444" : "#cbd5e1";
   return (
     <g>
-      <path d={path} fill="none" stroke={color} strokeDasharray={resource ? undefined : "4 3"} strokeWidth={resource ? 2 : 1.4} />
-      <polygon points={`${endX},${toY - 4} ${endX},${toY + 4} ${toX + 3},${toY}`} fill={color} />
+      <title>{resource ? "资源关键链" : critical ? "关键路径 FS 依赖" : "FS 依赖：紧前任务完成后开始"}</title>
+      <path d={path} fill="none" stroke="#020617" strokeWidth={resource || critical ? 4 : 3.5} opacity={0.7} strokeLinecap="round" strokeLinejoin="round" />
+      <path
+        d={path}
+        data-gantt-link-tone={tone}
+        fill="none"
+        stroke={color}
+        strokeWidth={resource || critical ? 2.25 : 1.8}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <polygon points={`${endX},${toY - 5} ${endX},${toY + 5} ${toX + 4},${toY}`} fill={color} />
     </g>
   );
 };
