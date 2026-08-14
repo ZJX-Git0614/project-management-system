@@ -103,6 +103,9 @@ describe("createResourceScheduleCandidates", () => {
     expect(candidate.issues).not.toContainEqual(expect.objectContaining({
       code: "MISSING_START_DATE",
     }));
+    expect(result.issues).not.toContainEqual(expect.objectContaining({
+      code: "MISSING_START_DATE",
+    }));
     expect(candidate.changes).toEqual(expect.arrayContaining([
       expect.objectContaining({
         taskId: "task-a",

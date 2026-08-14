@@ -4,7 +4,6 @@ import {
   detectResourceConflicts,
   detectResourceScheduleIssues,
   FORMAL_RESOURCE_SCHEDULE_CANDIDATE_KIND,
-  resourceScheduleSnapshotHash,
   type ResourceConflict,
   type ResourceScheduleCandidate,
   type ResourceScheduleCandidateKind,
@@ -327,28 +326,17 @@ export const resourceScheduleAnalysis = async (
 };
 
 export const resourceConflictAnalysis = async (projectId: string) => {
-  const context = await loadProjectResourceScheduleContext(projectId);
-  const currentTaskIds = new Set(
-    context.tasks.filter((task) => task.projectId === projectId).map((task) => task.id),
-  );
+  // Keep the regular refresh on the exact same formal planning path as the
+  // preview. In particular, a project without a concrete T0 has valid
+  // relative coordinates; scanning the persisted blank calendar dates made a
+  // refresh invent MISSING_START_DATE issues that disappeared in the preview.
+  const { context, result } = await resourceScheduleAnalysis(projectId);
   return {
     context,
     result: {
-      snapshotHash: resourceScheduleSnapshotHash(context.tasks, {
-        projectStartDate: context.currentProject.startDate,
-        expectedEndDate: context.currentProject.expectedEndDate,
-        hardFinishDate: context.currentProject.ganttHardFinishDate,
-        calendarMode: context.currentProject.ganttCalendarMode === "WORKING_DAYS" ? "WORKING_DAYS" : "CALENDAR_DAYS",
-      }),
-      conflicts: detectResourceConflicts(
-        context.tasks,
-        context.currentProject.ganttCalendarMode === "WORKING_DAYS" ? "WORKING_DAYS" : "CALENDAR_DAYS",
-      )
-        .filter((conflict) => conflict.taskIds.some((taskId) => currentTaskIds.has(taskId))),
-      issues: detectResourceScheduleIssues(
-        context.tasks,
-        context.currentProject.ganttCalendarMode === "WORKING_DAYS" ? "WORKING_DAYS" : "CALENDAR_DAYS",
-      ).filter((issue) => issue.taskIds.some((taskId) => currentTaskIds.has(taskId))),
+      snapshotHash: result.snapshotHash,
+      conflicts: result.conflicts,
+      issues: result.issues,
     },
   };
 };

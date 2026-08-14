@@ -1084,10 +1084,10 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     // confirmation reserved for actual date, duration, priority and FS edits.
     const planColumns = new Set(["startDate", "endDate", "durationDays", "priority", "predecessor"]);
     const isPlanEdit = Boolean(columnKey && planColumns.has(columnKey));
-    const hasChildTasks = tasks.some((candidate) => candidate.parentId === task.id);
-    // A direct plan edit establishes a deterministic task mode. Editing a
-    // summary date also creates a locked boundary, rather than letting the
-    // next roll-up overwrite the project manager's explicit window.
+    // A direct plan edit establishes a deterministic task mode. Parent
+    // boundary mode is intentionally not changed here: summary tasks keep
+    // rolling up their children unless the project manager explicitly picks
+    // "锁定父任务边界" from the context menu.
     const nextDraft: GanttTaskDraft = isPlanEdit
       ? {
         ...draft,
@@ -1100,9 +1100,6 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                 ? (draft.startDate ? "DATES_FIXED" : draft.durationDays > 0 ? "DURATION_BACKWARD" : "AUTO")
                 : "AUTO"
           : draft.taskMode,
-        parentBoundaryMode: hasChildTasks && draft.parentBoundaryMode === "ROLLUP"
-          ? "LOCKED"
-          : draft.parentBoundaryMode,
       }
       : draft;
     if (!isValidGanttDurationDays(nextDraft.durationDays) || (

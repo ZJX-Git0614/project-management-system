@@ -204,21 +204,23 @@ export const rollupGanttParentRelativeSchedules = <T extends ParentRollupTask>(t
       const hasExplicitRelativeBoundary = isGanttRelativeOffset(task.relativeStartOffsetDays)
         && isGanttRelativeOffset(task.relativeFinishOffsetDays);
 
-      // A target/locked parent only remains independent when it actually has
-      // a T0 boundary. A legacy calendar date cannot define a relative
-      // schedule, so the task still exposes T0 coordinates. For a locked or
-      // target parent, its entered duration remains a hard boundary instead
-      // of being silently extended to the child envelope.
-      if (scheduledChildren.length > 0 && !hasExplicitRelativeBoundary) {
+      // ROLLUP parents are summaries by definition and must keep following
+      // their children, even if a previous refresh left relative values on
+      // the parent. TARGET and LOCKED parents remain independent only when
+      // they have an explicit relative boundary. A legacy calendar date
+      // cannot define a relative schedule, so those parents still expose T0
+      // coordinates derived from their children.
+      const shouldRollupChildEnvelope = !preservesBoundary || !hasExplicitRelativeBoundary;
+      if (scheduledChildren.length > 0 && shouldRollupChildEnvelope) {
         const childStartOffsetDays = Math.min(...scheduledChildren.map((child) => child.relativeStartOffsetDays!));
         const childFinishOffsetDays = Math.max(...scheduledChildren.map((child) => child.relativeFinishOffsetDays!));
         const preservesDuration = preservesBoundary && Number.isFinite(task.durationDays) && task.durationDays > 0;
-        const relativeStartOffsetDays = isGanttRelativeOffset(task.relativeStartOffsetDays)
+        const relativeStartOffsetDays = preservesBoundary && isGanttRelativeOffset(task.relativeStartOffsetDays)
           ? task.relativeStartOffsetDays
-          : isGanttRelativeOffset(task.relativeFinishOffsetDays) && preservesDuration
+          : preservesBoundary && isGanttRelativeOffset(task.relativeFinishOffsetDays) && preservesDuration
             ? normalizeGanttRelativeOffset(task.relativeFinishOffsetDays - task.durationDays + 1)
             : childStartOffsetDays;
-        const relativeFinishOffsetDays = isGanttRelativeOffset(task.relativeFinishOffsetDays)
+        const relativeFinishOffsetDays = preservesBoundary && isGanttRelativeOffset(task.relativeFinishOffsetDays)
           ? task.relativeFinishOffsetDays
           : preservesDuration
             ? normalizeGanttRelativeOffset(relativeStartOffsetDays + task.durationDays - 1)

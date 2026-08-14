@@ -314,4 +314,52 @@ describe("gantt parent plan rollups", () => {
       estimatedWorkHours: 37.5,
     });
   });
+
+  it("refreshes an automatic parent T0 envelope when a child extends beyond stale parent offsets", () => {
+    const rows = rollupGanttParentRelativeSchedules([
+      {
+        id: "parent",
+        parentId: null,
+        parentBoundaryMode: "ROLLUP",
+        startDate: "",
+        finishDate: "",
+        relativeStartOffsetDays: 0,
+        relativeFinishOffsetDays: 9,
+        durationDays: 10,
+        durationMinutes: 4500,
+        estimatedWorkHours: 0,
+      },
+      {
+        id: "child-a",
+        parentId: "parent",
+        parentBoundaryMode: "ROLLUP",
+        startDate: "",
+        finishDate: "",
+        relativeStartOffsetDays: 0,
+        relativeFinishOffsetDays: 2,
+        durationDays: 3,
+        durationMinutes: 1350,
+        estimatedWorkHours: 22.5,
+      },
+      {
+        id: "child-b",
+        parentId: "parent",
+        parentBoundaryMode: "ROLLUP",
+        startDate: "",
+        finishDate: "",
+        relativeStartOffsetDays: 10,
+        relativeFinishOffsetDays: 11,
+        durationDays: 2,
+        durationMinutes: 900,
+        estimatedWorkHours: 15,
+      },
+    ]);
+
+    expect(rows.find((row) => row.id === "parent")).toMatchObject({
+      relativeStartOffsetDays: 0,
+      relativeFinishOffsetDays: 11,
+      durationDays: 12,
+      estimatedWorkHours: 37.5,
+    });
+  });
 });

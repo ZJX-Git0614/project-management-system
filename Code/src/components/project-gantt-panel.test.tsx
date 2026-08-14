@@ -381,7 +381,7 @@ describe("ProjectGanttPanel", () => {
     await waitFor(() => expect(workingDayButton).toHaveAttribute("aria-pressed", "true"));
   });
 
-  it("keeps a manually edited parent schedule as a locked boundary instead of rolling it back", async () => {
+  it("keeps a manually edited parent schedule in automatic summary mode until a boundary is explicitly locked", async () => {
     mocks.get.mockImplementation((url: string) => {
       const backgroundResponse = backgroundGanttGet(url);
       if (backgroundResponse) return backgroundResponse;
@@ -402,7 +402,7 @@ describe("ProjectGanttPanel", () => {
           conflicts: [],
         });
       }
-      return Promise.resolve({ ...rootTask, parentBoundaryMode: "LOCKED", taskMode: "DURATION_FORWARD" });
+      return Promise.resolve({ ...rootTask, parentBoundaryMode: "ROLLUP", taskMode: "DURATION_FORWARD" });
     });
 
     render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
@@ -417,7 +417,7 @@ describe("ProjectGanttPanel", () => {
         startDate: "2026-08-01",
         endDate: "2026-08-10",
         taskMode: "DURATION_FORWARD",
-        parentBoundaryMode: "LOCKED",
+        parentBoundaryMode: "ROLLUP",
       }),
     ));
   });
