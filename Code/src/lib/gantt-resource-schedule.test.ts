@@ -252,6 +252,49 @@ describe("createResourceScheduleCandidates", () => {
     });
   });
 
+  it("已解锁的 FS 后继优先于高优先级的无依赖任务", () => {
+    const tasks = [
+      task({
+        id: "predecessor",
+        startDate: "",
+        finishDate: "",
+        durationDays: 1,
+        schedulePriority: 1000,
+      }),
+      task({
+        id: "successor",
+        startDate: "",
+        finishDate: "",
+        durationDays: 1,
+        schedulePriority: 1,
+        sortOrder: 2,
+        predecessorDependencies: [{ predecessorTaskId: "predecessor" }],
+      }),
+      task({
+        id: "unrelated",
+        startDate: "",
+        finishDate: "",
+        durationDays: 1,
+        schedulePriority: 900,
+        sortOrder: 3,
+      }),
+    ];
+    const result = createResourceScheduleCandidates({
+      tasks,
+      currentProjectId: "project-1",
+      calendarMode: "CALENDAR_DAYS",
+      expectedEndDate: "2026-01-10",
+      modeOverride: "DURATION_FORWARD",
+    });
+    const applied = applyResourceScheduleCandidate(tasks, formalCandidate(result));
+
+    expect(applied).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "predecessor", startDate: "2026-01-01", finishDate: "2026-01-01" }),
+      expect.objectContaining({ id: "successor", startDate: "2026-01-02", finishDate: "2026-01-02" }),
+      expect.objectContaining({ id: "unrelated", startDate: "2026-01-03", finishDate: "2026-01-03" }),
+    ]));
+  });
+
   it("锁定父级边界冲突时说明具体父任务与处理方式", () => {
     const result = createResourceScheduleCandidates({
       tasks: [
