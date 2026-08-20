@@ -1626,6 +1626,33 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     .filter((row) => row.isCritical)
     .length;
   const taskById = new Map(tasks.map((task) => [task.id, task] as const));
+  const renderLockedBoundaryActions = (issue: { code: string; taskIds: string[] }) => {
+    if (issue.code !== "PARENT_BOUNDARY_VIOLATION") return null;
+    const lockedParent = issue.taskIds
+      .map((taskId) => taskById.get(taskId))
+      .find((task) => task?.parentBoundaryMode === "LOCKED");
+    if (!lockedParent) return null;
+    const focusParent = (columnKey: string) => {
+      setResourceDialogOpen(false);
+      signalHistoryTarget({ taskIds: [lockedParent.id], columnKey });
+    };
+    return (
+      <div className="mt-2 border-l-2 border-destructive/40 pl-2">
+        <div className="flex items-center gap-1 font-medium text-destructive">
+          <LockKeyhole className="size-3.5" />
+          <span>父任务边界：已锁定 · {lockedParent.taskName || lockedParent.id}</span>
+        </div>
+        <div className="mt-1 flex flex-wrap gap-2">
+          <Button type="button" variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => focusParent("parentBoundaryMode")}>
+            解除锁定边界
+          </Button>
+          <Button type="button" variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => focusParent("finishDate")}>
+            扩大完成边界
+          </Button>
+        </div>
+      </div>
+    );
+  };
   const undoEntry = currentHistory.entries[currentHistory.cursor];
   const redoEntry = currentHistory.entries[currentHistory.cursor + 1];
   const resourceAttentionCount = (resourceAnalysis?.conflicts?.length ?? 0) + (resourceAnalysis?.issues?.length ?? 0);
@@ -2288,32 +2315,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                       <div className="min-w-0 flex-1">
                         <div>{issue.message}</div>
                         <div className="mt-0.5 text-muted-foreground">{issue.suggestion}</div>
-                        {issue.code === "PARENT_BOUNDARY_VIOLATION" && (() => {
-                          const lockedParent = issue.taskIds
-                            .map((taskId) => taskById.get(taskId))
-                            .find((task) => task?.parentBoundaryMode === "LOCKED");
-                          if (!lockedParent) return null;
-                          const focusParent = (columnKey: string) => {
-                            setResourceDialogOpen(false);
-                            signalHistoryTarget({ taskIds: [lockedParent.id], columnKey });
-                          };
-                          return (
-                            <div className="mt-2 border-l-2 border-destructive/40 pl-2">
-                              <div className="flex items-center gap-1 font-medium text-destructive">
-                                <LockKeyhole className="size-3.5" />
-                                <span>父任务边界：已锁定 · {lockedParent.taskName || lockedParent.id}</span>
-                              </div>
-                              <div className="mt-1 flex flex-wrap gap-2">
-                                <Button type="button" variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => focusParent("parentBoundaryMode")}>
-                                  解除锁定边界
-                                </Button>
-                                <Button type="button" variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => focusParent("finishDate")}>
-                                  扩大完成边界
-                                </Button>
-                              </div>
-                            </div>
-                          );
-                        })()}
+                        {renderLockedBoundaryActions(issue)}
                       </div>
                     </div>
                   ))}
@@ -2436,6 +2438,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                       <div className="mt-3 text-[11px] leading-4 text-amber-600 dark:text-amber-400">
                         {candidate.issues.find((issue) => issue.severity === "ERROR")?.message
                           ?? candidate.issues[0]?.message}
+                        {candidate.issues.map((issue) => <div key={issue.id}>{renderLockedBoundaryActions(issue)}</div>)}
                       </div>
                     )}
                     {candidate.taskExplanations.length > 0 && (
