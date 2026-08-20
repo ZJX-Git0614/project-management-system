@@ -71,6 +71,9 @@ describe("gantt CPM", () => {
       scheduleStatus: "NEGATIVE_FLOAT",
       isCritical: false,
     });
+    const metrics = result.metricsByTaskId.get("a")!;
+    expect(metrics.earlyStartDate <= metrics.lateStartDate).toBe(true);
+    expect(metrics.earlyFinishDate <= metrics.lateFinishDate).toBe(true);
     expect(result.requiredFinishVarianceMinutes).toBe(-GANTT_MINUTES_PER_DAY);
   });
 
