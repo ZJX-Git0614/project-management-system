@@ -597,6 +597,62 @@ describe("ProjectGanttPanel", () => {
     ));
   });
 
+  it("shows locked parent state and boundary resolution choices in the resource preview", async () => {
+    const lockedParent = { ...rootTask, parentBoundaryMode: "LOCKED" as const };
+    mocks.get.mockImplementation((url: string) => {
+      if (url.includes("/gantt-tasks/resource-schedule") && url.includes("includeCandidates=1")) {
+        return Promise.resolve({
+          revision: 7,
+          snapshotHash: "locked-parent-preview",
+          conflicts: [],
+          issues: [],
+          durationSuggestions: [],
+          durationSuggestionIssues: [],
+          candidates: [{
+            id: "locked-parent-candidate",
+            kind: "FORMAL",
+            title: "正式排期",
+            explanation: "测试锁定父级边界",
+            relativeSchedule: false,
+            applicable: false,
+            changes: [],
+            remainingConflicts: [],
+            issues: [{
+              id: "parent-boundary-child-1",
+              code: "PARENT_BOUNDARY_VIOLATION",
+              severity: "ERROR",
+              taskIds: [childTask.id, lockedParent.id],
+              message: "子任务超出父任务锁定完成边界。",
+              suggestion: "请调整锁定父任务边界。",
+            }],
+            resourceConstrainedTaskIds: [],
+            resourceCriticalChainTaskIds: [],
+            resourceCriticalChainLinks: [],
+            criticalTaskIds: [],
+            taskExplanations: [],
+            metrics: { completionDate: "", delayedDays: 0, movedTaskCount: 0, totalShiftDays: 0 },
+          }],
+        });
+      }
+      const backgroundResponse = backgroundGanttGet(url);
+      if (backgroundResponse) return backgroundResponse;
+      if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      if (url.endsWith("/deletions")) return Promise.resolve([]);
+      return Promise.resolve([lockedParent, childTask]);
+    });
+
+    render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
+
+    const user = userEvent.setup();
+    await screen.findByTestId("gantt-timeline");
+    await user.click(screen.getByRole("button", { name: /自动排期/ }));
+    await screen.findByText("父任务边界：已锁定 · 根任务");
+    expect(screen.getByRole("button", { name: "解除锁定边界" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "扩大完成边界" })).toBeInTheDocument();
+  });
+
   it("does not let a stalled history snapshot block applying duration suggestions", async () => {
     mocks.get.mockImplementation((url: string) => {
       if (url.includes("/gantt-tasks/resource-schedule") && url.includes("includeCandidates=1")) {
