@@ -16,4 +16,16 @@ describe("permission tree migrations", () => {
     expect(tree["只读角色"]).not.toContain("overview");
     expect(hasPermission(tree, "只读角色", "project-gantt:view")).toBe(true);
   });
+
+  it("keeps project managers able to process workflows assigned by project role", () => {
+    const tree = normalizePermissionTree({
+      "项目经理": [],
+    });
+
+    expect(tree["项目经理"]).toEqual(expect.arrayContaining([
+      "approval-center",
+      "approval-center:view",
+      "approval-center:process",
+    ]));
+  });
 });

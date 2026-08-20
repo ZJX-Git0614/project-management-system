@@ -9,6 +9,7 @@ import {
   approvalActiveKey,
   approvalBusinessIdForProjectStatus,
   approvalBusinessIdForWbsBaseline,
+  approvalPayloadsMatch,
   normalizeApprovalWorkflowNodes,
   requiredApprovalCount,
   validateApprovalWorkflowDraft,
@@ -65,6 +66,17 @@ describe("approval workflow domain", () => {
       businessType: APPROVAL_BUSINESS_TYPES.WBS_BASELINE_PUBLISH,
       businessId: approvalBusinessIdForWbsBaseline("project-1"),
     })).toBe("project-1:WBS_BASELINE_PUBLISH:project-1:wbs-baseline");
+  });
+
+  it("treats only semantically identical approval payloads as idempotent", () => {
+    expect(approvalPayloadsMatch(
+      { taskId: "task-1", progress: 80, metadata: { owner: "张三", tags: ["现场", "安装"] } },
+      { metadata: { tags: ["现场", "安装"], owner: "张三" }, progress: 80, taskId: "task-1" },
+    )).toBe(true);
+    expect(approvalPayloadsMatch(
+      { taskId: "task-1", progress: 80 },
+      { taskId: "task-1", progress: 100 },
+    )).toBe(false);
   });
 
   it("keeps countersign and any-sign semantics unambiguous", () => {

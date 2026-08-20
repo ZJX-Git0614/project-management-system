@@ -2,7 +2,21 @@ import { Prisma, type ApprovalWorkflowInstance } from "@prisma/client";
 
 import { PROJECT_STATUS_LABEL } from "@/lib/constants";
 import { assertProjectStatusTransition } from "@/lib/project-lifecycle";
-import { APPROVAL_BUSINESS_TYPES } from "@/lib/approval-workflow";
+import {
+  APPROVAL_BUSINESS_TYPES,
+  approvalBusinessIdForWbsTaskProgressSubmission,
+} from "@/lib/approval-workflow";
+import { roundGanttHours } from "@/lib/gantt-calendar";
+import { normalizeGanttCompletion } from "@/lib/gantt-planning-rules";
+import {
+  publishProjectGanttBaselineWithClient,
+  validateProjectGanttBaseline,
+} from "@/lib/gantt-baseline-service";
+import {
+  convertFixedSuccessorsBlockedByActualCompletion,
+  getProjectGanttCalendarMode,
+  refreshProjectGanttDerivedState,
+} from "@/lib/gantt-task-service";
 
 type DbClient = Prisma.TransactionClient;
 
@@ -11,7 +25,15 @@ type ApprovalPayload = Record<string, unknown>;
 export interface ApprovalBusinessHandler {
   handlerKey: string;
   businessType: string;
-  validateStart(db: DbClient, params: { projectId: string; businessId: string; payload: ApprovalPayload }): Promise<void>;
+  validateStart(
+    db: DbClient,
+    params: {
+      projectId: string;
+      businessId: string;
+      payload: ApprovalPayload;
+      requester: { userId: string; displayName: string };
+    },
+  ): Promise<void>;
   buildTitle(params: { projectName: string; payload: ApprovalPayload }): string;
   buildSummary(params: { projectName: string; payload: ApprovalPayload }): string;
   apply(db: DbClient, instance: ApprovalWorkflowInstance): Promise<Record<string, unknown>>;
@@ -20,6 +42,85 @@ export interface ApprovalBusinessHandler {
 const objectPayload = (value: Prisma.JsonValue): ApprovalPayload => (
   value && typeof value === "object" && !Array.isArray(value) ? value as ApprovalPayload : {}
 );
+
+const todayString = () => {
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+};
+
+const requireDateString = (value: unknown, fieldName: string) => {
+  const text = String(value ?? "").trim();
+  if (text && !/^\d{4}-\d{2}-\d{2}$/.test(text)) throw new Error(`${fieldName}格式应为 YYYY-MM-DD`);
+  return text;
+};
+
+const normalizeProgressPayload = (
+  payload: ApprovalPayload,
+  previousProgress?: number,
+) => {
+  const actualStartDate = requireDateString(payload.actualStartDate, "实际开始时间");
+  const actualEndDate = requireDateString(payload.actualEndDate, "实际完成时间");
+  const requestedActualWorkHours = Number(payload.actualWorkHours ?? 0);
+  if (!Number.isFinite(requestedActualWorkHours) || requestedActualWorkHours < 0) {
+    throw new Error("实际工时必须为大于或等于 0 的数字");
+  }
+  const completion = normalizeGanttCompletion({
+    progress: Number(payload.progress),
+    actualStartDate,
+    actualEndDate,
+    previousProgress,
+    today: todayString(),
+  });
+  if (completion.error) throw new Error(completion.error);
+  return {
+    progress: completion.progress,
+    actualStartDate: completion.actualStartDate,
+    actualEndDate: completion.actualEndDate,
+    actualWorkHours: roundGanttHours(requestedActualWorkHours),
+  };
+};
+
+const taskIdFromProgressPayload = (payload: ApprovalPayload) => String(payload.taskId || "").trim();
+
+const ensureProjectAllowsWbsProgressSubmission = async (db: DbClient, projectId: string) => {
+  const project = await db.project.findUnique({ where: { id: projectId }, select: { status: true } });
+  if (!project) throw new Error("项目不存在");
+  if (project.status === "COMPLETED" || project.status === "VOIDED") {
+    throw new Error("已完成或已作废的项目不能提交 WBS 任务进度");
+  }
+};
+
+const ensureRequesterIsDirectTaskOwner = async (
+  db: DbClient,
+  params: { projectId: string; taskId: string; requesterAccountId: string },
+) => {
+  const task = await db.projectGanttTask.findFirst({
+    where: { id: params.taskId, projectId: params.projectId },
+    include: {
+      ownerMember: { select: { id: true, accountId: true, personName: true } },
+      ownerLinks: {
+        include: { projectMember: { select: { id: true, accountId: true, personName: true } } },
+        orderBy: { createdAt: "asc" },
+      },
+    },
+  });
+  if (!task) throw new Error("甘特任务不存在");
+  const childCount = await db.projectGanttTask.count({ where: { projectId: params.projectId, parentId: params.taskId } });
+  if (childCount > 0) throw new Error("只有末级任务可以提交进度审批");
+  const ownerAccounts = task.ownerLinks.length > 0
+    ? task.ownerLinks.map((link) => link.projectMember.accountId).filter(Boolean)
+    : task.ownerMember?.accountId ? [task.ownerMember.accountId] : [];
+  if (!ownerAccounts.includes(params.requesterAccountId)) {
+    throw new Error("只有末级任务的直接负责人可以提交本人任务进度");
+  }
+  return task;
+};
 
 const projectStatusHandler: ApprovalBusinessHandler = {
   handlerKey: "APPLY_PROJECT_STATUS_CHANGE",
@@ -79,6 +180,10 @@ const wbsBaselineHandler: ApprovalBusinessHandler = {
     if (!Number.isInteger(revision) || revision !== project.ganttRevision) {
       throw new Error("WBS 已发生变化，请刷新后重新发起基线审批");
     }
+    const validation = await validateProjectGanttBaseline(params.projectId, db);
+    if (!validation.valid) {
+      throw new Error(validation.blockers.map((blocker) => blocker.message).join("\n"));
+    }
   },
   buildTitle({ projectName }) {
     return `${projectName}：发布 WBS 基线`;
@@ -93,57 +198,104 @@ const wbsBaselineHandler: ApprovalBusinessHandler = {
     if (!project || project.ganttRevision !== revision) {
       throw new Error("审批期间 WBS 已发生变化，不能发布过期基线");
     }
-    const affected = await db.$executeRaw(Prisma.sql`
-      UPDATE "ProjectGanttTask"
-      SET
-        "baselineStartDate" = "startDate",
-        "baselineFinishDate" = "finishDate",
-        "baselineCost" = "budgetAtCompletion",
-        "updatedAt" = CURRENT_TIMESTAMP
-      WHERE "projectId" = ${instance.projectId}
-    `);
-    const tasks = await db.projectGanttTask.findMany({
-      where: { projectId: instance.projectId },
-      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
-      select: {
-        id: true,
-        parentId: true,
-        taskCode: true,
-        taskName: true,
-        startDate: true,
-        finishDate: true,
-        durationDays: true,
-        estimatedWorkHours: true,
-        budgetAtCompletion: true,
-        baselineStartDate: true,
-        baselineFinishDate: true,
-        baselineCost: true,
+    const result = await publishProjectGanttBaselineWithClient({
+      projectId: instance.projectId,
+      actor: {
+        userId: instance.requesterAccountId,
+        displayName: instance.requesterName,
       },
+      reason: String(payload.reason ?? "").trim(),
+      client: db,
     });
-    await db.projectScheduleSnapshot.create({
+    return {
+      ganttRevision: revision,
+      baselineVersion: result.baseline.version,
+      affectedTasks: result.affectedTasks,
+    };
+  },
+};
+
+const wbsTaskProgressSubmissionHandler: ApprovalBusinessHandler = {
+  handlerKey: "APPLY_WBS_TASK_PROGRESS_SUBMISSION",
+  businessType: APPROVAL_BUSINESS_TYPES.WBS_TASK_PROGRESS_SUBMISSION,
+  async validateStart(db, params) {
+    const taskId = taskIdFromProgressPayload(params.payload);
+    if (!taskId) throw new Error("甘特任务不能为空");
+    if (params.businessId !== approvalBusinessIdForWbsTaskProgressSubmission(params.projectId, taskId)) {
+      throw new Error("WBS 任务进度审批主键不匹配");
+    }
+    await ensureProjectAllowsWbsProgressSubmission(db, params.projectId);
+    const task = await ensureRequesterIsDirectTaskOwner(db, {
+      projectId: params.projectId,
+      taskId,
+      requesterAccountId: params.requester.userId,
+    });
+    if (task.progress >= 100) throw new Error("已完成的末级任务不能重复提交进度审批");
+    normalizeProgressPayload(params.payload, task.progress);
+  },
+  buildTitle({ projectName, payload }) {
+    const taskCode = String(payload.taskCode || "").trim();
+    const taskName = String(payload.taskName || "").trim();
+    const taskLabel = [taskCode, taskName].filter(Boolean).join(" · ") || "WBS 任务";
+    return `${projectName}：${taskLabel}进度提交`;
+  },
+  buildSummary({ payload }) {
+    const normalized = normalizeProgressPayload(payload);
+    return `申请更新任务进度为 ${normalized.progress}%，实际开始 ${normalized.actualStartDate || "未填写"}，实际完成 ${normalized.actualEndDate || "未填写"}，实际工时 ${normalized.actualWorkHours}h`;
+  },
+  async apply(db, instance) {
+    const payload = objectPayload(instance.payload);
+    const taskId = taskIdFromProgressPayload(payload);
+    if (!taskId) throw new Error("甘特任务不能为空");
+    await ensureProjectAllowsWbsProgressSubmission(db, instance.projectId);
+    const task = await ensureRequesterIsDirectTaskOwner(db, {
+      projectId: instance.projectId,
+      taskId,
+      requesterAccountId: instance.requesterAccountId,
+    });
+    if (task.progress >= 100) throw new Error("已完成的末级任务不能重复应用进度审批");
+    const normalized = normalizeProgressPayload(payload, task.progress);
+    const calendarMode = await getProjectGanttCalendarMode(instance.projectId, db);
+    const updated = await db.projectGanttTask.updateMany({
+      where: { id: taskId, projectId: instance.projectId },
       data: {
-        projectId: instance.projectId,
-        sourceFileName: `审批发布基线-r${revision}`,
-        schemaVersion: "approval-baseline-v1",
-        normalizedJson: JSON.stringify({ revision, publishedAt: new Date().toISOString(), tasks }),
-        createdBy: instance.requesterName,
+        progress: normalized.progress,
+        actualStartDate: normalized.actualStartDate,
+        actualEndDate: normalized.actualEndDate,
+        actualWorkHours: normalized.actualWorkHours,
       },
     });
+    if (updated.count !== 1) throw new Error("甘特任务已变化，审批结果未执行，请重新核对");
+    const releasedSuccessors = await convertFixedSuccessorsBlockedByActualCompletion(
+      instance.projectId,
+      [taskId],
+      calendarMode,
+      db,
+    );
+    await refreshProjectGanttDerivedState(instance.projectId, calendarMode, db);
+    await db.project.update({ where: { id: instance.projectId }, data: { ganttRevision: { increment: 1 } } });
     await db.operationHistory.create({
       data: {
         projectId: instance.projectId,
         entityType: "ProjectGanttTask",
-        entityId: instance.projectId,
-        actionType: "BASELINE_PUBLISHED",
+        entityId: taskId,
+        actionType: "UPDATE_ACTUAL",
         operator: instance.requesterName,
-        detail: `审批通过后发布 WBS 基线，修订号 ${revision}，共 ${Number(affected)} 条任务`,
+        detail: `审批通过后更新任务「${task.taskCode} · ${task.taskName}」执行事实：进度 ${task.progress}% → ${normalized.progress}%，实际完成 ${task.actualEndDate || "未填写"} → ${normalized.actualEndDate || "未填写"}`,
       },
     });
-    return { ganttRevision: revision, affectedTasks: Number(affected) };
+    return {
+      taskId,
+      progress: normalized.progress,
+      actualStartDate: normalized.actualStartDate,
+      actualEndDate: normalized.actualEndDate,
+      actualWorkHours: normalized.actualWorkHours,
+      releasedSuccessorTaskIds: releasedSuccessors.map((task) => task.id),
+    };
   },
 };
 
-const handlers = [projectStatusHandler, wbsBaselineHandler];
+const handlers = [projectStatusHandler, wbsBaselineHandler, wbsTaskProgressSubmissionHandler];
 
 const byBusinessType = new Map(handlers.map((handler) => [handler.businessType, handler]));
 const byHandlerKey = new Map(handlers.map((handler) => [handler.handlerKey, handler]));

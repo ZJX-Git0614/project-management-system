@@ -83,13 +83,17 @@ export async function POST(
   if (action === "REQUEST_APPROVAL") {
     if (!await userHasPermission(user, "project-gantt:baseline-request")) return forbidden();
     try {
+      await refreshProjectGanttDerivedState(id);
       const overview = await getProjectGanttBaselineOverview(id);
+      if (!overview.validation.valid) {
+        return err(overview.validation.blockers.map((blocker) => blocker.message).join("\n"), 409);
+      }
       const approval = await startApprovalWorkflow({
         projectId: id,
         businessType: APPROVAL_BUSINESS_TYPES.WBS_BASELINE_PUBLISH,
         businessId: approvalBusinessIdForWbsBaseline(id),
         requester: user,
-        payload: { ganttRevision: project.ganttRevision },
+        payload: { ganttRevision: project.ganttRevision, reason },
       });
       return ok({
         approvalRequired: true,

@@ -354,6 +354,7 @@ export const DEFAULT_PERMISSION_TREE: PermissionTreeState = {
     ...allNodeKeysFor("project-scope"),
     ...allNodeKeysFor("project-risk"),
     ...allNodeKeysFor("project-collaboration"),
+    ...allNodeKeysFor("approval-center"),
   ],
   "项目成员": [
     "project-list",

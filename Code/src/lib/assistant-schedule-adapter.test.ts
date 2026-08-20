@@ -168,7 +168,7 @@ describe("assistant schedule adapter", () => {
     });
     expect(schedule.tasks[0].successorDependencies).toHaveLength(1);
     expect(schedule.tasks[1].predecessorDependencies).toHaveLength(1);
-    expect(schedule.criticalPath).toEqual({ status: "CALCULATED", criticalTaskIds: ["task-2", "task-1"] });
+    expect(schedule.criticalPath).toEqual({ status: "CALCULATED", criticalTaskIds: ["task-2"] });
   });
 
   it("normalizes imported resources and assignments to database task ids", () => {

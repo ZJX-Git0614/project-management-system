@@ -9,7 +9,10 @@ import {
   type GanttCalendarMode,
 } from "@/lib/gantt-calendar";
 import { prisma } from "@/lib/prisma";
-import { refreshProjectGanttDerivedState } from "@/lib/gantt-task-service";
+import {
+  materializeProjectGanttRelativeSchedule,
+  refreshProjectGanttDerivedState,
+} from "@/lib/gantt-task-service";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 
 export async function GET(
@@ -95,11 +98,24 @@ export async function PUT(
   if (projectStartDate && !/^\d{4}-\d{2}-\d{2}$/.test(projectStartDate)) {
     return err("项目 T0 日期格式应为 YYYY-MM-DD，或留空使用相对排期");
   }
-  await prisma.project.update({
-    where: { id },
-    data: { ganttCalendarMode: calendarMode, ganttHardFinishDate: wbsFinishDate, startDate: projectStartDate },
-  });
-  await refreshProjectGanttDerivedState(id, calendarMode);
+  // A concrete T0 is also a repair boundary: older writes could leave a
+  // relative offset behind even after the project date had been saved. The
+  // materializer is idempotent, so run it for every concrete T0 update.
+  const materializeRelativeSchedule = /^\d{4}-\d{2}-\d{2}$/.test(projectStartDate);
+  await prisma.$transaction(async (tx) => {
+    await tx.project.update({
+      where: { id },
+      data: { ganttCalendarMode: calendarMode, ganttHardFinishDate: wbsFinishDate, startDate: projectStartDate },
+    });
+    // T0-relative offsets are an intermediate planning representation. Once a
+    // real project T0 is confirmed, materialize every task before the next
+    // resource-scheduling request can read the project.
+    if (materializeRelativeSchedule) {
+      await materializeProjectGanttRelativeSchedule(id, projectStartDate, calendarMode, tx);
+    } else {
+      await refreshProjectGanttDerivedState(id, calendarMode, tx);
+    }
+  }, { timeout: 30_000, maxWait: 10_000 });
   await prisma.operationHistory.create({
     data: {
       projectId: id,

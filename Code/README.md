@@ -124,6 +124,14 @@ WBS 只保留一套可应用的“正式自动排期”。普通编辑、导入�
 
 详细的算法、边界模式、依赖展开和实施决议见 [WBS 排期逻辑梳理与精简记录](docs/WBS排期逻辑梳理与精简记录.md) 与 [ADR 0003：WBS 单一正式自动排期](docs/adr/0003-resource-constrained-wbs-scheduling.md)。
 
+## Draw.io 网络图
+
+项目 WBS 管理顶部提供独立的“网络图”入口，可导出可编辑的单代号网络图和双代号网络图 `.drawio` 文件。Web 导出不依赖 MCP；Windows 与 macOS 均可直接使用 draw.io Desktop 或 diagrams.net 打开。
+
+- Windows MCP 启动器、配置模板和说明位于 `deployment/windows-x86/`，正式部署脚本会将其安装到 `C:\ProgramData\Ceastar-PMS`。
+- macOS MCP 启动器、安装器、配置模板和说明位于 `deployment/macos/`，执行 `./install-drawio-mcp.sh --verify` 后安装到 `~/Library/Application Support/Ceastar-PMS`。
+- MCP 使用官方固定版本 `@drawio/mcp@1.5.0`。它供支持 MCP 的桌面客户端调用，PMS Web 服务不会直接控制用户桌面的 Draw.io。
+
 ## 目录结构
 
 ```text

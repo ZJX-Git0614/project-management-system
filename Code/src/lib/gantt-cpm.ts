@@ -5,7 +5,10 @@ import {
   shiftTaskDate,
   type GanttCalendarMode,
 } from "@/lib/gantt-calendar";
-import { isGanttFsDependency } from "@/lib/gantt-planning-rules";
+import {
+  isGanttFsDependency,
+  normalizeGanttScheduleMode,
+} from "@/lib/gantt-planning-rules";
 import { buildGanttLeafScheduleNetwork } from "@/lib/gantt-schedule-network";
 
 export const GANTT_MINUTES_PER_DAY = GANTT_HOURS_PER_DAY * 60;
@@ -29,6 +32,7 @@ export interface CpmGanttDependency {
 export interface CpmGanttTask {
   id: string;
   parentId?: string | null;
+  parentBoundaryMode?: string;
   /** Direct project-member assignments. Summary rows only participate in
    * critical-path display when exactly one person owns that summary. */
   ownerMemberIds?: string[];
@@ -62,6 +66,12 @@ export interface GanttCpmResult {
   calculatedFinishDate: string;
   requiredFinishVarianceMinutes: number | null;
   hasDependencyCycle: boolean;
+  /**
+   * Executable terminal tasks that belong to one of the project's longest
+   * finish-to-start paths. This is deliberately independent from local float
+   * constraints such as a locked summary boundary.
+   */
+  projectCriticalTaskIds: Set<string>;
   metricsByTaskId: Map<string, GanttCpmMetrics>;
 }
 
@@ -82,6 +92,16 @@ const effectiveTaskStartDate = (task: CpmGanttTask) => {
     return task.actualStartDate!;
   }
   return task.startDate;
+};
+
+const plannedStartConstrainsCpm = (task: CpmGanttTask) => {
+  if (isCompletedWithActualFinish(task)) return true;
+  const rawMode = String(task.taskMode ?? "").trim();
+  // Preserve legacy callers that predate task modes. Explicit AUTO tasks are
+  // movable: their resource-levelled placement must not become a business
+  // constraint and feed back into the red FS critical path.
+  if (!rawMode) return true;
+  return normalizeGanttScheduleMode(rawMode) !== "AUTO";
 };
 
 const taskDurationMinutes = (task: CpmGanttTask, mode: GanttCalendarMode) => {
@@ -179,18 +199,8 @@ const emptyMetrics = (status: GanttScheduleStatus = "UNSCHEDULED"): GanttCpmMetr
 
 const statusForFloat = (totalFloatMinutes: number): GanttScheduleStatus => {
   if (totalFloatMinutes < 0) return "NEGATIVE_FLOAT";
-  if (totalFloatMinutes === 0) return "CRITICAL";
   if (totalFloatMinutes <= GANTT_NEAR_CRITICAL_MINUTES) return "NEAR_CRITICAL";
   return "NORMAL";
-};
-
-const statusPriority: Record<GanttScheduleStatus, number> = {
-  UNSCHEDULED: 0,
-  NORMAL: 1,
-  NEAR_CRITICAL: 2,
-  CRITICAL: 3,
-  NEGATIVE_FLOAT: 4,
-  INVALID_DEPENDENCY: 5,
 };
 
 const constraintBounds = (
@@ -219,16 +229,15 @@ export const calculateGanttCpm = (
   mode: GanttCalendarMode,
   requiredFinishDate = "",
 ): GanttCpmResult => {
-  const validDates = tasks.map((task) => effectiveTaskStartDate(task)).filter((value) => DATE_PATTERN.test(value));
-  const projectStartDate = validDates.sort()[0] ?? "";
   const metricsByTaskId = new Map<string, GanttCpmMetrics>();
-  if (!projectStartDate || tasks.length === 0) {
+  if (tasks.length === 0) {
     tasks.forEach((task) => metricsByTaskId.set(task.id, emptyMetrics()));
     return {
-      projectStartDate,
+      projectStartDate: "",
       calculatedFinishDate: "",
       requiredFinishVarianceMinutes: null,
       hasDependencyCycle: false,
+      projectCriticalTaskIds: new Set(),
       metricsByTaskId,
     };
   }
@@ -242,6 +251,28 @@ export const calculateGanttCpm = (
   const expandedNetwork = buildGanttLeafScheduleNetwork(tasks);
   const leafTaskIdSet = new Set(expandedNetwork.leafTaskIds);
   const networkTasks = expandedNetwork.tasks.filter((task) => leafTaskIdSet.has(task.id));
+  // The project origin belongs to the executable network. Summary dates are
+  // rolled-up display values and must not move the CPM clock ahead of the
+  // earliest leaf activity. Keep a fallback for undated leaf-only test data
+  // and legacy plans where only a summary row carries a date.
+  const networkValidDates = networkTasks
+    .map((task) => effectiveTaskStartDate(task))
+    .filter((value) => DATE_PATTERN.test(value));
+  const fallbackValidDates = tasks
+    .map((task) => effectiveTaskStartDate(task))
+    .filter((value) => DATE_PATTERN.test(value));
+  const projectStartDate = (networkValidDates.length > 0 ? networkValidDates : fallbackValidDates).sort()[0] ?? "";
+  if (!projectStartDate) {
+    tasks.forEach((task) => metricsByTaskId.set(task.id, emptyMetrics()));
+    return {
+      projectStartDate,
+      calculatedFinishDate: "",
+      requiredFinishVarianceMinutes: null,
+      hasDependencyCycle: false,
+      projectCriticalTaskIds: new Set(),
+      metricsByTaskId,
+    };
+  }
   const networkTaskById = new Map(networkTasks.map((task) => [task.id, task]));
   const durationById = new Map(networkTasks.map((task) => [task.id, taskDurationMinutes(task, mode)]));
   const schedulableIds = new Set(networkTasks
@@ -295,7 +326,10 @@ export const calculateGanttCpm = (
   for (const id of order) {
     const task = networkTaskById.get(id)!;
     const duration = durationById.get(id) ?? 0;
-    const baseStart = dateToMinutes(projectStartDate, effectiveTaskStartDate(task), mode, "START");
+    const effectiveStartDate = effectiveTaskStartDate(task);
+    const baseStart = plannedStartConstrainsCpm(task) && DATE_PATTERN.test(effectiveStartDate)
+      ? dateToMinutes(projectStartDate, effectiveStartDate, mode, "START")
+      : 0;
     const dependencyStart = Math.max(
       Number.NEGATIVE_INFINITY,
       ...(incoming.get(id) ?? []).map((edge) => (earlyStart.get(edge.predecessorTaskId) ?? 0) + edge.weightMinutes),
@@ -306,20 +340,67 @@ export const calculateGanttCpm = (
     earlyFinish.set(id, start + duration);
   }
 
-  const networkFinishMinutes = order.length > 0
+  const logicalNetworkFinishMinutes = order.length > 0
     ? Math.max(...order.map((id) => earlyFinish.get(id) ?? 0))
     : 0;
+  const scheduledFinishById = new Map<string, number>();
+  for (const task of networkTasks) {
+    if (DATE_PATTERN.test(task.finishDate ?? "")) {
+      scheduledFinishById.set(
+        task.id,
+        dateToMinutes(projectStartDate, task.finishDate!, mode, "FINISH") + GANTT_MINUTES_PER_DAY,
+      );
+    }
+  }
+  // The persisted finish dates describe the current resource-levelled plan.
+  // Keep that boundary for the plan summary display, but never feed it into
+  // CPM late dates or float: an AUTO task moved by resource balancing is not a
+  // dependency constraint and cannot create a second, false critical path.
+  const scheduledNetworkFinishMinutes = scheduledFinishById.size > 0
+    ? Math.max(...scheduledFinishById.values())
+    : 0;
+  const networkFinishMinutes = Math.max(logicalNetworkFinishMinutes, scheduledNetworkFinishMinutes);
   const normalizedRequiredFinish = DATE_PATTERN.test(requiredFinishDate)
     ? normalizeTaskFinishDate(requiredFinishDate, mode)
     : "";
   const requiredFinishMinutes = normalizedRequiredFinish
     ? dateToMinutes(projectStartDate, normalizedRequiredFinish, mode, "FINISH") + GANTT_MINUTES_PER_DAY
     : null;
-  const backwardFinishMinutes = requiredFinishMinutes !== null && requiredFinishMinutes < networkFinishMinutes
+  // A required finish earlier than the logical network finish is a real
+  // deadline conflict and must produce negative float. A later required
+  // finish is only slack and must not extend the project's longest-path
+  // calculation.
+  const cpmFinishMinutes = requiredFinishMinutes !== null
+    && requiredFinishMinutes < logicalNetworkFinishMinutes
     ? requiredFinishMinutes
-    : networkFinishMinutes;
+    : logicalNetworkFinishMinutes;
+  const backwardFinishMinutes = cpmFinishMinutes;
   const lateStart = new Map<string, number>();
   const lateFinish = new Map<string, number>();
+  const ancestorFinishStartCeiling = (task: CpmGanttTask, duration: number) => {
+    const ceilings: number[] = [];
+    let parentId = task.parentId ?? null;
+    const visited = new Set<string>();
+    while (parentId && !visited.has(parentId)) {
+      visited.add(parentId);
+      const parent = taskById.get(parentId);
+      if (!parent) break;
+      // A rolled-up parent date describes its children; it is not a CPM
+      // restriction. Only an explicitly locked parent boundary may cap a
+      // child late date. Otherwise a local zero float can be mistaken for a
+      // project-level critical path.
+      if (
+        String(parent.parentBoundaryMode ?? "").toUpperCase() === "LOCKED"
+        && DATE_PATTERN.test(parent.finishDate ?? "")
+      ) {
+        const finishMinutes = dateToMinutes(projectStartDate, parent.finishDate!, mode, "FINISH")
+          + GANTT_MINUTES_PER_DAY;
+        ceilings.push(finishMinutes - duration);
+      }
+      parentId = parent.parentId ?? null;
+    }
+    return ceilings.length > 0 ? Math.min(...ceilings) : Number.POSITIVE_INFINITY;
+  };
   for (const id of [...order].reverse()) {
     const task = networkTaskById.get(id)!;
     const duration = durationById.get(id) ?? 0;
@@ -331,6 +412,7 @@ export const calculateGanttCpm = (
     const start = Math.min(
       successorLimit === Number.POSITIVE_INFINITY ? backwardFinishMinutes - duration : successorLimit,
       bounds.upper,
+      ancestorFinishStartCeiling(task, duration),
     );
     lateStart.set(id, start);
     lateFinish.set(id, start + duration);
@@ -349,14 +431,21 @@ export const calculateGanttCpm = (
     const ef = earlyFinish.get(task.id)!;
     const ls = lateStart.get(task.id)!;
     const lf = lateFinish.get(task.id)!;
+    // Total float is the CPM definition: late start minus early start. It is
+    // intentionally independent from the persisted resource-levelled bar.
     const totalFloatMinutes = ls - es;
     const edgeFloat = (outgoing.get(task.id) ?? []).map((edge) => (
-      (earlyStart.get(edge.successorTaskId) ?? networkFinishMinutes) - (es + edge.weightMinutes)
+      (earlyStart.get(edge.successorTaskId) ?? cpmFinishMinutes)
+      - (es + edge.weightMinutes)
     ));
-    const freeFloatMinutes = edgeFloat.length > 0
+    const rawFreeFloatMinutes = edgeFloat.length > 0
       ? Math.min(...edgeFloat)
-      : networkFinishMinutes - ef;
-    const scheduleStatus = statusForFloat(totalFloatMinutes);
+      : cpmFinishMinutes - ef;
+    // Free float cannot exceed total float, including when a locked ancestor
+    // boundary or an early required finish produces negative slack.
+    const freeFloatMinutes = Math.min(rawFreeFloatMinutes, totalFloatMinutes);
+    const completed = Number(task.progress ?? 0) >= 100;
+    const scheduleStatus = completed ? "NORMAL" : statusForFloat(totalFloatMinutes);
     metricsByTaskId.set(task.id, {
       earlyStartDate: dateFromMinutes(projectStartDate, es, mode),
       earlyFinishDate: finishDateFromMinutes(projectStartDate, ef, es, mode),
@@ -365,30 +454,52 @@ export const calculateGanttCpm = (
       totalFloatMinutes,
       freeFloatMinutes,
       scheduleStatus,
-      isCritical: totalFloatMinutes <= 0,
+      // Completed work remains in the historical dependency calculation so a
+      // late actual finish can move successors, but it no longer consumes the
+      // active critical-path highlight or reports an unresolved warning.
+      isCritical: false,
     });
   }
 
-  const rollupOwnerIdsByTaskId = new Map<string, Set<string>>();
-  const resolveRollupOwnerIds = (taskId: string, visiting = new Set<string>()): Set<string> => {
-    const existing = rollupOwnerIdsByTaskId.get(taskId);
-    if (existing) return existing;
-    if (visiting.has(taskId)) return new Set<string>();
+  // Project critical paths are the longest finish-to-start paths through the
+  // executable leaf network. A zero float caused solely by a local hard
+  // boundary is still a schedule warning, but it must not be presented as a
+  // project critical path. Keep every tied predecessor so parallel longest
+  // paths are all returned rather than selecting an arbitrary single route.
+  const projectCriticalTaskIds = new Set<string>();
+  const criticalEndIds = order.filter((id) => (
+    (earlyFinish.get(id) ?? Number.NEGATIVE_INFINITY) === logicalNetworkFinishMinutes
+  ));
+  const collectCriticalAncestors = (taskId: string, visiting = new Set<string>()) => {
+    if (visiting.has(taskId)) return;
     const nextVisiting = new Set(visiting).add(taskId);
-    const directOwnerIds = new Set(taskById.get(taskId)?.ownerMemberIds?.filter(Boolean) ?? []);
-    const childIds = childrenByParentId.get(taskId) ?? [];
-    if (childIds.length === 0) {
-      rollupOwnerIdsByTaskId.set(taskId, directOwnerIds);
-      return directOwnerIds;
+    const task = networkTaskById.get(taskId);
+    if (task && Number(task.progress ?? 0) < 100) {
+      projectCriticalTaskIds.add(taskId);
     }
-    const childOwnerIds = new Set<string>();
-    childIds.forEach((childId) => resolveRollupOwnerIds(childId, nextVisiting).forEach((ownerId) => childOwnerIds.add(ownerId)));
-    // Parent owners are derived from descendants. When work is assigned below
-    // the summary, those descendants define whether it is one serial stream.
-    const resolved = childOwnerIds.size > 0 ? childOwnerIds : directOwnerIds;
-    rollupOwnerIdsByTaskId.set(taskId, resolved);
-    return resolved;
+    const taskStart = earlyStart.get(taskId);
+    if (taskStart == null) return;
+    for (const edge of incoming.get(taskId) ?? []) {
+      const predecessorStart = earlyStart.get(edge.predecessorTaskId);
+      if (predecessorStart == null) continue;
+      if (predecessorStart + edge.weightMinutes === taskStart) {
+        collectCriticalAncestors(edge.predecessorTaskId, nextVisiting);
+      }
+    }
   };
+  criticalEndIds.forEach((taskId) => collectCriticalAncestors(taskId));
+  const strictProjectCriticalTaskIds = new Set<string>();
+  projectCriticalTaskIds.forEach((taskId) => {
+    const metrics = metricsByTaskId.get(taskId);
+    if (!metrics) return;
+    // CPM criticality has a strict meaning: the activity lies on a longest
+    // project path and has exactly zero total float. Negative float is a
+    // deadline/boundary conflict, not a critical-path marker.
+    if (metrics.totalFloatMinutes !== 0 || metrics.scheduleStatus === "NEGATIVE_FLOAT") return;
+    metrics.isCritical = true;
+    metrics.scheduleStatus = "CRITICAL";
+    strictProjectCriticalTaskIds.add(taskId);
+  });
 
   const aggregateSummary = (taskId: string, visiting = new Set<string>()): GanttCpmMetrics => {
     const existing = metricsByTaskId.get(taskId);
@@ -405,23 +516,26 @@ export const calculateGanttCpm = (
       metricsByTaskId.set(taskId, metrics);
       return metrics;
     }
-    const status = calculated.reduce((worst, item) => (
-      statusPriority[item.scheduleStatus] > statusPriority[worst] ? item.scheduleStatus : worst
-    ), "UNSCHEDULED" as GanttScheduleStatus);
+    const totalFloatMinutes = Math.min(...calculated.map((item) => item.totalFloatMinutes!));
+    // A summary row is a WBS roll-up, never an executable activity. Its
+    // status must be derived from the rolled-up float instead of inheriting a
+    // child's CRITICAL label. Otherwise every ancestor of a critical leaf is
+    // persisted as another critical task and the UI shows duplicated paths.
+    const status = childMetrics.some((item) => item.scheduleStatus === "INVALID_DEPENDENCY")
+      ? "INVALID_DEPENDENCY"
+      : statusForFloat(totalFloatMinutes);
     const metrics: GanttCpmMetrics = {
       earlyStartDate: calculated.map((item) => item.earlyStartDate).filter(Boolean).sort()[0] ?? "",
       earlyFinishDate: calculated.map((item) => item.earlyFinishDate).filter(Boolean).sort().at(-1) ?? "",
       lateStartDate: calculated.map((item) => item.lateStartDate).filter(Boolean).sort()[0] ?? "",
       lateFinishDate: calculated.map((item) => item.lateFinishDate).filter(Boolean).sort().at(-1) ?? "",
-      totalFloatMinutes: Math.min(...calculated.map((item) => item.totalFloatMinutes!)),
+      totalFloatMinutes,
       freeFloatMinutes: Math.min(...calculated.map((item) => item.freeFloatMinutes ?? Number.POSITIVE_INFINITY)),
       scheduleStatus: status,
-      // A parent with multiple direct owners represents parallel work streams.
-      // Marking it critical as well as each critical child produces overlapping
-      // red paths that are not actionable. Leaf tasks remain normal CPM nodes;
-      // only single-owner summaries may surface a rolled-up critical marker.
-      isCritical: resolveRollupOwnerIds(taskId).size === 1
-        && calculated.some((item) => item.isCritical),
+      // Summary nodes express WBS structure, not an independently executable
+      // activity. Only terminal nodes may belong to a critical path; otherwise
+      // every ancestor duplicates its descendant's critical marker.
+      isCritical: false,
     };
     if (metrics.freeFloatMinutes === Number.POSITIVE_INFINITY) metrics.freeFloatMinutes = null;
     metricsByTaskId.set(taskId, metrics);
@@ -438,8 +552,9 @@ export const calculateGanttCpm = (
     calculatedFinishDate,
     requiredFinishVarianceMinutes: requiredFinishMinutes === null
       ? null
-      : requiredFinishMinutes - networkFinishMinutes,
+      : requiredFinishMinutes - logicalNetworkFinishMinutes,
     hasDependencyCycle: cycleIds.size > 0,
+    projectCriticalTaskIds: strictProjectCriticalTaskIds,
     metricsByTaskId,
   };
 };

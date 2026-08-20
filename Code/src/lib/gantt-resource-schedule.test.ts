@@ -188,6 +188,119 @@ describe("createResourceScheduleCandidates", () => {
     }));
   });
 
+  it("先满足 FS 紧前任务，再处理同一负责人下无依赖的兄弟任务", () => {
+    const tasks = [
+      task({
+        id: "task-1-4-3",
+        taskName: "1.4.3",
+        startDate: "",
+        finishDate: "",
+        durationDays: 8,
+        sortOrder: 3,
+      }),
+      task({
+        id: "task-1-2-1",
+        taskName: "1.2.1",
+        startDate: "",
+        finishDate: "",
+        durationDays: 2,
+        sortOrder: 4,
+        predecessorDependencies: [{ predecessorTaskId: "task-1-4-3" }],
+      }),
+      task({
+        id: "task-1-4-1",
+        taskName: "1.4.1",
+        startDate: "",
+        finishDate: "",
+        durationDays: 1,
+        sortOrder: 1,
+      }),
+      task({
+        id: "task-1-4-2",
+        taskName: "1.4.2",
+        startDate: "",
+        finishDate: "",
+        durationDays: 1,
+        sortOrder: 2,
+      }),
+    ];
+    const result = createResourceScheduleCandidates({
+      tasks,
+      currentProjectId: "project-1",
+      calendarMode: "CALENDAR_DAYS",
+      expectedEndDate: "2026-01-20",
+      modeOverride: "DURATION_FORWARD",
+    });
+    const candidate = formalCandidate(result);
+    const applied = applyResourceScheduleCandidate(tasks, candidate);
+
+    expect(applied.find((item) => item.id === "task-1-4-3")).toMatchObject({
+      startDate: "2026-01-01",
+      finishDate: "2026-01-08",
+    });
+    expect(applied.find((item) => item.id === "task-1-2-1")).toMatchObject({
+      startDate: "2026-01-09",
+      finishDate: "2026-01-10",
+    });
+    expect(applied.find((item) => item.id === "task-1-4-1")).toMatchObject({
+      startDate: "2026-01-11",
+      finishDate: "2026-01-11",
+    });
+    expect(applied.find((item) => item.id === "task-1-4-2")).toMatchObject({
+      startDate: "2026-01-12",
+      finishDate: "2026-01-12",
+    });
+  });
+
+  it("锁定父级边界冲突时说明具体父任务与处理方式", () => {
+    const result = createResourceScheduleCandidates({
+      tasks: [
+        task({
+          id: "parent",
+          taskName: "1.4",
+          isLeaf: false,
+          ownerKeys: [],
+          startDate: "2026-01-01",
+          finishDate: "2026-01-02",
+          parentBoundaryMode: "LOCKED",
+        }),
+        task({
+          id: "child-a",
+          taskName: "1.4.1",
+          parentId: "parent",
+          startDate: "",
+          finishDate: "",
+          durationDays: 2,
+          sortOrder: 2,
+        }),
+        task({
+          id: "child-b",
+          taskName: "1.4.2",
+          parentId: "parent",
+          startDate: "",
+          finishDate: "",
+          durationDays: 2,
+          sortOrder: 3,
+        }),
+      ],
+      currentProjectId: "project-1",
+      calendarMode: "CALENDAR_DAYS",
+      projectStartDate: "2026-01-01",
+      expectedEndDate: "2026-01-10",
+      modeOverride: "DURATION_FORWARD",
+    });
+    const candidate = formalCandidate(result);
+    const issue = candidate.issues.find((item) => item.code === "PARENT_BOUNDARY_VIOLATION");
+
+    expect(candidate.applicable).toBe(false);
+    expect(issue).toMatchObject({
+      severity: "ERROR",
+      taskIds: expect.arrayContaining(["child-b", "parent"]),
+      message: expect.stringContaining("1.4"),
+      suggestion: expect.stringContaining("锁定父任务边界"),
+    });
+  });
+
   it("把其他项目和固定任务当作不可移动的资源占用", () => {
     const result = createResourceScheduleCandidates({
       tasks: [
@@ -748,6 +861,32 @@ describe("createResourceScheduleCandidates", () => {
       message: expect.stringContaining("计划完成"),
     }));
     expect(result.candidates.every((candidate) => !candidate.applicable)).toBe(true);
+  });
+
+  it("工期固定倒排忽略旧任务日期和项目 T0，仅使用 WBS 完成锚点", () => {
+    const result = createResourceScheduleCandidates({
+      tasks: [task({
+        id: "backward",
+        startDate: "2026-01-20",
+        finishDate: "2026-01-21",
+        durationDays: 2,
+      })],
+      currentProjectId: "project-1",
+      calendarMode: "CALENDAR_DAYS",
+      projectStartDate: "2026-01-20",
+      expectedEndDate: "2026-01-10",
+      hardFinishDate: "2026-01-10",
+      modeOverride: "DURATION_BACKWARD",
+    });
+
+    expect(formalCandidate(result).changes).toContainEqual(expect.objectContaining({
+      taskId: "backward",
+      startDate: "2026-01-09",
+      finishDate: "2026-01-10",
+    }));
+    expect(formalCandidate(result).issues).not.toContainEqual(expect.objectContaining({
+      code: "PROJECT_HARD_FINISH_VIOLATION",
+    }));
   });
 
   it("正式自动排期统一求解跨分支自动任务，不写回任务级排期模式", () => {

@@ -6,6 +6,7 @@ REPO_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
 OUTPUT_ROOT="${1:-$REPO_DIR/dist/releases/windows-x86}"
 IMAGE_NAME="$(tr -d '\r\n' < "$SCRIPT_DIR/image-name.txt")"
 RELEASE_ID="$(tr -d '\r\n' < "$SCRIPT_DIR/release-id.txt")"
+COMPATIBLE_BASE_RELEASE="20260806-4"
 SKIP_SOURCE_VERIFY="${SKIP_SOURCE_VERIFY:-0}"
 SKIP_IMAGE_BUILD="${SKIP_IMAGE_BUILD:-0}"
 
@@ -167,6 +168,7 @@ BUILD_TIME_UTC="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
 {
   printf 'Release ID: %s\n' "$RELEASE_ID"
+  printf 'Compatible base release: %s (cumulative update; no intermediate package required)\n' "$COMPATIBLE_BASE_RELEASE"
   printf 'Package: %s\n' "$PACKAGE_NAME"
   printf 'Strategy: staged blue-green candidate preflight, health-gated cutover, automatic application rollback\n'
   printf 'Target: Windows 10/11 x86-64 with Docker Desktop Linux containers\n'

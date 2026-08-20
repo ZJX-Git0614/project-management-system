@@ -69,7 +69,7 @@ describe("gantt CPM", () => {
     expect(result.metricsByTaskId.get("a")).toMatchObject({
       totalFloatMinutes: -GANTT_MINUTES_PER_DAY,
       scheduleStatus: "NEGATIVE_FLOAT",
-      isCritical: true,
+      isCritical: false,
     });
     expect(result.requiredFinishVarianceMinutes).toBe(-GANTT_MINUTES_PER_DAY);
   });
@@ -85,11 +85,11 @@ describe("gantt CPM", () => {
       earlyStartDate: "2026-07-01",
       earlyFinishDate: "2026-07-05",
       totalFloatMinutes: 0,
-      isCritical: true,
+      isCritical: false,
     });
   });
 
-  it("only marks a summary critical when all descendant work resolves to one owner", () => {
+  it("does not mark summary nodes critical regardless of descendant owners", () => {
     const singleOwner = calculateGanttCpm([
       task("summary", 5, [], { ownerMemberIds: [] }),
       task("a", 2, [], { parentId: "summary", ownerMemberIds: ["member-1"] }),
@@ -101,8 +101,10 @@ describe("gantt CPM", () => {
       task("b", 3, ["a"], { parentId: "summary", ownerMemberIds: ["member-2"] }),
     ], "CALENDAR_DAYS");
 
-    expect(singleOwner.metricsByTaskId.get("summary")?.isCritical).toBe(true);
+    expect(singleOwner.metricsByTaskId.get("summary")?.isCritical).toBe(false);
     expect(parallelOwners.metricsByTaskId.get("summary")?.isCritical).toBe(false);
+    expect(singleOwner.metricsByTaskId.get("summary")?.scheduleStatus).toBe("NEAR_CRITICAL");
+    expect(parallelOwners.metricsByTaskId.get("summary")?.scheduleStatus).toBe("NEAR_CRITICAL");
   });
 
   it("keeps unscheduled zero-duration tasks separate from milestones", () => {
@@ -115,6 +117,19 @@ describe("gantt CPM", () => {
     expect(result.metricsByTaskId.get("milestone")).toMatchObject({ totalFloatMinutes: 0, scheduleStatus: "CRITICAL" });
   });
 
+  it("anchors an undated executable task at the project origin instead of an ancient date", () => {
+    const result = calculateGanttCpm([
+      task("summary", 2, [], { startDate: "2026-07-01" }),
+      task("leaf", 2, [], { parentId: "summary", startDate: "" }),
+    ], "CALENDAR_DAYS");
+
+    expect(result.metricsByTaskId.get("leaf")).toMatchObject({
+      earlyStartDate: "2026-07-01",
+      earlyFinishDate: "2026-07-02",
+    });
+    expect(result.metricsByTaskId.get("leaf")?.earlyStartDate).not.toMatch(/^16/);
+  });
+
   it("uses the statutory working-day calendar for calculated dates", () => {
     const result = calculateGanttCpm([
       task("a", 2, [], { startDate: "2026-02-13" }),
@@ -123,6 +138,45 @@ describe("gantt CPM", () => {
 
     expect(result.metricsByTaskId.get("a")?.earlyFinishDate).toBe("2026-02-14");
     expect(result.metricsByTaskId.get("b")?.earlyStartDate).toBe("2026-02-24");
+  });
+
+  it("does not turn AUTO resource placement into a critical-path constraint", () => {
+    const result = calculateGanttCpm([
+      task("long", 8, [], { taskMode: "AUTO", startDate: "2026-07-01" }),
+      task("delayed", 1, [], { taskMode: "AUTO", startDate: "2026-07-10" }),
+      task("successor", 2, ["delayed"], { taskMode: "AUTO", startDate: "2026-07-11" }),
+    ], "CALENDAR_DAYS");
+
+    expect(result.metricsByTaskId.get("long")).toMatchObject({
+      totalFloatMinutes: 0,
+      isCritical: true,
+    });
+    expect(result.metricsByTaskId.get("delayed")).toMatchObject({
+      totalFloatMinutes: 5 * GANTT_MINUTES_PER_DAY,
+      isCritical: false,
+    });
+    expect(result.metricsByTaskId.get("successor")).toMatchObject({
+      totalFloatMinutes: 5 * GANTT_MINUTES_PER_DAY,
+      isCritical: false,
+    });
+  });
+
+  it("keeps fixed task dates as CPM constraints", () => {
+    const result = calculateGanttCpm([
+      task("long", 8, [], { taskMode: "AUTO", startDate: "2026-07-01" }),
+      task("fixed", 1, [], { taskMode: "DATES_FIXED", startDate: "2026-07-10" }),
+      task("successor", 2, ["fixed"], { taskMode: "AUTO", startDate: "2026-07-11" }),
+    ], "CALENDAR_DAYS");
+
+    expect(result.metricsByTaskId.get("long")?.isCritical).toBe(false);
+    expect(result.metricsByTaskId.get("fixed")).toMatchObject({
+      totalFloatMinutes: 0,
+      isCritical: true,
+    });
+    expect(result.metricsByTaskId.get("successor")).toMatchObject({
+      totalFloatMinutes: 0,
+      isCritical: true,
+    });
   });
 
   it("uses an actual late completion window for CPM without treating progress alone as schedule work", () => {
@@ -138,9 +192,58 @@ describe("gantt CPM", () => {
 
     expect(result.metricsByTaskId.get("completed")).toMatchObject({
       earlyFinishDate: "2026-07-05",
-      isCritical: true,
+      scheduleStatus: "NORMAL",
+      isCritical: false,
     });
     expect(result.metricsByTaskId.get("successor")?.earlyStartDate).toBe("2026-07-06");
+  });
+
+  it("caps leaf late dates and float at the parent finish boundary", () => {
+    const result = calculateGanttCpm([
+      task("parent", 12, [], { startDate: "2026-08-17", finishDate: "2026-09-01" }),
+      task("child-a", 2, [], { parentId: "parent", startDate: "2026-08-17" }),
+      task("child-b", 2, ["child-a"], { parentId: "parent", startDate: "2026-08-19" }),
+    ], "CALENDAR_DAYS");
+
+    expect((result.metricsByTaskId.get("child-a")?.lateFinishDate ?? "") <= "2026-09-01").toBe(true);
+    expect((result.metricsByTaskId.get("child-b")?.lateFinishDate ?? "") <= "2026-09-01").toBe(true);
+    ["child-a", "child-b"].forEach((taskId) => {
+      const metrics = result.metricsByTaskId.get(taskId);
+      expect(metrics?.freeFloatMinutes).not.toBeNull();
+      expect(metrics?.totalFloatMinutes).not.toBeNull();
+      expect(metrics!.freeFloatMinutes!).toBeLessThanOrEqual(metrics!.totalFloatMinutes!);
+    });
+  });
+
+  it("keeps persisted resource-levelled bars out of CPM float and criticality", () => {
+    const result = calculateGanttCpm([
+      task("parent", 12, [], {
+        startDate: "2026-08-17",
+        finishDate: "2026-09-01",
+      }),
+      task("early", 3, [], {
+        parentId: "parent",
+        taskMode: "AUTO",
+        startDate: "2026-08-17",
+        finishDate: "2026-08-19",
+      }),
+      task("late", 2, [], {
+        parentId: "parent",
+        taskMode: "AUTO",
+        startDate: "2026-08-31",
+        finishDate: "2026-09-01",
+      }),
+    ], "CALENDAR_DAYS");
+
+    expect(result.calculatedFinishDate).toBe("2026-09-01");
+    expect(result.metricsByTaskId.get("late")).toMatchObject({
+      lateFinishDate: "2026-08-19",
+      totalFloatMinutes: 450,
+      freeFloatMinutes: 450,
+      scheduleStatus: "NEAR_CRITICAL",
+      isCritical: false,
+    });
+    expect(result.projectCriticalTaskIds).toEqual(new Set(["early"]));
   });
 
   it("expands a summary FS dependency to the successor summary entry leaf", () => {

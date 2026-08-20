@@ -7,7 +7,7 @@ import {
   type AssistantScheduleTaskV1,
 } from "@/lib/assistant-schedule-contract";
 import { calculateEarnedValue } from "@/lib/earned-value";
-import { addDaysInclusive, findGanttCriticalTaskIds } from "@/lib/gantt";
+import { addDaysInclusive, resolveGanttCriticalTaskIds } from "@/lib/gantt";
 
 type DateLike = Date | string;
 
@@ -312,7 +312,7 @@ export const buildAssistantScheduleContextV1 = (params: {
     taskUidMap: params.metadata?.taskUidMap,
     tasks: params.tasks,
   });
-  const criticalTaskIds = [...findGanttCriticalTaskIds(params.tasks.map((task) => ({
+  const criticalTaskIds = [...resolveGanttCriticalTaskIds(params.tasks.map((task) => ({
     id: task.id,
     createdAt: isoString(task.createdAt),
     updatedAt: isoString(task.updatedAt),

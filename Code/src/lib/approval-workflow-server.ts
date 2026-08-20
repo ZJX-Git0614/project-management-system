@@ -4,9 +4,10 @@ import { TodoType } from "@/domain/enums";
 import { getApprovalBusinessHandler, getApprovalCompletionHandler } from "@/lib/approval-business-registry";
 import {
   APPROVAL_BUSINESS_TYPE_LABEL,
-  DEFAULT_APPROVAL_WORKFLOWS,
+  CONFIGURABLE_APPROVAL_WORKFLOWS,
   approvalEffectFailurePolicy,
   approvalActiveKey,
+  approvalPayloadsMatch,
   normalizeApprovalWorkflowNodes,
   requiredApprovalCount,
   validateApprovalWorkflowDraft,
@@ -132,7 +133,7 @@ const ensureDefaultApprovalWorkflowsInTransaction = async (
   // pg_advisory_xact_lock returns PostgreSQL's void type. Execute it instead of
   // querying it so Prisma does not try to deserialize a void result column.
   await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('ceastar-default-approval-workflows'))`;
-  for (const seed of DEFAULT_APPROVAL_WORKFLOWS) {
+  for (const seed of CONFIGURABLE_APPROVAL_WORKFLOWS) {
     const definition = await db.approvalWorkflowDefinition.upsert({
       where: { businessType: seed.businessType },
       update: {},
@@ -466,8 +467,6 @@ export const startApprovalWorkflow = async (params: {
   await assertProjectAccess(params.requester, params.projectId, tx);
   const activeKey = approvalActiveKey(params);
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${activeKey}))`;
-  const existing = await tx.approvalWorkflowInstance.findUnique({ where: { activeKey }, include: INSTANCE_INCLUDE });
-  if (existing) return existing;
   const definition = await tx.approvalWorkflowDefinition.findUnique({ where: { businessType: params.businessType } });
   if (!definition?.enabled || definition.activeVersionNumber <= 0) {
     throw new Error(`审批流程未启用：${APPROVAL_BUSINESS_TYPE_LABEL[params.businessType] ?? params.businessType}`);
@@ -479,7 +478,19 @@ export const startApprovalWorkflow = async (params: {
   if (!version || version.status !== "PUBLISHED") throw new Error("审批流程没有已发布版本");
   const handler = getApprovalBusinessHandler(params.businessType);
   const payload = params.payload ?? {};
-  await handler.validateStart(tx, { projectId: params.projectId, businessId: params.businessId, payload });
+  await handler.validateStart(tx, {
+    projectId: params.projectId,
+    businessId: params.businessId,
+    payload,
+    requester: params.requester,
+  });
+  const existing = await tx.approvalWorkflowInstance.findUnique({ where: { activeKey }, include: INSTANCE_INCLUDE });
+  if (existing) {
+    if (existing.requesterAccountId === params.requester.userId && approvalPayloadsMatch(existing.payload, payload)) {
+      return existing;
+    }
+    throw new Error("该业务已有待审批申请，当前提交内容与待审批内容不一致，请先处理或撤回原申请");
+  }
   const title = handler.buildTitle({ projectName: project.name, payload });
   const summary = handler.buildSummary({ projectName: project.name, payload });
   const firstApprovalNode = version.nodes.find((node) => node.nodeType === "APPROVAL");

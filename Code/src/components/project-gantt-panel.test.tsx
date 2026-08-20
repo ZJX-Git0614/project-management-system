@@ -385,7 +385,7 @@ describe("ProjectGanttPanel", () => {
     expect(workingDayButton).toHaveAttribute("aria-pressed", "false");
   });
 
-  it("switches the global scheduling mode locally without creating a WBS history snapshot", async () => {
+  it("switches the global scheduling mode after clearing the incompatible schedule anchor", async () => {
     mocks.get.mockImplementation((url: string) => {
       const backgroundResponse = backgroundGanttGet(url);
       if (backgroundResponse) return backgroundResponse;
@@ -402,18 +402,78 @@ describe("ProjectGanttPanel", () => {
       if (url.endsWith("/deletions")) return Promise.resolve([]);
       return Promise.resolve([rootTask]);
     });
+    mocks.put.mockResolvedValue({
+      calendarMode: "WORKING_DAYS",
+      hoursPerDay: 7.5,
+      projectStartDate: "",
+      wbsFinishDate: "",
+    });
 
     render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
 
     const user = userEvent.setup();
     const modeSelect = await screen.findByLabelText("全局排期方式");
     await user.click(modeSelect);
-    await user.click(await screen.findByText("工期固定 · 正排"));
+    await user.click(await screen.findByRole("menuitem", { name: "工期固定 · 正排" }));
 
-    expect(modeSelect).toHaveTextContent("工期固定 · 正排");
+    await waitFor(() => expect(modeSelect).toHaveTextContent("工期固定 · 正排"));
     expect(modeSelect).toHaveClass("app-control-selected");
     expect(mocks.post.mock.calls.some(([url]) => String(url).endsWith("/history/snapshots"))).toBe(false);
-    expect(mocks.put).not.toHaveBeenCalled();
+    expect(mocks.put).toHaveBeenCalledWith(
+      "/api/projects/project-1/gantt-settings",
+      { wbsFinishDate: "" },
+    );
+  });
+
+  it("waits for the project T0 to persist before loading a forward schedule preview", async () => {
+    const anchorSave = deferred<{
+      calendarMode: "WORKING_DAYS";
+      hoursPerDay: number;
+      projectStartDate: string;
+      wbsFinishDate: string;
+    }>();
+    mocks.get.mockImplementation((url: string) => {
+      const backgroundResponse = backgroundGanttGet(url);
+      if (backgroundResponse) return backgroundResponse;
+      if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) {
+        return Promise.resolve({
+          calendarMode: "WORKING_DAYS",
+          hoursPerDay: 7.5,
+          projectStartDate: "2026-08-01",
+          wbsFinishDate: "",
+        });
+      }
+      if (url.endsWith("/deletions")) return Promise.resolve([]);
+      return Promise.resolve([rootTask]);
+    });
+    mocks.put.mockImplementation((url: string) => (
+      url.endsWith("/gantt-settings") ? anchorSave.promise : Promise.resolve({})
+    ));
+
+    render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
+
+    const user = userEvent.setup();
+    const modeSelect = await screen.findByLabelText("全局排期方式");
+    await waitFor(() => expect(modeSelect).toHaveTextContent("工期固定 · 正排"));
+    await user.click(screen.getByRole("button", { name: /自动排期/ }));
+
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith(
+      "/api/projects/project-1/gantt-settings",
+      { projectStartDate: "2026-08-01", wbsFinishDate: "" },
+    ));
+    expect(mocks.get.mock.calls.some(([url]) => String(url).includes("includeCandidates=1"))).toBe(false);
+
+    anchorSave.resolve({
+      calendarMode: "WORKING_DAYS",
+      hoursPerDay: 7.5,
+      projectStartDate: "2026-08-01",
+      wbsFinishDate: "",
+    });
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledWith(
+      expect.stringContaining("/api/projects/project-1/gantt-tasks/resource-schedule?includeCandidates=1"),
+    ));
   });
 
   it("shows publishing progress and closes the baseline dialog after the server confirms", async () => {
@@ -693,5 +753,27 @@ describe("ProjectGanttPanel", () => {
       2,
       "/api/projects/project-1/gantt-tasks/deletions/batch-1/redo",
     ));
+  });
+
+  it("exposes editable Draw.io AON and AOA exports from a dedicated network diagram menu", async () => {
+    mocks.get.mockImplementation((url: string) => {
+      const backgroundResponse = backgroundGanttGet(url);
+      if (backgroundResponse) return backgroundResponse;
+      if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      if (url.endsWith("/deletions")) return Promise.resolve([]);
+      return Promise.resolve([rootTask]);
+    });
+
+    render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
+
+    const user = userEvent.setup();
+    await screen.findByTestId("gantt-timeline");
+    await user.click(screen.getByRole("button", { name: "网络图" }));
+
+    expect(await screen.findByText("Draw.io 可编辑网络图")).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "单代号网络图（活动节点）" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "双代号网络图（活动箭线）" })).toBeInTheDocument();
   });
 });

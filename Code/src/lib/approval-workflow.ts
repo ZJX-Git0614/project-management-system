@@ -1,6 +1,7 @@
 export const APPROVAL_BUSINESS_TYPES = {
   PROJECT_STATUS_CHANGE: "PROJECT_STATUS_CHANGE",
   WBS_BASELINE_PUBLISH: "WBS_BASELINE_PUBLISH",
+  WBS_TASK_PROGRESS_SUBMISSION: "WBS_TASK_PROGRESS_SUBMISSION",
   BUDGET_CHANGE: "BUDGET_CHANGE",
   RISK_ACCEPTANCE: "RISK_ACCEPTANCE",
   DOCUMENT_RELEASE: "DOCUMENT_RELEASE",
@@ -11,6 +12,7 @@ export type ApprovalBusinessType = (typeof APPROVAL_BUSINESS_TYPES)[keyof typeof
 export const APPROVAL_BUSINESS_TYPE_LABEL: Record<string, string> = {
   PROJECT_STATUS_CHANGE: "项目状态变更",
   WBS_BASELINE_PUBLISH: "WBS 基线发布",
+  WBS_TASK_PROGRESS_SUBMISSION: "WBS 任务进度提交",
   BUDGET_CHANGE: "项目预算变更",
   RISK_ACCEPTANCE: "风险接受",
   DOCUMENT_RELEASE: "项目文档发布",
@@ -228,8 +230,53 @@ export const DEFAULT_APPROVAL_WORKFLOWS: ApprovalWorkflowDraftInput[] = [
   },
 ];
 
+const WBS_TASK_PROGRESS_SUBMISSION_WORKFLOW: ApprovalWorkflowDraftInput = {
+  businessType: APPROVAL_BUSINESS_TYPES.WBS_TASK_PROGRESS_SUBMISSION,
+  moduleKey: "project-wbs",
+  name: "WBS 任务进度提交审批",
+  description: "末级任务直接负责人提交本人任务执行事实后，经项目经理审批通过再写入 WBS。",
+  triggerPermissionKey: "project-gantt:view",
+  completionHandlerKey: "APPLY_WBS_TASK_PROGRESS_SUBMISSION",
+  nodes: [
+    {
+      nodeKey: "project-manager-approval",
+      nodeOrder: 1,
+      nodeType: "APPROVAL",
+      nodeName: "项目经理审批",
+      assignmentType: "PROJECT_ROLE",
+      projectRoleName: "项目经理",
+      approvalMode: "ALL",
+      requiredApprovals: 1,
+      reminderAfterHours: 24,
+      reminderIntervalHours: 24,
+    },
+  ],
+};
+
+export const CONFIGURABLE_APPROVAL_WORKFLOWS: ApprovalWorkflowDraftInput[] = [
+  ...DEFAULT_APPROVAL_WORKFLOWS,
+  WBS_TASK_PROGRESS_SUBMISSION_WORKFLOW,
+];
+
 export const approvalActiveKey = (params: { projectId: string; businessType: string; businessId: string }) =>
   `${params.projectId}:${params.businessType}:${params.businessId}`;
 
+const canonicalApprovalPayload = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map((item) => canonicalApprovalPayload(item));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, canonicalApprovalPayload(item)]),
+  );
+};
+
+export const approvalPayloadsMatch = (left: unknown, right: unknown) => (
+  JSON.stringify(canonicalApprovalPayload(left)) === JSON.stringify(canonicalApprovalPayload(right))
+);
+
 export const approvalBusinessIdForProjectStatus = (projectId: string) => `${projectId}:status`;
 export const approvalBusinessIdForWbsBaseline = (projectId: string) => `${projectId}:wbs-baseline`;
+export const approvalBusinessIdForWbsTaskProgressSubmission = (projectId: string, taskId: string) =>
+  `${projectId}:wbs-task-progress:${taskId}`;

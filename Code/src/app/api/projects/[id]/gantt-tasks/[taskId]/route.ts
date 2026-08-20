@@ -223,6 +223,7 @@ export async function PUT(
       return err("当前任务优先级由关键路径、FS 关系或子任务自动计算，不允许手动修改");
     }
   }
+  let canReopenCompletedTask = false;
   if (existing.progress === 100 && actualMutation) {
     if (childCount === 0) {
       const project = await prisma.project.findUnique({
@@ -236,10 +237,14 @@ export async function PUT(
       if (!canReopen) {
         return err("已完成的末级任务已只读。仅项目经理在变更基线草案中将进度改回未完成后，才能重新打开任务。", 409, "GANTT_TASK_COMPLETED");
       }
+      canReopenCompletedTask = true;
     }
   }
   if (actualMutation && childCount > 0) {
     return err("父级汇总任务的实际开始、实际完成、实际工时和当前进度由子任务自动汇总，请更新末级任务");
+  }
+  if (actualMutation && childCount === 0 && !canReopenCompletedTask) {
+    return err("末级任务的进度、实际日期和实际工时需要提交进度审批，审批通过后系统会自动更新", 409, "GANTT_PROGRESS_APPROVAL_REQUIRED");
   }
 
   if (body.previewScheduleImpact === true) {

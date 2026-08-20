@@ -4,6 +4,7 @@ import {
   buildGanttDependencyLinks,
   buildGanttRows,
   findGanttCriticalTaskIds,
+  resolveGanttCriticalTaskIds,
   getGanttDateRange,
 } from "@/lib/gantt";
 import type { ProjectGanttTask } from "@/domain/models";
@@ -36,6 +37,23 @@ describe("gantt helpers", () => {
 
     expect(row.endDate).toBe("2026-06-10");
     expect(row.durationDays).toBe(10);
+  });
+
+  it("uses the explicit calendar finish for a working-day task bar", () => {
+    const [row] = buildGanttRows([baseTask({
+      startDate: "2026-08-17",
+      finishDate: "2026-09-01",
+      durationDays: 12,
+    })], { coordinateMode: "ABSOLUTE" });
+
+    expect(row.endDate).toBe("2026-09-01");
+    expect(row.spanDays).toBe(16);
+    expect(row.timelineEndDays).toBe(16);
+    expect(getGanttDateRange([row], { coordinateMode: "ABSOLUTE" })).toEqual({
+      startDate: "2026-08-17",
+      endDate: "2026-09-01",
+      totalDays: 16,
+    });
   });
 
   it("keeps unscheduled tasks in the grid without giving them a task bar", () => {
@@ -113,6 +131,31 @@ describe("gantt helpers", () => {
     });
   });
 
+  it("keeps a concrete-T0 project entirely on calendar dates when legacy offsets remain", () => {
+    const tasks = [
+      baseTask({
+        id: "task-1",
+        startDate: "2026-08-14",
+        finishDate: "2026-08-16",
+        durationDays: 3,
+        relativeStartOffsetDays: 0,
+        relativeFinishOffsetDays: 2,
+      }),
+    ];
+
+    expect(getGanttDateRange(tasks, { coordinateMode: "ABSOLUTE" })).toEqual({
+      startDate: "2026-08-14",
+      endDate: "2026-08-16",
+      totalDays: 3,
+    });
+    expect(buildGanttRows(tasks, { coordinateMode: "ABSOLUTE" })[0]).toMatchObject({
+      startDisplayLabel: "2026-08-14",
+      finishDisplayLabel: "2026-08-16",
+      timelineStartDays: 0,
+      spanDays: 3,
+    });
+  });
+
   it("returns the visible date range for all gantt tasks", () => {
     const range = getGanttDateRange([
       baseTask({ id: "task-1", startDate: "2026-06-10", durationDays: 3 }),
@@ -145,5 +188,36 @@ describe("gantt helpers", () => {
     ]);
 
     expect([...criticalIds]).toEqual(["task-4", "task-2", "task-1"]);
+  });
+
+  it("never exposes summary rows as critical work", () => {
+    const tasks = [
+      baseTask({ id: "summary", taskCode: "Task1", taskName: "父任务", durationDays: 10, totalFloatMinutes: 0 }),
+      baseTask({ id: "leaf", parentId: "summary", taskCode: "Task1.1", taskName: "末级任务", durationDays: 10, totalFloatMinutes: 0 }),
+      baseTask({ id: "standalone", taskCode: "Task2.1", taskName: "没有子任务的任务", durationDays: 1, totalFloatMinutes: 10 }),
+    ];
+
+    expect([...findGanttCriticalTaskIds(tasks)]).toEqual(["leaf"]);
+    expect(buildGanttRows(tasks).filter((row) => row.isCritical).map((row) => row.id)).toEqual(["leaf"]);
+  });
+
+  it("removes completed leaf tasks from the active critical path", () => {
+    const tasks = [
+      baseTask({ id: "done", taskName: "已完成", durationDays: 5, progress: 100, totalFloatMinutes: 0 }),
+      baseTask({ id: "active", taskName: "进行中", durationDays: 5, progress: 50, totalFloatMinutes: 0 }),
+    ];
+
+    expect([...findGanttCriticalTaskIds(tasks)]).toEqual(["active"]);
+    expect(buildGanttRows(tasks).filter((row) => row.isCritical).map((row) => row.id)).toEqual(["active"]);
+  });
+
+  it("uses persisted CPM status instead of a local longest-chain fallback", () => {
+    const tasks = [
+      baseTask({ id: "critical", taskName: "服务端关键任务", durationDays: 1, totalFloatMinutes: 0, scheduleStatus: "CRITICAL", scheduleCalculatedAt: "2026-08-18T00:00:00.000Z" }),
+      baseTask({ id: "conflict", taskName: "负浮动冲突", durationDays: 20, scheduleStatus: "NEGATIVE_FLOAT", scheduleCalculatedAt: "2026-08-18T00:00:00.000Z" }),
+    ];
+
+    expect([...resolveGanttCriticalTaskIds(tasks)]).toEqual(["critical"]);
+    expect(buildGanttRows(tasks).filter((row) => row.isCritical).map((row) => row.id)).toEqual(["critical"]);
   });
 });

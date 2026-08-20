@@ -80,4 +80,21 @@ describe("HierarchicalMultiSelect", () => {
     expect(screen.getByText("前端").tagName).toBe("MARK");
     expect(screen.queryByRole("checkbox", { name: "选择 Task2" })).not.toBeInTheDocument();
   });
+
+  it("shows the parent-versus-leaf predecessor guidance when provided", async () => {
+    const user = userEvent.setup();
+    render(
+      <HierarchicalMultiSelect
+        ariaLabel="紧前任务"
+        options={options}
+        value={[]}
+        onChange={() => undefined}
+        applyOnClose
+        helperText="选择父级表示其全部末级任务完成"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "紧前任务" }));
+    expect(screen.getByText("选择父级表示其全部末级任务完成")).toBeInTheDocument();
+  });
 });

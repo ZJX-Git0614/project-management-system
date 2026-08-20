@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { err, forbidden, ok, unauthorizedFromRequest } from "@/lib/api-utils";
 import { normalizeApprovalWorkflowNodes, type ApprovalWorkflowDraftInput } from "@/lib/approval-workflow";
 import { ensureDefaultApprovalWorkflows, saveApprovalWorkflowDraft } from "@/lib/approval-workflow-server";
+import { ADMIN_ROLE_NAME } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 
@@ -30,7 +31,10 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const user = await getAuthenticatedUser(req);
   if (!user) return unauthorizedFromRequest(req);
-  if (!await userHasPermission(user, "approval-workflow-config:edit")) return forbidden();
+  if (
+    !user.assignedRoleNames.includes(ADMIN_ROLE_NAME)
+    || !await userHasPermission(user, "approval-workflow-config:edit")
+  ) return forbidden();
   try {
     const body = await req.json() as Partial<ApprovalWorkflowDraftInput>;
     const draft: ApprovalWorkflowDraftInput = {

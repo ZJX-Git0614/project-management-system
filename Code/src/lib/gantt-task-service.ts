@@ -23,7 +23,8 @@ import {
   isGanttRelativeOffset,
   normalizeGanttRelativeOffset,
 } from "@/lib/gantt-relative-time";
-import { calculateGanttCpm, type GanttCpmMetrics } from "@/lib/gantt-cpm";
+import { type GanttCpmMetrics } from "@/lib/gantt-cpm";
+import { calculateResourceAwareGanttCpm } from "@/lib/gantt-resource-cpm";
 import { fixedSuccessorTaskIdsBlockedByActualCompletion } from "@/lib/gantt-schedule";
 import {
   deriveGanttPriority,
@@ -754,7 +755,7 @@ export const refreshProjectGanttDerivedState = async (
         ? task.ownerLinks.map((link) => link.projectMemberId)
         : task.ownerMemberId ? [task.ownerMemberId] : [],
     }));
-  const cpm = calculateGanttCpm(
+  const cpm = calculateResourceAwareGanttCpm(
     cpmTasks,
     relativeSchedule ? "CALENDAR_DAYS" : mode,
     relativeSchedule ? "" : schedulingFinishBoundary,
@@ -949,6 +950,24 @@ export const materializeProjectGanttRelativeSchedule = async (
       WHERE target."id" = source."id"
     `);
   }
+  // Clear malformed or one-sided offsets left by older imports. Once a
+  // concrete T0 exists, no task should remain in the relative-coordinate
+  // representation; otherwise the UI and timeline intentionally fall back to
+  // T0+N for the entire project.
+  await client.projectGanttTask.updateMany({
+    where: {
+      projectId,
+      OR: [
+        { relativeStartOffsetDays: { not: null } },
+        { relativeFinishOffsetDays: { not: null } },
+      ],
+    },
+    data: {
+      relativeStartOffsetDays: null,
+      relativeFinishOffsetDays: null,
+      updatedAt: new Date(),
+    },
+  });
   await refreshProjectGanttDerivedState(projectId, mode, client);
   return { materializedTaskCount: rows.length, calendarMode: mode };
 };
@@ -2727,4 +2746,76 @@ export const moveProjectGanttTaskBranches = async (params: {
   }, { timeout: 30_000, maxWait: 10_000 });
   await renumberProjectGanttTaskCodes(params.projectId);
   return { tasks: serializeGanttTaskList(await getOrderedGanttTasks(params.projectId)), movedTaskIds };
+};
+
+export const clearProjectGanttTaskDurations = async (params: {
+  projectId: string;
+  taskId: string;
+  operator: string;
+}) => {
+  const result = await prisma.$transaction(async (tx) => {
+    const tasks = await tx.projectGanttTask.findMany({
+      where: { projectId: params.projectId },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+      select: { id: true, parentId: true, taskCode: true, taskName: true },
+    });
+    const rootTask = tasks.find((task) => task.id === params.taskId);
+    if (!rootTask) throw new Error("甘特任务不存在");
+
+    const childIdsByParentId = new Map<string, string[]>();
+    tasks.forEach((task) => {
+      if (!task.parentId) return;
+      childIdsByParentId.set(task.parentId, [
+        ...(childIdsByParentId.get(task.parentId) ?? []),
+        task.id,
+      ]);
+    });
+    const isParentTask = (childIdsByParentId.get(rootTask.id) ?? []).length > 0;
+    const affectedTaskIds: string[] = [];
+    const collectDescendants = (taskId: string) => {
+      (childIdsByParentId.get(taskId) ?? []).forEach((childId) => {
+        affectedTaskIds.push(childId);
+        collectDescendants(childId);
+      });
+    };
+    if (isParentTask) collectDescendants(rootTask.id);
+    else affectedTaskIds.push(rootTask.id);
+
+    if (affectedTaskIds.length > 0) {
+      await tx.projectGanttTask.updateMany({
+        where: { projectId: params.projectId, id: { in: affectedTaskIds } },
+        data: {
+          durationDays: 0,
+          durationMinutes: 0,
+          estimatedWorkHours: 0,
+        },
+      });
+    }
+    await Promise.all([
+      tx.project.update({
+        where: { id: params.projectId },
+        data: { ganttRevision: { increment: 1 } },
+      }),
+      tx.operationHistory.create({
+        data: {
+          projectId: params.projectId,
+          entityType: "PROJECT_GANTT_TASK",
+          entityId: rootTask.id,
+          actionType: "UPDATE",
+          operator: params.operator,
+          detail: isParentTask
+            ? `清除任务「${rootTask.taskCode} · ${rootTask.taskName}」全部 ${affectedTaskIds.length} 条子任务工期`
+            : `清除任务「${rootTask.taskCode} · ${rootTask.taskName}」工期`,
+        },
+      }),
+    ]);
+    return { affectedTaskIds, isParentTask };
+  }, { timeout: 30_000, maxWait: 10_000 });
+
+  await refreshProjectGanttDerivedState(params.projectId);
+  return {
+    ...result,
+    affectedCount: result.affectedTaskIds.length,
+    tasks: serializeGanttTaskList(await getOrderedGanttTasks(params.projectId)),
+  };
 };

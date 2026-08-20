@@ -18,6 +18,7 @@ import {
 import {
   getProjectGanttCalendarMode,
   getOrderedGanttTasks,
+  materializeProjectGanttRelativeSchedule,
   parseGanttDependencyInput,
   refreshProjectGanttDerivedState,
   renumberProjectGanttTaskCodes,
@@ -46,7 +47,13 @@ export async function GET(
   const project = await prisma.project.findUnique({ where: { id } });
   if (!project) return notFound("项目");
 
-  const tasks = await getOrderedGanttTasks(id);
+  let tasks = await getOrderedGanttTasks(id);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(project.startDate) && tasks.some((task) => (
+    task.relativeStartOffsetDays != null || task.relativeFinishOffsetDays != null
+  ))) {
+    await materializeProjectGanttRelativeSchedule(id, project.startDate);
+    tasks = await getOrderedGanttTasks(id);
+  }
 
   const response = ok(serializeGanttTaskList(tasks));
   response.headers.set("Cache-Control", "private, no-store, max-age=0, must-revalidate");
@@ -122,6 +129,14 @@ export async function POST(
   if (actualStartDate && !/^\d{4}-\d{2}-\d{2}$/.test(actualStartDate)) return err("实际开始时间格式应为 YYYY-MM-DD");
   if (completion.error) return err(completion.error);
   if (!Number.isFinite(Number(body.actualWorkHours ?? 0)) || Number(body.actualWorkHours ?? 0) < 0) return err("实际工时必须为大于或等于 0 的数字");
+  if (
+    completion.progress !== 0
+    || completion.actualStartDate
+    || completion.actualEndDate
+    || actualWorkHours > 0
+  ) {
+    return err("新增任务只能创建计划数据；执行进度、实际日期和实际工时请在任务创建后通过进度提交审批更新", 409, "GANTT_PROGRESS_APPROVAL_REQUIRED");
+  }
   if (!PARENT_BOUNDARY_MODES.has(parentBoundaryMode)) return err("父任务边界方式无效");
   if (!Number.isInteger(schedulePriority) || schedulePriority < 0 || schedulePriority > 1000) {
     return err("排期优先级必须是 0 到 1000 的整数");

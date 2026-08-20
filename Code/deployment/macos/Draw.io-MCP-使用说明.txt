@@ -1,0 +1,56 @@
+Ceastar PMS macOS Draw.io MCP 使用说明
+
+一、系统内直接导出
+1. 进入“项目 WBS 管理”。
+2. 点击顶部“网络图”。
+3. 选择“单代号网络图（活动节点）”或“双代号网络图（活动箭线）”。
+4. 浏览器会下载可编辑的 .drawio 文件，可直接用 draw.io Desktop 或 diagrams.net 打开。
+
+上述导出不依赖 MCP。系统以末级任务为活动，并将连接到父任务的依赖展开到可执行的末级任务。
+
+二、MCP 的作用与边界
+Draw.io MCP 供支持 MCP 的桌面客户端调用，用于让智能客户端创建并在 Draw.io 编辑器中打开图形。
+Ceastar PMS Web 服务不会直接控制 macOS 桌面应用；没有 MCP 时，系统导出的 .drawio 文件仍然可用。
+
+三、环境要求
+1. macOS 12 或更高版本。
+2. Node.js LTS 18 或更高版本，终端执行“npx --version”应能显示版本号。
+3. 可选安装 draw.io Desktop。官方 MCP 工具服务默认会在浏览器中打开 Draw.io 编辑器。
+4. 首次下载 @drawio/mcp 需要能访问 npm；下载后通常使用本机 npm 缓存。
+
+四、安装
+在终端进入本目录后执行：
+
+chmod +x install-drawio-mcp.sh drawio-mcp.sh
+./install-drawio-mcp.sh --verify
+
+文件会安装到：
+~/Library/Application Support/Ceastar-PMS/
+
+安装器会记录 npx 的绝对路径，避免 Claude Desktop、Cursor、VS Code 等 GUI 客户端读取不到终端 PATH。
+
+五、配置 MCP 客户端
+将以下文件中的 drawio 节点合并到客户端的 MCP 配置：
+~/Library/Application Support/Ceastar-PMS/drawio-mcp-config.json
+
+常见配置位置：
+- Claude Desktop：~/Library/Application Support/Claude/claude_desktop_config.json
+- Cursor：~/.cursor/mcp.json
+- VS Code：用户或工作区的 mcp.json
+
+配置合并后重启对应客户端。配置使用 /bin/bash -c 启动脚本，不读取 .zprofile 或 .zshrc，避免 Shell 提示文字破坏 MCP stdio 通讯。
+
+六、内网或自建 Draw.io
+官方 MCP 默认打开 https://app.diagrams.net/。如公司部署了自己的 Draw.io，可在 MCP 客户端的 drawio 配置中增加：
+
+"env": {
+  "DRAWIO_BASE_URL": "https://drawio.example.com/"
+}
+
+严格内网环境下应使用自建 Draw.io 地址；仅安装 macOS 桌面应用不会自动让 MCP 改用桌面应用。
+
+七、排查
+1. “未找到 npx”：重新安装 Node.js LTS，再运行安装脚本。
+2. MCP 启动失败：执行 ~/Library/Application\ Support/Ceastar-PMS/drawio-mcp.sh --install。
+3. GUI 客户端找不到命令：重新运行安装脚本，让它更新 drawio-mcp.env 中的 npx 绝对路径。
+4. 图形无法打开：检查 DRAWIO_BASE_URL 是否可访问；内网环境使用公司自建 Draw.io。

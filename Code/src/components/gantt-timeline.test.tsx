@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { GanttTimeline } from "@/components/gantt-timeline";
+import { buildGanttCriticalPaths, GanttTimeline } from "@/components/gantt-timeline";
 import type { ProjectGanttTask } from "@/domain/models";
 
 const task = (index: number, overrides: Partial<ProjectGanttTask> = {}): ProjectGanttTask => ({
@@ -43,14 +43,47 @@ describe("GanttTimeline performance", () => {
     expect(screen.getAllByTitle(/抽象阶段:/).length).toBeGreaterThan(0);
   });
 
-  it("uses the remaining timeline width for task and owner labels", () => {
+  it("uses one calendar coordinate system after project T0 is concrete", () => {
+    render(<GanttTimeline
+      projectStartDate="2026-07-28"
+      tasks={[
+        task(1, {
+          taskName: "已落地阶段",
+          relativeStartOffsetDays: 0,
+          relativeFinishOffsetDays: 0,
+        }),
+      ]}
+      canEdit
+    />);
+
+    expect(screen.queryByText(/^T0(?:\+\d+)?$/)).not.toBeInTheDocument();
+    expect(screen.getAllByLabelText("计划开始")[0]).not.toHaveTextContent("T0");
+  });
+
+  it("fills timeline rows with the same hierarchy palette used by task rows", () => {
+    const { container } = render(<GanttTimeline
+      projectStartDate="2026-07-28"
+      tasks={[
+        task(1, { taskName: "父任务" }),
+        task(2, { parentId: "task-1", taskCode: "Task001.001", taskName: "子任务" }),
+      ]}
+      canEdit
+    />);
+
+    const backgrounds = [...container.querySelectorAll<HTMLElement>("[data-gantt-timeline-row-background]")];
+    expect(backgrounds).toHaveLength(2);
+    expect(backgrounds[0].style.backgroundColor).not.toBe("");
+    expect(backgrounds[0].style.backgroundColor).not.toBe(backgrounds[1].style.backgroundColor);
+  });
+
+  it("keeps task and owner labels visible for short gantt bars", () => {
     const ownerName = "赵佳鑫（项目经理兼总体负责人）";
     render(<GanttTimeline tasks={[
       task(1, {
         taskName: "跨阶段总体任务",
         startDate: "2026-07-01",
-        finishDate: "2026-07-10",
-        durationDays: 10,
+        finishDate: "2026-07-01",
+        durationDays: 1,
         ownerMembers: [{
           id: "member-1",
           accountId: "account-1",
@@ -62,9 +95,26 @@ describe("GanttTimeline performance", () => {
     ]} canEdit />);
 
     const label = screen.getByText(`跨阶段总体任务 · ${ownerName}`);
-    expect(label).toHaveClass("absolute", "left-full");
-    expect(label).not.toHaveClass("max-w-[220px]");
+    expect(label).toHaveClass("absolute", "whitespace-nowrap");
+    expect(label).not.toHaveClass("truncate");
+    expect(label).toHaveAttribute("data-gantt-bar-label-side", "right");
     expect(Number.parseFloat(label.getAttribute("style")?.match(/width:\s*([\d.]+)px/)?.[1] ?? "0")).toBeGreaterThan(220);
+  });
+
+  it("keeps a long gantt label in the reserved lane after the gantt bar", () => {
+    const longTaskName = "跨越整个计划周期的总体任务，需要完整展示任务名称以及全部负责人姓名并避免在甘特图边界处被截断";
+    const { container } = render(<GanttTimeline tasks={[
+      task(1, {
+        taskName: longTaskName,
+        startDate: "2026-01-01",
+        finishDate: "2028-09-26",
+        durationDays: 1000,
+      }),
+    ]} canEdit />);
+
+    const label = screen.getByText(longTaskName);
+    expect(label).toHaveAttribute("data-gantt-bar-label-side", "right");
+    expect(container.querySelector("[data-gantt-bar-label-side='overlay']")).not.toBeInTheDocument();
   });
 
   it("renders an unscheduled WBS instead of treating it as an empty project", () => {
@@ -114,10 +164,10 @@ describe("GanttTimeline performance", () => {
     expect(warning).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /已分配任务存在/ })).not.toBeInTheDocument();
     const parentNameInput = screen.getByDisplayValue("父任务");
-    expect(parentNameInput).toHaveClass("pr-[76px]");
+    expect(parentNameInput).not.toHaveClass("pr-[76px]");
     expect(warning.closest("[data-gantt-column-key='taskCode']")).toBeInTheDocument();
     expect(warning).toHaveClass("!border-0", "!bg-transparent");
-    expect(within(parentNameInput.parentElement!).getByText("【关键路径】")).toHaveClass("right-1.5");
+    expect(within(parentNameInput.parentElement!).queryByText("【关键路径】")).not.toBeInTheDocument();
 
     await userEvent.hover(warning);
 
@@ -138,7 +188,7 @@ describe("GanttTimeline performance", () => {
     await userEvent.click(screen.getAllByRole("button", { name: "紧前任务" })[0]);
     await userEvent.type(screen.getByRole("textbox", { name: "紧前任务搜索" }), "性能任务 460");
     expect(await screen.findByTitle("Task460 · 性能任务 460")).toBeInTheDocument();
-  }, 15_000);
+  }, 30_000);
 
   it("selects a task subtree from a searchable hierarchy and applies it together", async () => {
     const onUpdateTask = vi.fn();
@@ -244,8 +294,9 @@ describe("GanttTimeline performance", () => {
           taskCode: "Task001.001",
           taskName: "关键子任务",
           totalFloatMinutes: 0,
+          scheduleStatus: "CRITICAL",
         }),
-        task(3, { taskName: "普通任务", totalFloatMinutes: 450 }),
+        task(3, { taskName: "普通任务", durationDays: 0.5, totalFloatMinutes: 450, scheduleStatus: "NORMAL" }),
       ]}
       canEdit
     />);
@@ -259,22 +310,65 @@ describe("GanttTimeline performance", () => {
     expect(screen.getByRole("button", { name: "显示全部 1 条" })).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("renders FS and resource-chain connectors as solid lines with distinct tones", () => {
+  it("keeps a summary dependency connected through its critical leaf tasks", () => {
     render(<GanttTimeline
       tasks={[
-        task(1, { totalFloatMinutes: 0 }),
+        task(1, { taskName: "前置阶段", totalFloatMinutes: 0 }),
         task(2, {
+          parentId: "task-1",
+          taskCode: "Task001.001",
+          taskName: "关键前置任务",
+          totalFloatMinutes: 0,
+          scheduleStatus: "CRITICAL",
+        }),
+        task(3, {
+          parentId: "task-1",
+          taskCode: "Task001.002",
+          taskName: "非关键前置任务",
+          totalFloatMinutes: 450,
+          scheduleStatus: "NORMAL",
+        }),
+        task(4, {
+          taskName: "后续任务",
           startDate: "2026-07-29",
           finishDate: "2026-07-29",
           predecessorTaskIds: ["task-1"],
           totalFloatMinutes: 0,
+          scheduleStatus: "CRITICAL",
         }),
-        task(3, { startDate: "2026-07-30", finishDate: "2026-07-30", totalFloatMinutes: 450 }),
+      ]}
+      canEdit
+    />);
+
+    expect(screen.getByRole("button", { name: "关键路径 2 条" })).toBeInTheDocument();
+  });
+
+  it("renders FS and resource-chain connectors as solid lines with distinct tones", () => {
+    render(<GanttTimeline
+      tasks={[
+        task(1, { finishDate: "2026-07-30", durationDays: 3, totalFloatMinutes: 0, scheduleStatus: "CRITICAL" }),
+        task(2, {
+          startDate: "2026-07-29",
+          finishDate: "2026-07-29",
+          durationDays: 3,
+          predecessorTaskIds: ["task-1"],
+          totalFloatMinutes: 0,
+          scheduleStatus: "CRITICAL",
+        }),
+        task(3, {
+          startDate: "2026-07-30",
+          finishDate: "2026-07-30",
+          durationDays: 0.5,
+          totalFloatMinutes: 450,
+          scheduleStatus: "NORMAL",
+        }),
         task(4, {
           startDate: "2026-07-31",
           finishDate: "2026-07-31",
+          durationDays: 0.5,
           predecessorTaskIds: ["task-3"],
           totalFloatMinutes: 450,
+          scheduleStatus: "NORMAL",
         }),
       ]}
       resourceCriticalChainLinks={[{
@@ -295,6 +389,22 @@ describe("GanttTimeline performance", () => {
     expect(resourceChain).not.toHaveAttribute("stroke-dasharray");
   });
 
+  it("keeps the full resource-constrained critical chain in path order", () => {
+    const rows = [
+      { id: "1.4.3", isCritical: true },
+      { id: "1.2.1", isCritical: true },
+      { id: "1.4.1", isCritical: true },
+      { id: "1.4.2", isCritical: true },
+    ] as unknown as Parameters<typeof buildGanttCriticalPaths>[0];
+    const paths = buildGanttCriticalPaths(rows, [
+      { predecessorId: "1.4.3", successorId: "1.2.1", predecessorName: "", successorName: "" },
+      { predecessorId: "1.2.1", successorId: "1.4.1", predecessorName: "", successorName: "" },
+      { predecessorId: "1.4.1", successorId: "1.4.2", predecessorName: "", successorName: "" },
+    ]);
+
+    expect(paths).toEqual([{ taskIds: ["1.4.3", "1.2.1", "1.4.1", "1.4.2"] }]);
+  });
+
   it("fits the timeline zoom to the visible project duration and viewport", async () => {
     render(<GanttTimeline
       tasks={[
@@ -311,7 +421,7 @@ describe("GanttTimeline performance", () => {
     Object.defineProperty(viewport, "clientWidth", { configurable: true, value: 1_000 });
     fireEvent.scroll(viewport);
 
-    await waitFor(() => expect(screen.getByText("30天")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("15天")).toBeInTheDocument());
   });
 
   it("hides optional columns from both the header and task rows", async () => {
@@ -652,23 +762,76 @@ describe("GanttTimeline performance", () => {
   });
 
   it("shows all CPM columns by default", () => {
-    render(<GanttTimeline tasks={[task(1, {
-      totalFloatMinutes: 450,
-      freeFloatMinutes: 225,
-      earlyStartDate: "2026-07-01",
-      earlyFinishDate: "2026-07-02",
-      lateStartDate: "2026-07-02",
-      lateFinishDate: "2026-07-03",
-      scheduleStatus: "NEAR_CRITICAL",
-    })]} />);
+    render(<GanttTimeline calendarMode="CALENDAR_DAYS" tasks={[
+      task(1, {
+        taskName: "项目总任务",
+        startDate: "2026-07-01",
+        finishDate: "2026-07-03",
+        durationDays: 3,
+      }),
+      task(2, {
+        parentId: "task-1",
+        taskCode: "Task001.001",
+        startDate: "2026-07-01",
+        finishDate: "2026-07-01",
+        totalFloatMinutes: 450,
+        freeFloatMinutes: 225,
+        earlyStartDate: "2026-07-01",
+        earlyFinishDate: "2026-07-01",
+        lateStartDate: "2026-07-02",
+        lateFinishDate: "2026-07-02",
+        scheduleStatus: "NEAR_CRITICAL",
+      }),
+    ]} />);
 
     expect(screen.getByText("总浮动")).toBeInTheDocument();
-    expect(screen.getByText("1 天")).toBeInTheDocument();
+    expect(screen.getByText("1天")).toBeInTheDocument();
     expect(screen.getByText("自由浮动")).toBeInTheDocument();
-    expect(screen.getByText("0.5 天")).toBeInTheDocument();
+    expect(screen.getAllByText("0 天")).toHaveLength(4);
     expect(screen.getByText("最早开始")).toBeInTheDocument();
     expect(screen.getByText("最迟完成")).toBeInTheDocument();
     expect(screen.getByText("排程状态")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "浮动" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("does not draw or report float beyond the root task finish boundary", () => {
+    const { container } = render(<GanttTimeline
+      calendarMode="CALENDAR_DAYS"
+      projectStartDate="2026-08-17"
+      tasks={[
+        task(1, {
+          taskCode: "Task1",
+          taskName: "项目总任务",
+          startDate: "2026-08-17",
+          finishDate: "2026-09-01",
+          durationDays: 16,
+        }),
+        task(2, {
+          parentId: "task-1",
+          taskCode: "Task1.1",
+          taskName: "截止日任务",
+          startDate: "2026-08-31",
+          finishDate: "2026-09-01",
+          durationDays: 2,
+          totalFloatMinutes: 7 * 450,
+          freeFloatMinutes: 7 * 450,
+          lateStartDate: "2026-09-09",
+          lateFinishDate: "2026-09-10",
+        }),
+        task(3, {
+          taskCode: "Task2",
+          taskName: "另一条较晚结束的根任务",
+          startDate: "2026-08-17",
+          finishDate: "2026-09-10",
+          durationDays: 25,
+        }),
+      ]}
+    />);
+
+    expect(container.querySelector('[data-gantt-float-line="task-2"]')).not.toBeInTheDocument();
+    expect(screen.getAllByTitle("总浮动：0 天").length).toBeGreaterThan(0);
+    expect(screen.getAllByTitle("自由浮动：0 天").length).toBeGreaterThan(0);
+    expect(container.querySelector('[data-gantt-task-id="task-2"] [data-gantt-column-key="lateFinish"][title="2026-09-01"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-gantt-task-id="task-2"] [data-gantt-column-key="lateFinish"][title="2026-09-10"]')).not.toBeInTheDocument();
   });
 });

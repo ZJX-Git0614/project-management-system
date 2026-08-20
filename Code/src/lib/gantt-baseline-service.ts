@@ -17,7 +17,7 @@ import {
 } from "@/lib/gantt-relative-time";
 import { prisma } from "@/lib/prisma";
 
-type GanttBaselineClient = Prisma.TransactionClient | typeof prisma;
+export type GanttBaselineClient = Prisma.TransactionClient | typeof prisma;
 
 export const GANTT_BASELINE_STATES = {
   DRAFT: "DRAFT",
@@ -848,11 +848,13 @@ export const beginProjectGanttBaselineDraft = async (params: {
   return { draft, baselineState: project.ganttBaselineVersion > 0 ? GANTT_BASELINE_STATES.CHANGE_DRAFT : GANTT_BASELINE_STATES.DRAFT };
 }, { timeout: 30_000, maxWait: 10_000 });
 
-export const publishProjectGanttBaseline = async (params: {
+export const publishProjectGanttBaselineWithClient = async (params: {
   projectId: string;
   actor: GanttBaselineActor;
   reason?: string;
-}) => prisma.$transaction(async (tx) => {
+  client: GanttBaselineClient;
+}) => {
+  const tx = params.client;
   const project = await tx.project.findUnique({
     where: { id: params.projectId },
     select: { id: true, name: true, ganttBaselineVersion: true, ganttRevision: true, status: true },
@@ -926,7 +928,16 @@ export const publishProjectGanttBaseline = async (params: {
     },
   });
   return { baseline, validation, affectedTasks: Number(affectedTasks) };
-}, { timeout: 30_000, maxWait: 10_000 });
+};
+
+export const publishProjectGanttBaseline = async (params: {
+  projectId: string;
+  actor: GanttBaselineActor;
+  reason?: string;
+}) => prisma.$transaction(
+  (tx) => publishProjectGanttBaselineWithClient({ ...params, client: tx }),
+  { timeout: 30_000, maxWait: 10_000 },
+);
 
 export const getProjectGanttBaselineOverview = async (projectId: string) => {
   const [project, baseline, draft, validation] = await Promise.all([

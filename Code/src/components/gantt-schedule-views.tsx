@@ -6,7 +6,7 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { ProjectGanttTask } from "@/domain/models";
-import { addCalendarDays, diffDays, findGanttCriticalTaskIds, getGanttDateRange } from "@/lib/gantt";
+import { addCalendarDays, diffDays, getGanttDateRange, resolveGanttCriticalTaskIds } from "@/lib/gantt";
 import type { GanttCalendarMode } from "@/lib/gantt-calendar";
 import { formatGanttRelativeOffset, isGanttRelativeOffset } from "@/lib/gantt-relative-time";
 import { cn } from "@/lib/utils";
@@ -118,7 +118,7 @@ export function ResourceSwimlaneView({ tasks, calendarMode }: {
     );
     return { startOffset: 0, endOffset: totalDays - 1, totalDays };
   }, [calendarRange, executableTasks, relativeRange]);
-  const criticalIds = useMemo(() => findGanttCriticalTaskIds(tasks), [tasks]);
+  const criticalIds = useMemo(() => resolveGanttCriticalTaskIds(tasks), [tasks]);
 
   if (lanes.length === 0) {
     return <div className="py-12 text-center text-sm text-muted-foreground">暂无可展示的负责人排期</div>;
@@ -228,7 +228,7 @@ export function ScheduleCalendarView({ tasks }: { tasks: ProjectGanttTask[] }) {
     return firstDate ? monthKeyFromDate(firstDate) : new Date().toISOString().slice(0, 7);
   }, [tasks]);
   const [month, setMonth] = useState(firstScheduledMonth);
-  const criticalIds = useMemo(() => findGanttCriticalTaskIds(tasks), [tasks]);
+  const criticalIds = useMemo(() => resolveGanttCriticalTaskIds(tasks), [tasks]);
   const dates = useMemo(() => monthGridDates(month), [month]);
 
   useEffect(() => setMonth(firstScheduledMonth), [firstScheduledMonth]);

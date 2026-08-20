@@ -85,6 +85,7 @@ import {
   APPROVAL_BUSINESS_TYPES,
   approvalBusinessIdForProjectStatus,
   approvalBusinessIdForWbsBaseline,
+  approvalBusinessIdForWbsTaskProgressSubmission,
 } from "@/lib/approval-workflow";
 import { processApprovalAction, startApprovalWorkflow } from "@/lib/approval-workflow-server";
 import { postCollaborationMessage } from "@/lib/collaboration-server";
@@ -1712,23 +1713,36 @@ export const executeAssistantAction = async (action: AssistantActionRun, user: A
     }
     const current = await prisma.projectGanttTask.findFirst({ where: { id: taskId, projectId: action.projectId } });
     if (!current) throw new Error("任务不存在");
-    const updated = await prisma.$transaction(async (tx) => {
-      const task = await tx.projectGanttTask.update({ where: { id: taskId }, data: { progress } });
-      await tx.operationHistory.create({
-        data: {
-          projectId: action.projectId,
-          entityType: "PROJECT_GANTT_TASK",
-          entityId: task.id,
-          actionType: "UPDATE",
-          operator: user.displayName,
-          detail: `通过智能助手将 ${task.taskCode} ${task.taskName} 进度从 ${current.progress}% 更新为 ${progress}%`,
-        },
-      });
-      return task;
+    const approval = await startApprovalWorkflow({
+      projectId: action.projectId,
+      businessType: APPROVAL_BUSINESS_TYPES.WBS_TASK_PROGRESS_SUBMISSION,
+      businessId: approvalBusinessIdForWbsTaskProgressSubmission(action.projectId, taskId),
+      requester: user,
+      payload: {
+        taskId,
+        taskCode: current.taskCode,
+        taskName: current.taskName,
+        progress,
+        actualStartDate: current.actualStartDate,
+        actualEndDate: progress >= 100 ? "" : current.actualEndDate,
+        actualWorkHours: current.actualWorkHours,
+      },
     });
     return prisma.assistantActionRun.update({
       where: { id: action.id },
-      data: { status: "SUCCEEDED", confirmedAt: new Date(), executedAt: new Date(), resultJson: JSON.stringify({ message: "任务进度已更新", taskId: updated.id, progress: updated.progress, navigateUrl: `/projects/${action.projectId}?nav=gantt`, navigateLabel: "查看项目进度" }) },
+      data: {
+        status: "SUCCEEDED",
+        confirmedAt: new Date(),
+        executedAt: new Date(),
+        resultJson: JSON.stringify({
+          message: "任务进度已提交审批，审批通过后自动更新 WBS",
+          taskId: current.id,
+          progress,
+          approvalInstanceId: approval.id,
+          navigateUrl: "/approvals",
+          navigateLabel: "查看进度审批",
+        }),
+      },
     });
   }
 

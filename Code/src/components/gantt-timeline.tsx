@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { ArrowDown, ArrowUp, CalendarClock, ChevronDown, ChevronLeft, ChevronRight, ChevronRight as MenuChevronRight, ClipboardPaste, Columns3, Copy, Filter, GripVertical, IndentDecrease, IndentIncrease, ListTree, Plus, Scissors, Star, Trash2, TriangleAlert, UserRoundCog, ZoomIn, ZoomOut } from "lucide-react";
+import { ArrowDown, ArrowUp, CalendarClock, ChevronDown, ChevronLeft, ChevronRight, ChevronRight as MenuChevronRight, ClipboardPaste, Columns3, Copy, Eraser, Filter, GripVertical, IndentDecrease, IndentIncrease, ListTree, Plus, Scissors, Star, Trash2, TriangleAlert, UserRoundCog, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { GanttDateField } from "@/components/gantt-date-field";
@@ -41,8 +41,14 @@ import {
   getGanttDateRange,
   parseGanttDate,
 } from "@/lib/gantt";
+import { calculateResourceAwareGanttCpm } from "@/lib/gantt-resource-cpm";
 import { formatGanttRelativeOffset } from "@/lib/gantt-relative-time";
 import { ganttFloatDays, GANTT_MINUTES_PER_DAY, type GanttScheduleStatus } from "@/lib/gantt-cpm";
+import {
+  ganttFloatCalendarSpanWithinDateBoundary,
+  ganttFloatMinutesWithinDateBoundary,
+  ganttFloatMinutesWithinRelativeBoundary,
+} from "@/lib/gantt-float-display";
 import { buildGanttUnassignedLeafTasksByParentId } from "@/lib/gantt-owner-hierarchy";
 import {
   filterGanttRowsWithAncestors,
@@ -51,26 +57,29 @@ import {
   type GanttFilterState,
 } from "@/lib/gantt-filters";
 import {
+  calculateTaskStartDate,
   calculateTaskFinishDate,
   estimatedHoursForDuration,
   normalizeGanttDurationDays,
   roundGanttHours,
-  shiftTaskDate,
   type GanttCalendarMode,
 } from "@/lib/gantt-calendar";
 import {
   normalizeGanttHalfDay,
   normalizeGanttScheduleMode,
   normalizeGanttUserPriority,
+  isGanttFsDependency,
   resolveGanttTaskPlan,
   type GanttHalfDay,
   type GanttScheduleMode,
   type GanttUserPriority,
 } from "@/lib/gantt-planning-rules";
+import { buildGanttLeafScheduleNetwork } from "@/lib/gantt-schedule-network";
 import { cn } from "@/lib/utils";
 
 interface GanttTimelineProps {
   projectId?: string;
+  projectStartDate?: string;
   tasks: ProjectGanttTask[];
   projectMembers?: ProjectMember[];
   calendarMode?: GanttCalendarMode;
@@ -99,6 +108,8 @@ interface GanttTimelineProps {
   onCreateTask?: (parentTask?: ProjectGanttTask) => void;
   /** Opens automatic scheduling for the selected parent scope. */
   onAutoSchedule?: (parentTask: ProjectGanttTask) => void;
+  /** Clears the selected leaf duration or every descendant duration of a parent. */
+  onClearDuration?: (taskId: string) => void | Promise<void>;
   historyFocusRequest?: GanttHistoryFocusRequest | null;
   onUpdateTask?: (task: ProjectGanttTask, draft: GanttTaskDraft, columnKey?: string) => void | Promise<void>;
   onDeleteSelected?: (taskIds: string[]) => void | Promise<void>;
@@ -213,8 +224,10 @@ export type GanttTaskDraft = {
 const ROW_HEIGHT = 30;
 const HEADER_HEIGHT = 32;
 const BAR_HEIGHT = 10;
+const BAR_LABEL_GAP = 8;
+const BAR_LABEL_EDGE_PADDING = 8;
 const MIN_TIMELINE_WIDTH = 860;
-const ZOOM_LEVELS = [1, 3, 8, 20, 60];
+const ZOOM_LEVELS = [1, 3, 5, 7, 15, 30];
 const GANTT_FILTER_KEYS: GanttFilterKey[] = [
   "taskName",
   "taskDescription",
@@ -224,8 +237,8 @@ const GANTT_FILTER_KEYS: GanttFilterKey[] = [
   "endDate",
   "predecessor",
 ];
-const ZOOM_LABELS = ["60天", "30天", "15天", "5天", "1天"];
-const DEFAULT_ZOOM_INDEX = 2;
+const ZOOM_LABELS = ["30天", "15天", "7天", "5天", "3天", "1天"];
+const DEFAULT_ZOOM_INDEX = 3;
 const normalizeTaskMode = (value: unknown): GanttTaskDraft["taskMode"] => normalizeGanttScheduleMode(value);
 const normalizeParentBoundaryMode = (value: unknown): GanttTaskDraft["parentBoundaryMode"] => (
   value === "TARGET" || value === "LOCKED" ? value : "ROLLUP"
@@ -260,12 +273,107 @@ const ganttDepthColor = (depth: number, alpha = 1) => {
   return `hsl(${color.hue} ${color.saturation}% ${lightness}% / ${alpha})`;
 };
 
+const estimateTimelineLabelWidth = (label: string) => {
+  const contentWidth = Array.from(label).reduce((width, character) => (
+    width + (/^[\u0000-\u00ff]$/.test(character) ? 6.5 : 11)
+  ), 0);
+  return Math.ceil(contentWidth + 12);
+};
+
+const ganttTimelineTaskLabel = (
+  task: Pick<ProjectGanttTask, "taskName" | "taskCode" | "ownerMembers" | "ownerMember">,
+) => {
+  const taskLabel = task.taskName || task.taskCode || "未命名任务";
+  const ownerLabel = (task.ownerMembers ?? (task.ownerMember ? [task.ownerMember] : []))
+    .map((owner) => owner.personName)
+    .filter(Boolean)
+    .join("、");
+  return ownerLabel ? `${taskLabel} · ${ownerLabel}` : taskLabel;
+};
+
+const resolveTimelineLabelLayout = ({
+  barLeft,
+  barWidth,
+  label,
+  timelineWidth,
+}: {
+  barLeft: number;
+  barWidth: number;
+  label: string;
+  timelineWidth: number;
+}) => {
+  // Keep labels after the bar. The timeline reserves a label lane so labels
+  // never cover the task bar or its dependency connectors.
+  const labelWidth = Math.max(48, estimateTimelineLabelWidth(label));
+  const availableWidth = Math.max(
+    48,
+    timelineWidth - barLeft - barWidth - BAR_LABEL_GAP - BAR_LABEL_EDGE_PADDING,
+  );
+  return {
+    left: barWidth + BAR_LABEL_GAP,
+    side: "right" as const,
+    width: Math.min(labelWidth, availableWidth),
+  };
+};
+
+const buildGanttLeafDependencyLinks = (tasks: ProjectGanttTask[]): GanttDependencyLink[] => {
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
+  const fallbackBySuccessorId = new Map<string, Array<{
+    predecessorTaskId: string;
+    type: number;
+    lag: number;
+    lagFormat: number;
+  }>>();
+  buildGanttDependencyLinks(tasks).forEach((link) => {
+    fallbackBySuccessorId.set(link.successorId, [
+      ...(fallbackBySuccessorId.get(link.successorId) ?? []),
+      { predecessorTaskId: link.predecessorId, type: 1, lag: 0, lagFormat: 7 },
+    ]);
+  });
+  // Some list responses carry only predecessorTaskIds while the detail
+  // response carries predecessorDependencies. Normalize both shapes here so
+  // the rendered dependency connectors do not disappear after a refresh.
+  tasks.forEach((task) => {
+    (task.predecessorTaskIds ?? []).forEach((predecessorTaskId) => {
+      if (!taskById.has(predecessorTaskId) || predecessorTaskId === task.id) return;
+      const existing = fallbackBySuccessorId.get(task.id) ?? [];
+      if (existing.some((dependency) => dependency.predecessorTaskId === predecessorTaskId)) return;
+      fallbackBySuccessorId.set(task.id, [
+        ...existing,
+        { predecessorTaskId, type: 1, lag: 0, lagFormat: 7 },
+      ]);
+    });
+  });
+
+  const network = buildGanttLeafScheduleNetwork(tasks.map((task) => ({
+    id: task.id,
+    projectId: task.projectId,
+    parentId: task.parentId,
+    predecessorDependencies: task.predecessorDependencies?.length
+      ? task.predecessorDependencies
+      : fallbackBySuccessorId.get(task.id) ?? [],
+  })));
+
+  return network.dependencies.flatMap((dependency) => {
+    if (!isGanttFsDependency(dependency)) return [];
+    const predecessor = taskById.get(dependency.predecessorTaskId);
+    const successor = taskById.get(dependency.successorTaskId);
+    if (!predecessor || !successor) return [];
+    return [{
+      predecessorId: predecessor.id,
+      successorId: successor.id,
+      predecessorName: predecessor.taskName,
+      successorName: successor.taskName,
+    }];
+  });
+};
+
 /**
- * A critical path is a contiguous FS chain made of critical tasks. Summary
- * tasks and isolated critical activities are intentionally retained as paths
- * of one so the timeline never hides a critical task without a dependency.
+ * A critical path is a contiguous FS chain made of executable critical tasks.
+ * Isolated critical activities are intentionally retained as paths of one so
+ * the timeline never hides a critical task without a dependency.
  */
-const buildGanttCriticalPaths = (
+export const buildGanttCriticalPaths = (
   rows: GanttRow[],
   dependencyLinks: GanttDependencyLink[],
 ): GanttCriticalPath[] => {
@@ -473,24 +581,12 @@ const GanttColumnFilterMenu = ({
 };
 
 const getTickEvery = (dayWidth: number) => {
-  if (dayWidth >= 60) return 1;
-  if (dayWidth >= 20) return 5;
-  if (dayWidth >= 8) return 15;
-  if (dayWidth >= 3) return 30;
+  if (dayWidth >= 30) return 1;
+  if (dayWidth >= 15) return 3;
+  if (dayWidth >= 7) return 5;
+  if (dayWidth >= 5) return 7;
+  if (dayWidth >= 3) return 15;
   return 30;
-};
-
-const floatCalendarSpanDays = (
-  endDate: string,
-  floatMinutes: number | null | undefined,
-  mode: GanttCalendarMode,
-) => {
-  if (!endDate || !floatMinutes || floatMinutes <= 0) return 0;
-  const floatDays = floatMinutes / GANTT_MINUTES_PER_DAY;
-  const wholeDays = Math.floor(floatDays);
-  const remainder = floatDays - wholeDays;
-  const shifted = wholeDays > 0 ? shiftTaskDate(endDate, wholeDays, mode) : endDate;
-  return Math.max(0, diffDays(endDate, shifted) + remainder);
 };
 
 const formatFloat = (minutes: number | null | undefined) => {
@@ -590,6 +686,7 @@ const taskDraftEquals = (task: ProjectGanttTask, draft: GanttTaskDraft, calendar
 
 const GanttTimelineContent = ({
   projectId = "",
+  projectStartDate = "",
   tasks,
   projectMembers = [],
   calendarMode = "CALENDAR_DAYS",
@@ -612,6 +709,7 @@ const GanttTimelineContent = ({
   historyFocusRequest,
   onCreateTask,
   onAutoSchedule,
+  onClearDuration,
   onUpdateTask,
   onDeleteSelected,
   onChangeHierarchy,
@@ -634,6 +732,7 @@ const GanttTimelineContent = ({
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [taskDropTarget, setTaskDropTarget] = useState<{ id: string; position: DropPosition } | null>(null);
   const [flashingTaskId, setFlashingTaskId] = useState<string | null>(null);
+  const [hoveredTaskId, setHoveredTaskId] = useState<string | null>(null);
   const [columnWidths, setColumnWidths] = useState<GanttColumnWidths>(() => fitGanttColumnWidths(tasks));
   const [hiddenColumnKeys, setHiddenColumnKeys] = useState<Set<GanttColumnKey>>(
     () => new Set(GANTT_DEFAULT_HIDDEN_COLUMN_KEYS),
@@ -658,8 +757,12 @@ const GanttTimelineContent = ({
   const [virtualRange, setVirtualRange] = useState({ start: 0, end: 40 });
   const [embeddedViewportHeight, setEmbeddedViewportHeight] = useState<number | null>(null);
   const [timelineViewportWidth, setTimelineViewportWidth] = useState(0);
-  const range = getGanttDateRange(tasks);
-  const rows = useMemo(() => buildGanttRows(tasks), [tasks]);
+  const coordinateMode = /^\d{4}-\d{2}-\d{2}$/.test(projectStartDate) ? "ABSOLUTE" : "AUTO";
+  const range = getGanttDateRange(tasks, { coordinateMode });
+  const rows = useMemo(
+    () => buildGanttRows(tasks, { coordinateMode, calendarMode }),
+    [calendarMode, coordinateMode, tasks],
+  );
   const displayRange = range ?? (() => {
     const today = new Date().toISOString().slice(0, 10);
     return {
@@ -669,20 +772,109 @@ const GanttTimelineContent = ({
     };
   })();
   const relativeTimeline = !range && rows.some((row) => row.spanDays > 0);
-  const maxFloatCalendarSpan = useMemo(() => rows.reduce((maximum, row) => Math.max(
-    maximum,
-    floatCalendarSpanDays(row.endDate, row.freeFloatMinutes, calendarMode),
-  ), 0), [calendarMode, rows]);
+  const resourceAwareCpm = useMemo(
+    () => calculateResourceAwareGanttCpm(tasks, calendarMode),
+    [calendarMode, tasks],
+  );
+  const absoluteFloatBoundaryDate = useMemo(() => {
+    const rootFinishDates = rows
+      .filter((row) => !row.parentId && row.endDate)
+      .map((row) => row.endDate)
+      .sort();
+    return rootFinishDates.at(-1) ?? displayRange.endDate;
+  }, [displayRange.endDate, rows]);
+  const relativeFloatBoundaryDays = useMemo(() => {
+    const rootFinishOffsets = rows
+      .filter((row) => !row.parentId && row.spanDays > 0)
+      .map((row) => row.timelineEndDays);
+    const boundaryCandidates = rootFinishOffsets.length > 0
+      ? rootFinishOffsets
+      : rows.map((row) => row.timelineEndDays);
+    return Math.max(...boundaryCandidates, 0);
+  }, [rows]);
+  const floatBoundaryByTaskId = useMemo(() => {
+    const rowById = new Map(rows.map((row) => [row.id, row]));
+    const result = new Map<string, { finishDate: string; finishOffsetDays: number }>();
+
+    rows.forEach((row) => {
+      let root = row;
+      const visited = new Set<string>([row.id]);
+      while (root.parentId) {
+        const parent = rowById.get(root.parentId);
+        if (!parent || visited.has(parent.id)) break;
+        visited.add(parent.id);
+        root = parent;
+      }
+      result.set(row.id, {
+        finishDate: root.endDate || absoluteFloatBoundaryDate,
+        finishOffsetDays: root.spanDays > 0
+          ? root.timelineEndDays
+          : relativeFloatBoundaryDays,
+      });
+    });
+
+    return result;
+  }, [absoluteFloatBoundaryDate, relativeFloatBoundaryDays, rows]);
+  const displayFloatMetricsByTaskId = useMemo(() => new Map(rows.map((row) => {
+    const calculatedMetrics = resourceAwareCpm.metricsByTaskId.get(row.id);
+    const boundary = floatBoundaryByTaskId.get(row.id);
+    const boundaryFinishDate = boundary?.finishDate || absoluteFloatBoundaryDate;
+    const boundaryFinishOffsetDays = boundary?.finishOffsetDays ?? relativeFloatBoundaryDays;
+    let lateStartDate = calculatedMetrics?.lateStartDate ?? row.lateStartDate ?? "";
+    let lateFinishDate = calculatedMetrics?.lateFinishDate ?? row.lateFinishDate ?? "";
+    if (!relativeTimeline && boundaryFinishDate && lateFinishDate > boundaryFinishDate) {
+      lateFinishDate = boundaryFinishDate;
+      lateStartDate = calculateTaskStartDate(boundaryFinishDate, row.durationDays, calendarMode)
+        || (lateStartDate > boundaryFinishDate ? boundaryFinishDate : lateStartDate);
+    } else if (!relativeTimeline && boundaryFinishDate && lateStartDate > boundaryFinishDate) {
+      lateStartDate = boundaryFinishDate;
+    }
+    const displayLatestFinishDate = !relativeTimeline
+      ? [boundaryFinishDate, lateFinishDate].filter(Boolean).sort()[0] ?? boundaryFinishDate
+      : "";
+    const clamp = (minutes: number | null | undefined) => relativeTimeline
+      ? ganttFloatMinutesWithinRelativeBoundary(
+        row.timelineEndDays,
+        minutes,
+        boundaryFinishOffsetDays,
+      )
+      : ganttFloatMinutesWithinDateBoundary(
+        row.endDate,
+        minutes,
+        boundaryFinishDate,
+        calendarMode,
+        displayLatestFinishDate,
+    );
+    return [row.id, {
+      totalFloatMinutes: clamp(calculatedMetrics?.totalFloatMinutes ?? row.totalFloatMinutes),
+      freeFloatMinutes: (() => {
+        const totalFloatMinutes = clamp(calculatedMetrics?.totalFloatMinutes ?? row.totalFloatMinutes);
+        const freeFloatMinutes = clamp(calculatedMetrics?.freeFloatMinutes ?? row.freeFloatMinutes);
+        if (totalFloatMinutes == null || freeFloatMinutes == null) return freeFloatMinutes;
+        return Math.min(freeFloatMinutes, totalFloatMinutes);
+      })(),
+      lateStartDate,
+      lateFinishDate,
+    }];
+  })), [
+    absoluteFloatBoundaryDate,
+    calendarMode,
+    floatBoundaryByTaskId,
+    relativeFloatBoundaryDays,
+    relativeTimeline,
+    resourceAwareCpm,
+    rows,
+  ]);
   const visibleStartDate = useMemo(
     () => addCalendarDays(displayRange.startDate, -1),
     [displayRange.startDate],
   );
   const visibleEndDate = useMemo(
-    () => addCalendarDays(displayRange.endDate, Math.max(7, Math.ceil(maxFloatCalendarSpan) + 2)),
-    [displayRange.endDate, maxFloatCalendarSpan],
+    () => displayRange.endDate,
+    [displayRange.endDate],
   );
   const visibleDays = relativeTimeline
-    ? Math.max(7, Math.max(...rows.map((row) => row.timelineEndDays), 0) + 2)
+    ? Math.max(7, Math.max(...rows.map((row) => row.timelineEndDays), 0) + 1)
     : diffDays(visibleStartDate, visibleEndDate) + 1;
   const autoZoomPlanKey = `${projectId}:${relativeTimeline ? "relative" : `${visibleStartDate}:${visibleEndDate}`}:${visibleDays}:${Math.round(timelineViewportWidth)}`;
   const columnFilteredRows = useMemo(
@@ -692,8 +884,45 @@ const GanttTimelineContent = ({
   const filterOptionsByKey = useMemo(() => Object.fromEntries(
     GANTT_FILTER_KEYS.map((key) => [key, ganttFilterOptions(rows, key)]),
   ) as Record<GanttFilterKey, string[]>, [rows]);
-  const dependencyLinks = useMemo(() => buildGanttDependencyLinks(tasks), [tasks]);
-  const resourceCriticalTaskIdSet = useMemo(() => new Set(resourceCriticalTaskIds), [resourceCriticalTaskIds]);
+  const dependencyLinks = useMemo(() => buildGanttLeafDependencyLinks(tasks), [tasks]);
+  const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
+  const derivedResourceLinks = useMemo(() => resourceAwareCpm.resourceLinks.map((link) => {
+    const predecessor = taskById.get(link.predecessorTaskId);
+    const successor = taskById.get(link.successorTaskId);
+    if (!predecessor || !successor) return null;
+    return {
+      predecessorTaskId: link.predecessorTaskId,
+      successorTaskId: link.successorTaskId,
+      ownerKey: link.ownerKey,
+      predecessorName: predecessor.taskName,
+      successorName: successor.taskName,
+    };
+  }).filter((link): link is NonNullable<typeof link> => Boolean(link)), [resourceAwareCpm, taskById]);
+  const resourceLinks = useMemo(() => {
+    const normalizedServerLinks = resourceCriticalChainLinks.flatMap((link) => {
+      const predecessor = taskById.get(link.predecessorTaskId);
+      const successor = taskById.get(link.successorTaskId);
+      if (!predecessor || !successor) return [];
+      return [{
+        predecessorTaskId: link.predecessorTaskId,
+        successorTaskId: link.successorTaskId,
+        ownerKey: link.ownerKey,
+        predecessorName: predecessor.taskName,
+        successorName: successor.taskName,
+      }];
+    });
+    const seen = new Set<string>();
+    return [...normalizedServerLinks, ...derivedResourceLinks].filter((link) => {
+      const key = `${link.predecessorTaskId}:${link.successorTaskId}:${link.ownerKey}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [derivedResourceLinks, resourceCriticalChainLinks, taskById]);
+  const resourceCriticalTaskIdSet = useMemo(() => new Set([
+    ...resourceCriticalTaskIds,
+    ...resourceAwareCpm.resourceLinks.flatMap((link) => [link.predecessorTaskId, link.successorTaskId]),
+  ]), [resourceAwareCpm, resourceCriticalTaskIds]);
   const rowByTaskId = useMemo(() => new Map(rows.map((row) => [row.id, row])), [rows]);
   const childIdsByParentId = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -705,9 +934,24 @@ const GanttTimelineContent = ({
     });
     return map;
   }, [rows]);
+  const criticalRows = useMemo(() => {
+    const calculatedCriticalTaskIds = resourceAwareCpm.projectCriticalTaskIds;
+    if (calculatedCriticalTaskIds.size === 0) return rows;
+    return rows.map((row) => calculatedCriticalTaskIds.has(row.id)
+      ? { ...row, isCritical: true, scheduleStatus: "CRITICAL" as const }
+      : row);
+  }, [resourceAwareCpm, rows]);
   const criticalPaths = useMemo(
-    () => buildGanttCriticalPaths(rows, dependencyLinks),
-    [dependencyLinks, rows],
+    () => buildGanttCriticalPaths(criticalRows, [
+      ...dependencyLinks,
+      ...resourceLinks.map((link) => ({
+        predecessorId: link.predecessorTaskId,
+        successorId: link.successorTaskId,
+        predecessorName: link.predecessorName,
+        successorName: link.successorName,
+      })),
+    ]),
+    [criticalRows, dependencyLinks, resourceLinks],
   );
   const criticalPathTaskIds = useMemo(
     () => new Set(criticalPaths.flatMap((path) => path.taskIds)),
@@ -1415,7 +1659,14 @@ const GanttTimelineContent = ({
   }
 
   const config = { dayWidth, tickEvery: getTickEvery(dayWidth) };
-  const timelineWidth = Math.max(MIN_TIMELINE_WIDTH, visibleDays * config.dayWidth);
+  const timelineLabelReserve = Math.min(460, Math.max(
+    180,
+    ...visibleRows.map((row) => estimateTimelineLabelWidth(ganttTimelineTaskLabel(row))),
+  ));
+  const timelineWidth = Math.max(
+    MIN_TIMELINE_WIDTH,
+    visibleDays * config.dayWidth + BAR_LABEL_GAP + timelineLabelReserve + BAR_LABEL_EDGE_PADDING,
+  );
   const bodyHeight = visibleRows.length * ROW_HEIGHT;
   const todayOffset = diffDays(visibleStartDate, new Date().toISOString().slice(0, 10));
   const todayX = todayOffset >= 0 && todayOffset < visibleDays ? todayOffset * config.dayWidth : null;
@@ -1643,6 +1894,7 @@ const GanttTimelineContent = ({
                   dragged={draggedTaskId === row.id}
                   dropPosition={taskDropTarget?.id === row.id && draggedTaskId !== row.id ? taskDropTarget.position : null}
                   flashing={flashingTaskId === row.id}
+                  hovered={hoveredTaskId === row.id}
                   index={index}
                   visualTop={index * ROW_HEIGHT}
                   isSaving={savingTaskId === row.id}
@@ -1658,6 +1910,7 @@ const GanttTimelineContent = ({
                   onDragStart={() => setDraggedTaskId(row.id)}
                   onDrop={() => reorderTask(row.id, taskDropTarget?.id === row.id ? taskDropTarget.position : "before")}
                   onOpenContextMenu={(event) => openTaskContextMenu(event, row.id)}
+                  onHoverChange={setHoveredTaskId}
                   hasChildren={childIdsByParentId.has(row.id)}
                   hierarchyCollapsed={collapsedTaskIds.has(row.id)}
                   onToggleHierarchy={() => toggleTaskCollapsed(row.id)}
@@ -1666,6 +1919,10 @@ const GanttTimelineContent = ({
                   onUpdateTask={onUpdateTask}
                   projectMembers={projectMembers}
                   calendarMode={calendarMode}
+                  displayFreeFloatMinutes={displayFloatMetricsByTaskId.get(row.id)?.freeFloatMinutes}
+                  displayLateFinishDate={displayFloatMetricsByTaskId.get(row.id)?.lateFinishDate}
+                  displayLateStartDate={displayFloatMetricsByTaskId.get(row.id)?.lateStartDate}
+                  displayTotalFloatMinutes={displayFloatMetricsByTaskId.get(row.id)?.totalFloatMinutes}
                   predecessorOptions={tasks}
                   row={row}
                   priorityReadOnly={childIdsByParentId.has(row.id) || row.isCritical || taskIdsWithFsDependencies.has(row.id)}
@@ -1703,9 +1960,30 @@ const GanttTimelineContent = ({
           </div>
 
           <div className="relative" style={{ width: timelineWidth, height: bodyHeight }}>
+            {virtualRows.map(({ row, index: visualIndex }) => {
+              const taskDepth = taskDepthById.get(row.id) ?? 0;
+              const hasChildren = childIdsByParentId.has(row.id);
+              return (
+                <div
+                  aria-hidden="true"
+                  data-gantt-timeline-row-background={row.id}
+                  key={`timeline-row-background:${row.id}`}
+                  className="absolute inset-x-0 z-[1] border-b border-border/55 transition-colors duration-100"
+                  onMouseEnter={() => setHoveredTaskId(row.id)}
+                  onMouseLeave={() => setHoveredTaskId((current) => current === row.id ? null : current)}
+                  style={{
+                    top: visualIndex * ROW_HEIGHT,
+                    height: ROW_HEIGHT,
+                    backgroundColor: hoveredTaskId === row.id
+                      ? "hsl(var(--primary) / 0.16)"
+                      : ganttDepthColor(taskDepth, hasChildren ? 0.11 : 0.06),
+                  }}
+                />
+              );
+            })}
             <svg
               aria-hidden="true"
-              className="absolute inset-0"
+              className="pointer-events-none absolute inset-0 z-[2]"
               height={bodyHeight}
               width={timelineWidth}
             >
@@ -1751,7 +2029,7 @@ const GanttTimelineContent = ({
                   />
                 );
               })}
-              {resourceCriticalChainLinks.map((link) => {
+              {resourceLinks.map((link) => {
                 const from = rowById.get(link.predecessorTaskId);
                 const to = rowById.get(link.successorTaskId);
                 if (!from || !to || from.row.spanDays <= 0 || to.row.spanDays <= 0) return null;
@@ -1769,7 +2047,9 @@ const GanttTimelineContent = ({
                     fromY={fromY}
                     toX={toX}
                     toY={toY}
-                    tone="resource"
+                    tone={criticalPathTaskIds.has(link.predecessorTaskId) && criticalPathTaskIds.has(link.successorTaskId)
+                      ? "critical"
+                      : "resource"}
                   />
                 );
               })}
@@ -1779,17 +2059,30 @@ const GanttTimelineContent = ({
               if (row.spanDays <= 0) return null;
               const left = (relativeTimeline ? row.timelineStartDays : diffDays(visibleStartDate, row.startDate)) * config.dayWidth;
               const width = config.dayWidth * row.spanDays;
-              const showBarLabel = width >= 72;
-              const labelAvailableWidth = Math.max(0, timelineWidth - left - width - 12);
-              const barLabel = row.taskName || row.taskCode;
-              const ownerLabel = (row.ownerMembers ?? (row.ownerMember ? [row.ownerMember] : []))
-                .map((owner) => owner.personName)
-                .filter(Boolean)
-                .join("、");
-              const timelineLabel = ownerLabel ? `${barLabel} · ${ownerLabel}` : barLabel;
+              const timelineLabel = ganttTimelineTaskLabel(row);
+              const labelLayout = resolveTimelineLabelLayout({
+                barLeft: left,
+                barWidth: width,
+                label: timelineLabel,
+                timelineWidth,
+              });
               const progress = Math.min(100, Math.max(0, row.progress ?? 0));
+              const displayFloatMetrics = displayFloatMetricsByTaskId.get(row.id);
+              const displayFreeFloatMinutes = displayFloatMetrics?.freeFloatMinutes;
+              const displayTotalFloatMinutes = displayFloatMetrics?.totalFloatMinutes;
+              const displayLateStartDate = displayFloatMetrics?.lateStartDate || row.lateStartDate;
+              const displayLateFinishDate = displayFloatMetrics?.lateFinishDate || row.lateFinishDate;
+              const floatBoundary = floatBoundaryByTaskId.get(row.id);
               const floatSpanDays = showFloat
-                ? floatCalendarSpanDays(row.endDate, row.freeFloatMinutes, calendarMode)
+                ? relativeTimeline
+                  ? Math.max(0, (displayFreeFloatMinutes ?? 0) / GANTT_MINUTES_PER_DAY)
+                  : ganttFloatCalendarSpanWithinDateBoundary(
+                    row.endDate,
+                    displayFreeFloatMinutes,
+                    floatBoundary?.finishDate || absoluteFloatBoundaryDate,
+                    calendarMode,
+                    displayLateFinishDate,
+                  )
                 : 0;
               const floatWidth = config.dayWidth * floatSpanDays;
               const scheduleStatus = row.scheduleStatus as GanttScheduleStatus | undefined;
@@ -1805,7 +2098,9 @@ const GanttTimelineContent = ({
               return (
                 <div
                   key={row.id}
-                  className="absolute flex items-center"
+                  className="absolute z-[3] flex items-center"
+                  onMouseEnter={() => setHoveredTaskId(row.id)}
+                  onMouseLeave={() => setHoveredTaskId((current) => current === row.id ? null : current)}
                   style={{
                     left,
                     top: visualIndex * ROW_HEIGHT + (ROW_HEIGHT - BAR_HEIGHT) / 2,
@@ -1823,7 +2118,7 @@ const GanttTimelineContent = ({
                       backgroundColor: barSurfaceColor,
                       borderColor: row.isCritical ? "hsl(var(--destructive) / 0.9)" : barBorderColor,
                     }}
-                    title={`${timelineLabel}: ${row.startDate} ~ ${row.endDate}，当前进度 ${progress}%${criticalPathLabel ? `\n${criticalPathLabel}` : ""}\n最早 ${row.earlyStartDate || "--"} ~ ${row.earlyFinishDate || "--"}\n最迟 ${row.lateStartDate || "--"} ~ ${row.lateFinishDate || "--"}\n总浮动 ${formatFloat(row.totalFloatMinutes)}，自由浮动 ${formatFloat(row.freeFloatMinutes)}`}
+                    title={`${timelineLabel}: ${row.startDate} ~ ${row.endDate}，当前进度 ${progress}%${criticalPathLabel ? `\n${criticalPathLabel}` : ""}\n最早 ${row.earlyStartDate || "--"} ~ ${row.earlyFinishDate || "--"}\n最迟 ${displayLateStartDate || "--"} ~ ${displayLateFinishDate || "--"}\n总浮动 ${formatFloat(displayTotalFloatMinutes)}，自由浮动 ${formatFloat(displayFreeFloatMinutes)}`}
                   >
                     <div
                       className="h-full rounded-sm transition-[width] duration-150"
@@ -1836,6 +2131,8 @@ const GanttTimelineContent = ({
                   {floatWidth > 0 && (
                     <span
                       aria-hidden="true"
+                      data-gantt-float-line={row.id}
+                      data-gantt-float-minutes={displayFreeFloatMinutes ?? ""}
                       className="pointer-events-none absolute left-full top-1/2 z-10 h-0 border-t-2 border-dashed border-sky-300/95 drop-shadow-[0_0_2px_rgba(56,189,248,0.95)]"
                       style={{ width: floatWidth }}
                     >
@@ -1843,7 +2140,7 @@ const GanttTimelineContent = ({
                       <span className="absolute -right-0.5 -top-1.5 size-2 rounded-full border border-background bg-sky-300" />
                       {floatWidth >= 40 && (
                         <span className="absolute left-1 top-1 whitespace-nowrap rounded-sm bg-sky-950/95 px-1 py-px text-[9px] leading-3 text-sky-100 shadow-sm">
-                          浮动 {formatFloat(row.freeFloatMinutes)}
+                          浮动 {formatFloat(displayFreeFloatMinutes)}
                         </span>
                       )}
                     </span>
@@ -1859,15 +2156,14 @@ const GanttTimelineContent = ({
                   {scheduleStatus === "NEGATIVE_FLOAT" && (
                     <span className="pointer-events-none absolute -right-1 top-0 size-2 rounded-full bg-destructive shadow-[0_0_0_2px_hsl(var(--background))]" />
                   )}
-                  {showBarLabel && labelAvailableWidth >= 24 && (
-                    <span
-                      className="absolute left-full ml-2 truncate text-[11px] text-muted-foreground"
-                      style={{ width: labelAvailableWidth }}
-                      title={timelineLabel}
-                    >
-                      {timelineLabel}
-                    </span>
-                  )}
+                  <span
+                    className="pointer-events-none absolute top-1/2 z-30 -translate-y-1/2 overflow-hidden text-ellipsis whitespace-nowrap rounded-sm bg-card/90 px-1 text-[11px] leading-4 text-muted-foreground shadow-[0_0_0_1px_hsl(var(--border)/0.28)]"
+                    data-gantt-bar-label-side={labelLayout.side}
+                    style={{ left: labelLayout.left, width: labelLayout.width }}
+                    title={timelineLabel}
+                  >
+                    {timelineLabel}
+                  </span>
                 </div>
               );
             })}
@@ -2126,6 +2422,20 @@ const GanttTimelineContent = ({
                   type="button"
                   role="menuitem"
                   className="gantt-context-menu-item"
+                  disabled={!onClearDuration}
+                  onClick={() => {
+                    const taskId = contextTask.id;
+                    closeContextMenu();
+                    void onClearDuration?.(taskId);
+                  }}
+                >
+                  <Eraser className="size-4 shrink-0" />
+                  <span>{contextTaskHasChildren ? "清除全部子任务工期" : "清除本任务工期"}</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="gantt-context-menu-item"
                   disabled={!canOutdentSelection || hierarchyChanging}
                   onClick={() => changeContextHierarchy("OUTDENT")}
                 >
@@ -2218,7 +2528,10 @@ const EmptyGanttTimeline = ({
   const config = { dayWidth, tickEvery: getTickEvery(dayWidth) };
   const visibleStartDate = new Date().toISOString().slice(0, 10);
   const visibleDays = 28;
-  const timelineWidth = Math.max(MIN_TIMELINE_WIDTH, visibleDays * config.dayWidth);
+  const timelineWidth = Math.max(
+    MIN_TIMELINE_WIDTH,
+    visibleDays * config.dayWidth + BAR_LABEL_GAP + 180 + BAR_LABEL_EDGE_PADDING,
+  );
   const visibleColumnKeys = ganttVisibleColumnKeys(detailsCollapsed, hiddenColumnKeys);
   const leftWidth = ganttColumnsWidth(columnWidths, detailsCollapsed, hiddenColumnKeys);
   const bodyHeight = ROW_HEIGHT * 3;
@@ -2667,9 +2980,14 @@ const EditableTaskRow = ({
   canEdit,
   canEditActuals,
   allowCompletedTaskReopen,
+  displayFreeFloatMinutes,
+  displayLateFinishDate,
+  displayLateStartDate,
+  displayTotalFloatMinutes,
   dragged,
   dropPosition,
   flashing,
+  hovered,
   hasChildren,
   hierarchyCollapsed,
   index,
@@ -2678,6 +2996,7 @@ const EditableTaskRow = ({
   onDragOver,
   onDragStart,
   onDrop,
+  onHoverChange,
   onOpenContextMenu,
   onSequencePointerDown,
   onSequencePointerEnter,
@@ -2703,9 +3022,14 @@ const EditableTaskRow = ({
   canEdit: boolean;
   canEditActuals: boolean;
   allowCompletedTaskReopen: boolean;
+  displayFreeFloatMinutes: number | null | undefined;
+  displayLateFinishDate: string | null | undefined;
+  displayLateStartDate: string | null | undefined;
+  displayTotalFloatMinutes: number | null | undefined;
   dragged: boolean;
   dropPosition: DropPosition | null;
   flashing: boolean;
+  hovered: boolean;
   hasChildren: boolean;
   hierarchyCollapsed: boolean;
   index: number;
@@ -2714,6 +3038,7 @@ const EditableTaskRow = ({
   onDragOver: (event: DragEvent<HTMLDivElement>) => void;
   onDragStart: () => void;
   onDrop: () => void;
+  onHoverChange: (taskId: string | null) => void;
   onOpenContextMenu: (event: ReactMouseEvent) => void;
   onSequencePointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   onSequencePointerEnter: (event: ReactPointerEvent<HTMLButtonElement>) => void;
@@ -2877,6 +3202,7 @@ const EditableTaskRow = ({
           : "shadow-[inset_2px_0_0_var(--gantt-level-accent)]",
         explicitSelected && "!bg-sky-500/12 hover:!bg-sky-500/16",
         linkedSelected && "!bg-sky-500/8 hover:!bg-sky-500/12",
+        hovered && "!bg-sky-500/14 hover:!bg-sky-500/16",
         dragged && "scale-[0.995] opacity-45 shadow-lg",
         dropPosition && "!bg-primary/10",
         hasChildren && "font-semibold",
@@ -2884,6 +3210,8 @@ const EditableTaskRow = ({
       onDragEnd={onDragEnd}
       onDragOver={onDragOver}
       onContextMenu={onOpenContextMenu}
+      onMouseEnter={() => onHoverChange(row.id)}
+      onMouseLeave={() => onHoverChange(null)}
       onDrop={(event) => {
         event.preventDefault();
         onDrop();
@@ -3371,17 +3699,17 @@ const EditableTaskRow = ({
           className={cn(
             "flex min-w-0 items-center justify-end px-2 font-mono text-[11px] tabular-nums",
             row.totalFloatMinutes != null && row.totalFloatMinutes < 0 && "font-semibold text-destructive",
-            row.totalFloatMinutes === 0 && "font-semibold text-destructive",
+            row.isCritical && "font-semibold text-destructive",
             row.scheduleStatus === "NEAR_CRITICAL" && "text-amber-500",
           )}
-          title={`总浮动：${formatFloat(row.totalFloatMinutes)}`}
+          title={`总浮动：${formatFloat(displayTotalFloatMinutes)}`}
         >
-          {formatFloat(row.totalFloatMinutes)}
+          {formatFloat(displayTotalFloatMinutes)}
         </div>
       )}
       {isColumnVisible("freeFloat") && (
-        <div data-gantt-column-key="freeFloat" className="flex min-w-0 items-center justify-end px-2 font-mono text-[11px] tabular-nums" title={`自由浮动：${formatFloat(row.freeFloatMinutes)}`}>
-          {formatFloat(row.freeFloatMinutes)}
+        <div data-gantt-column-key="freeFloat" className="flex min-w-0 items-center justify-end px-2 font-mono text-[11px] tabular-nums" title={`自由浮动：${formatFloat(displayFreeFloatMinutes)}`}>
+          {formatFloat(displayFreeFloatMinutes)}
         </div>
       )}
       {isColumnVisible("earlyStart") && (
@@ -3391,10 +3719,10 @@ const EditableTaskRow = ({
         <div data-gantt-column-key="earlyFinish" className="truncate px-2 font-mono text-[11px]" title={row.earlyFinishDate || "--"}>{row.earlyFinishDate || "--"}</div>
       )}
       {isColumnVisible("lateStart") && (
-        <div data-gantt-column-key="lateStart" className="truncate px-2 font-mono text-[11px]" title={row.lateStartDate || "--"}>{row.lateStartDate || "--"}</div>
+        <div data-gantt-column-key="lateStart" className="truncate px-2 font-mono text-[11px]" title={displayLateStartDate || "--"}>{displayLateStartDate || "--"}</div>
       )}
       {isColumnVisible("lateFinish") && (
-        <div data-gantt-column-key="lateFinish" className="truncate px-2 font-mono text-[11px]" title={row.lateFinishDate || "--"}>{row.lateFinishDate || "--"}</div>
+        <div data-gantt-column-key="lateFinish" className="truncate px-2 font-mono text-[11px]" title={displayLateFinishDate || "--"}>{displayLateFinishDate || "--"}</div>
       )}
       {isColumnVisible("scheduleStatus") && (
         <div
@@ -3402,7 +3730,7 @@ const EditableTaskRow = ({
           className={cn(
             "truncate px-2 text-[11px]",
             row.scheduleStatus === "NEGATIVE_FLOAT" && "font-semibold text-destructive",
-            row.scheduleStatus === "CRITICAL" && "text-destructive",
+            row.scheduleStatus === "CRITICAL" && row.isCritical && "text-destructive",
             row.scheduleStatus === "NEAR_CRITICAL" && "text-amber-500",
           )}
           title={SCHEDULE_STATUS_LABELS[(row.scheduleStatus as GanttScheduleStatus) || "UNSCHEDULED"]}
@@ -3490,6 +3818,7 @@ const PredecessorSelect = ({
       ariaLabel="紧前任务"
       searchPlaceholder="搜索任务 ID、名称或类别"
       emptyText="没有可选择的紧前任务"
+      helperText="选择父级任务表示其全部末级任务完成后才开始；只依赖某个末级任务时，请直接选择该任务。"
       options={selectOptions}
       value={value}
       onChange={onChange}

@@ -126,6 +126,9 @@ const buildDescendantsById = (options: readonly HierarchicalSelectOption[]) => {
   return descendants;
 };
 
+const EMPTY_CHILDREN_BY_PARENT = new Map<string | null, string[]>();
+const EMPTY_DESCENDANTS_BY_ID = new Map<string, string[]>();
+
 const getDepth = (
   option: HierarchicalSelectOption,
   optionById: ReadonlyMap<string, HierarchicalSelectOption>,
@@ -157,6 +160,7 @@ export interface HierarchicalMultiSelectProps {
   portalContainer?: HTMLElement | null;
   title?: string;
   defaultOpen?: boolean;
+  helperText?: ReactNode;
 }
 
 export function HierarchicalMultiSelect({
@@ -175,17 +179,27 @@ export function HierarchicalMultiSelect({
   portalContainer,
   title,
   defaultOpen = false,
+  helperText,
 }: HierarchicalMultiSelectProps) {
   const [open, setOpen] = useState(() => defaultOpen && !disabled);
   const [query, setQuery] = useState("");
   const [pendingValue, setPendingValue] = useState<string[]>(value);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const optionById = useMemo(() => new Map(options.map((option) => [option.id, option])), [options]);
-  const childrenByParent = useMemo(() => buildChildrenByParent(options), [options]);
-  const descendantsById = useMemo(() => buildDescendantsById(options), [options]);
+  // Most table cells keep this selector closed. Build the expensive hierarchy
+  // only for the active menu instead of once for every visible table row.
+  const childrenByParent = useMemo(
+    () => (open ? buildChildrenByParent(options) : EMPTY_CHILDREN_BY_PARENT),
+    [open, options],
+  );
+  const descendantsById = useMemo(
+    () => (open ? buildDescendantsById(options) : EMPTY_DESCENDANTS_BY_ID),
+    [open, options],
+  );
   const selectableOptions = useMemo(() => options.filter((option) => !option.disabled), [options]);
   const selectableIds = useMemo(() => new Set(selectableOptions.map((option) => option.id)), [selectableOptions]);
   const visibleOptions = useMemo(() => {
+    if (!open) return [];
     const normalizedQuery = query.trim().toLocaleLowerCase();
     const matches = normalizedQuery
       ? options.filter((option) => [option.label, option.secondaryLabel, option.searchText].filter(Boolean).join(" ").toLocaleLowerCase().includes(normalizedQuery))
@@ -198,7 +212,7 @@ export function HierarchicalMultiSelect({
           return true;
         });
     return matches;
-  }, [expandedIds, optionById, options, query]);
+  }, [expandedIds, open, optionById, options, query]);
 
   useEffect(() => {
     const validValue = value.filter((id) => selectableIds.has(id));
@@ -379,6 +393,11 @@ export function HierarchicalMultiSelect({
             );
           })}
         </div>
+        {helperText && (
+          <div className="border-t border-border px-2 py-1.5 text-[11px] leading-4 text-muted-foreground">
+            {helperText}
+          </div>
+        )}
         {multiple && applyOnClose && (
           <div className="flex items-center justify-end gap-1.5 border-t border-border px-2 py-2">
             <Button type="button" size="sm" variant="ghost" className="h-7 text-xs" onClick={() => openChange(false)}>

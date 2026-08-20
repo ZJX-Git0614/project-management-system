@@ -53,6 +53,8 @@ describe("Windows staged blue-green deployment", () => {
     expect(imageName).toBe(
       `ceastar-project-management:${year}.${month}.${day}.${revision}-amd64`,
     );
+    expect(packageScript).toContain('COMPATIBLE_BASE_RELEASE="20260806-4"');
+    expect(packageScript).toContain("Compatible base release:");
   });
 
   it("uses one versioned state contract for update and rollback", () => {

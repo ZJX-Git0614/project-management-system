@@ -20,6 +20,10 @@ import {
   type GanttCpmMetrics,
 } from "@/lib/gantt-cpm";
 import {
+  buildResourceSerialLinks,
+  calculateResourceAwareGanttCpm,
+} from "@/lib/gantt-resource-cpm";
+import {
   createGanttDurationSuggestions,
   type GanttDurationSuggestion,
   type GanttDurationSuggestionIssue,
@@ -945,12 +949,14 @@ const scheduleWithPriority = (params: {
       hardFinishCeiling,
       ...successorFinishCeilings,
     ]);
-    const preferredLatestFinish = dateMin([
-      hardLatestFinish,
-      validDate(task.finishDate) && params.direction === "BACKWARD" ? task.finishDate : "",
-    ]);
+    // A formal backward run is anchored by the selected WBS finish boundary.
+    // Reusing a task's previous finish date turns stale output into a hard
+    // constraint and can falsely report conflicts after switching modes.
+    const preferredLatestFinish = hardLatestFinish;
     const hardEarliestStart = dateMax([
-      task.projectId === params.currentProjectId ? projectStartAnchor : "",
+      params.direction === "BACKWARD"
+        ? ""
+        : task.projectId === params.currentProjectId ? projectStartAnchor : "",
       bounds.earliestStart,
       ...dependencyStarts,
     ]);
@@ -981,11 +987,21 @@ const scheduleWithPriority = (params: {
         severity: code === "PROJECT_HARD_FINISH_VIOLATION" || (code === "PARENT_BOUNDARY_VIOLATION" && bounds.lockedTaskIds.length > 0) ? "ERROR" : "WARNING",
         taskIds: [task.id, ...bounds.lockedTaskIds],
         message: code === "PROJECT_HARD_FINISH_VIOLATION"
-            ? `任务「${task.taskName || task.id}」无法在 WBS 完成锚点 ${hardFinishCeiling} 前满足依赖和资源约束。`
-            : code === "PARENT_BOUNDARY_VIOLATION"
-            ? `任务「${task.taskName || task.id}」无法在父任务锁定边界内满足依赖和资源约束。`
+          ? `任务「${task.taskName || task.id}」无法在 WBS 完成锚点 ${hardFinishCeiling} 前满足依赖和资源约束。`
+          : code === "PARENT_BOUNDARY_VIOLATION"
+            ? (() => {
+              const lockedParents = bounds.lockedTaskIds
+                .map((parentId) => byId.get(parentId))
+                .filter((parent): parent is ResourceSchedulingTask => Boolean(parent));
+              const boundaryText = lockedParents
+                .map((parent) => `「${parent.taskName || parent.id}」${parent.startDate || "未设置"}至${parent.finishDate || "未设置"}`)
+                .join("、");
+              return `任务「${task.taskName || task.id}」无法在锁定的父任务边界${boundaryText ? `（${boundaryText}）` : ""}内满足依赖和资源约束。`;
+            })()
             : `任务「${task.taskName || task.id}」没有可用的资源容量排期位置。`,
-        suggestion: "调整负责人容量、工期、紧前关系或父任务边界。",
+        suggestion: code === "PARENT_BOUNDARY_VIOLATION"
+          ? "请取消父任务的“锁定父任务边界”，或先把父任务完成边界调整到覆盖排期结果，再重新执行自动排期；系统不会静默越过锁定边界。"
+          : "调整负责人容量、工期、紧前关系或父任务边界。",
       });
       const fallbackStart = normalizeTaskStartDate(task.startDate, params.mode);
       const fallbackFinish = validDate(task.finishDate) ? task.finishDate : calculateTaskFinishDate(fallbackStart, duration, params.mode);
@@ -1264,60 +1280,16 @@ const mergeScheduledDatesIntoOriginal = (
 /**
  * Derive resource-caused serial links from the final leveled result. These
  * links are explanatory only: they never alter the user's FS dependency
- * graph, but make the capacity-constrained critical chain inspectable.
+ * graph, but the same links are also supplied to CPM so resource waiting is
+ * reflected in float and criticality.
  */
 const deriveResourceCriticalChain = (params: {
   tasks: ResourceSchedulingTask[];
   currentProjectId: string;
-  resourceConstrainedTaskIds: Iterable<string>;
-  calendarMode: GanttCalendarMode;
 }) => {
-  const constrainedTaskIds = new Set(params.resourceConstrainedTaskIds);
-  const currentProjectTasks = params.tasks.filter((task) => (
-    task.projectId === params.currentProjectId
-    && task.isLeaf
-    && validDateRange(task)
-  ));
-  const linksByKey = new Map<string, ResourceCriticalChainLink>();
-
-  currentProjectTasks
-    .filter((task) => constrainedTaskIds.has(task.id))
-    .forEach((successor) => {
-      const fsPredecessorIds = new Set(
-        successor.predecessorDependencies
-          .filter(isGanttFsDependency)
-          .map((dependency) => dependency.predecessorTaskId),
-      );
-      normalizedAssignments(successor).forEach((assignment) => {
-        const predecessor = currentProjectTasks
-          .filter((candidate) => (
-            candidate.id !== successor.id
-            && !fsPredecessorIds.has(candidate.id)
-            && nextTaskStartDate(candidate.finishDate, params.calendarMode) === successor.startDate
-            && normalizedAssignments(candidate).some((candidateAssignment) => (
-              candidateAssignment.ownerKey === assignment.ownerKey
-            ))
-          ))
-          .sort((left, right) => (
-            right.finishDate.localeCompare(left.finishDate)
-            || right.sortOrder - left.sortOrder
-            || right.id.localeCompare(left.id)
-          ))[0];
-        if (!predecessor) return;
-        const link: ResourceCriticalChainLink = {
-          predecessorTaskId: predecessor.id,
-          successorTaskId: successor.id,
-          ownerKey: assignment.ownerKey,
-        };
-        linksByKey.set(`${link.predecessorTaskId}:${link.successorTaskId}:${link.ownerKey}`, link);
-      });
-    });
-
-  const links = [...linksByKey.values()].sort((left, right) => (
-    left.predecessorTaskId.localeCompare(right.predecessorTaskId)
-    || left.successorTaskId.localeCompare(right.successorTaskId)
-    || left.ownerKey.localeCompare(right.ownerKey)
-  ));
+  const links = buildResourceSerialLinks(
+    params.tasks.filter((task) => task.projectId === params.currentProjectId),
+  );
   return {
     taskIds: [...new Set(links.flatMap((link) => [link.predecessorTaskId, link.successorTaskId]))]
       .sort((left, right) => left.localeCompare(right)),
@@ -1363,7 +1335,7 @@ const candidateTaskExplanations = (params: {
       }
       if (params.resourceCriticalChainTaskIds.has(task.id)) {
         reasonCodes.push("RESOURCE_CRITICAL_CHAIN");
-        details.push("任务位于负责人容量导致的资源关键链，蓝色连线仅说明资源串行，不会改写 FS 紧前关系。");
+        details.push("任务位于负责人容量导致的资源关键链；该串行关系已纳入浮动和关键路径计算，但不会改写用户录入的 FS 紧前关系。");
       }
       if (bounds.earliestStart || bounds.latestFinish) {
         reasonCodes.push("HARD_BOUNDARY");
@@ -1549,10 +1521,10 @@ export const createResourceScheduleCandidates = (params: {
     preliminaryResult.tasks,
     params.currentProjectId,
   );
-  const initialCpm = calculateGanttCpm(
+  const initialCpm = calculateResourceAwareGanttCpm(
     initialProjectTasks,
     effectiveCalendarMode,
-    effectiveHardFinishCeiling || effectiveExpectedEndDate,
+    effectiveHardFinishCeiling,
   );
   const networkTasks = withCpmMetrics(expandedNetworkTasks, initialCpm.metricsByTaskId);
   const schedulingTasks = scopedSchedulingTasks({
@@ -1628,17 +1600,15 @@ export const createResourceScheduleCandidates = (params: {
     scheduledResult.tasks,
     params.currentProjectId,
   );
-  const finalCpm = calculateGanttCpm(
+  const finalCpm = calculateResourceAwareGanttCpm(
     finalProjectTasks,
     effectiveCalendarMode,
-    effectiveHardFinishCeiling || effectiveExpectedEndDate,
+    effectiveHardFinishCeiling,
   );
   const resourceConstrainedTaskIds = new Set(scheduledResult.resourceConstrainedTaskIds);
   const resourceCriticalChain = deriveResourceCriticalChain({
     tasks: scheduledResult.tasks,
     currentProjectId: params.currentProjectId,
-    resourceConstrainedTaskIds,
-    calendarMode: effectiveCalendarMode,
   });
   const resourceCriticalChainTaskIds = new Set(resourceCriticalChain.taskIds);
   const taskExplanations = candidateTaskExplanations({
