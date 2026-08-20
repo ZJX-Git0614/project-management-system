@@ -810,29 +810,31 @@ describe("createResourceScheduleCandidates", () => {
     expect(result.candidates.every((candidate) => !candidate.applicable)).toBe(true);
   });
 
-  it("遗留的计划目标父级边界按自动汇总处理，不产生独立预警", () => {
-    const issues = detectResourceScheduleIssues([
-      task({
-        id: "target-parent",
-        isLeaf: false,
-        ownerKeys: [],
-        startDate: "2026-01-01",
-        finishDate: "2026-01-02",
-        durationDays: 2,
-        parentBoundaryMode: "TARGET",
-      }),
-      task({
-        id: "late-child",
-        parentId: "target-parent",
-        startDate: "2026-01-03",
-        finishDate: "2026-01-03",
-        durationDays: 1,
-        sortOrder: 2,
-      }),
-    ]);
+  it("ROLLUP/TARGET 父级边界按自动汇总处理，不产生独立预警", () => {
+    ["ROLLUP", "TARGET"].forEach((parentBoundaryMode) => {
+      const issues = detectResourceScheduleIssues([
+        task({
+          id: "target-parent",
+          isLeaf: false,
+          ownerKeys: [],
+          startDate: "2026-01-01",
+          finishDate: "2026-01-02",
+          durationDays: 2,
+          parentBoundaryMode,
+        }),
+        task({
+          id: "late-child",
+          parentId: "target-parent",
+          startDate: "2026-01-03",
+          finishDate: "2026-01-03",
+          durationDays: 1,
+          sortOrder: 2,
+        }),
+      ]);
 
-    expect(issues).not.toContainEqual(expect.objectContaining({ code: "TARGET_BOUNDARY_MISS" }));
-    expect(issues).not.toContainEqual(expect.objectContaining({ code: "PARENT_BOUNDARY_VIOLATION" }));
+      expect(issues).not.toContainEqual(expect.objectContaining({ code: "TARGET_BOUNDARY_MISS" }));
+      expect(issues).not.toContainEqual(expect.objectContaining({ code: "PARENT_BOUNDARY_VIOLATION" }));
+    });
   });
 
   it("工期固定倒排沿 FS 依赖反向计算，并让紧前任务先完成", () => {
