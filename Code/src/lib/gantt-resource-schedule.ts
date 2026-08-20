@@ -910,7 +910,15 @@ const scheduleWithPriority = (params: {
             || left.sortOrder - right.sortOrder
             || left.id.localeCompare(right.id);
         }
-        return rank(left, right);
+        // Once an FS predecessor has been placed, continue that dependency
+        // chain before unrelated ready work. This preserves topological order
+        // while preventing a low-priority successor from losing its unlocked
+        // slot to an independent task on the same resource.
+        const hasScheduledFsPredecessor = (task: ResourceSchedulingTask) => task.predecessorDependencies
+          .filter(isGanttFsDependency)
+          .some((dependency) => scheduled.has(dependency.predecessorTaskId));
+        return Number(hasScheduledFsPredecessor(right)) - Number(hasScheduledFsPredecessor(left))
+          || rank(left, right);
       });
     const task = ready[0];
     if (!task) {
