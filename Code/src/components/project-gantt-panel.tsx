@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { BriefcaseBusiness, CalendarDays, ChevronDown, Download, FileSpreadsheet, FileType2, FlagTriangleRight, ListTree, Maximize2, Minimize2, Network, Redo2, TriangleAlert, Undo2, Upload, Users, WandSparkles } from "lucide-react";
+import { BriefcaseBusiness, CalendarDays, ChevronDown, Download, FileSpreadsheet, FileType2, FlagTriangleRight, ListTree, LockKeyhole, Maximize2, Minimize2, Network, Redo2, TriangleAlert, Undo2, Upload, Users, WandSparkles } from "lucide-react";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -2285,9 +2285,35 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                   {resourceAnalysis?.issues.slice(0, 8).map((issue) => (
                     <div key={issue.id} className="flex gap-2">
                       <TriangleAlert className={cn("mt-0.5 size-3.5 shrink-0", issue.severity === "ERROR" ? "text-destructive" : "text-amber-500")} />
-                      <div>
+                      <div className="min-w-0 flex-1">
                         <div>{issue.message}</div>
                         <div className="mt-0.5 text-muted-foreground">{issue.suggestion}</div>
+                        {issue.code === "PARENT_BOUNDARY_VIOLATION" && (() => {
+                          const lockedParent = issue.taskIds
+                            .map((taskId) => taskById.get(taskId))
+                            .find((task) => task?.parentBoundaryMode === "LOCKED");
+                          if (!lockedParent) return null;
+                          const focusParent = (columnKey: string) => {
+                            setResourceDialogOpen(false);
+                            signalHistoryTarget({ taskIds: [lockedParent.id], columnKey });
+                          };
+                          return (
+                            <div className="mt-2 border-l-2 border-destructive/40 pl-2">
+                              <div className="flex items-center gap-1 font-medium text-destructive">
+                                <LockKeyhole className="size-3.5" />
+                                <span>父任务边界：已锁定 · {lockedParent.taskName || lockedParent.id}</span>
+                              </div>
+                              <div className="mt-1 flex flex-wrap gap-2">
+                                <Button type="button" variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => focusParent("parentBoundaryMode")}>
+                                  解除锁定边界
+                                </Button>
+                                <Button type="button" variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => focusParent("finishDate")}>
+                                  扩大完成边界
+                                </Button>
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                     </div>
                   ))}
