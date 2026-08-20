@@ -446,11 +446,16 @@ export const calculateGanttCpm = (
     const freeFloatMinutes = Math.min(rawFreeFloatMinutes, totalFloatMinutes);
     const completed = Number(task.progress ?? 0) >= 100;
     const scheduleStatus = completed ? "NORMAL" : statusForFloat(totalFloatMinutes);
+    // A hard deadline conflict can make the mathematically derived late
+    // window precede the early window. Keep the conflict visible through the
+    // negative float/status, but do not render an impossible date ordering.
+    const displayedLateStart = Math.max(ls, es);
+    const displayedLateFinish = Math.max(lf, ef, displayedLateStart + duration);
     metricsByTaskId.set(task.id, {
       earlyStartDate: dateFromMinutes(projectStartDate, es, mode),
       earlyFinishDate: finishDateFromMinutes(projectStartDate, ef, es, mode),
-      lateStartDate: dateFromMinutes(projectStartDate, ls, mode),
-      lateFinishDate: finishDateFromMinutes(projectStartDate, lf, ls, mode),
+      lateStartDate: dateFromMinutes(projectStartDate, displayedLateStart, mode),
+      lateFinishDate: finishDateFromMinutes(projectStartDate, displayedLateFinish, displayedLateStart, mode),
       totalFloatMinutes,
       freeFloatMinutes,
       scheduleStatus,
