@@ -4,6 +4,7 @@ export const DETAIL_NAV_GROUPS = [
   { key: "project", label: "项目信息管理" },
   { key: "performance", label: "挣值分析" },
   { key: "gantt", label: "项目WBS管理" },
+  { key: "execution", label: "项目执行阶段" },
   { key: "documents", label: "文档清单管理" },
   { key: "budget", label: "项目预算管理" },
 ] as const;
@@ -67,6 +68,7 @@ export const PROJECT_DETAIL_GROUP_PERMISSION_KEYS: Record<DetailNavGroupKey, str
   project: "project-info:view",
   performance: "earned-value:view",
   gantt: "project-gantt:view",
+  execution: "project-gantt:view",
   documents: "project-documents:view",
   budget: "project-budget:view",
 };

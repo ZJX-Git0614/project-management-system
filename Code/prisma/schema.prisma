@@ -45,6 +45,7 @@ model Project {
   ganttBaselinePublishedBy String    @default("")
 
   projectMembers         ProjectMember[]
+  executions             ProjectExecution[]
   ganttTasks             ProjectGanttTask[]
   ganttDependencies      ProjectGanttDependency[]
   ganttBaselines         ProjectGanttBaseline[]
@@ -142,6 +143,7 @@ model ProjectGanttTask {
   weeklyItems             WeeklyItem[]
   weeklyItemLinks         WeeklyItemGanttTask[]
   riskItems               RiskRegisterItem[]
+  executionLinks          ProjectExecutionTask[]
   predecessorDependencies ProjectGanttDependency[] @relation("GanttDependencySuccessor")
   successorDependencies   ProjectGanttDependency[] @relation("GanttDependencyPredecessor")
 
@@ -163,6 +165,38 @@ model ProjectGanttTaskOwner {
 
   @@id([taskId, projectMemberId])
   @@index([projectMemberId])
+}
+
+model ProjectExecution {
+  id            String   @id @default(cuid())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  projectId     String
+  name          String
+  type          String   @default("SHORT_TERM")
+  ownerMemberId String?
+  status        String   @default("PLANNED")
+  description   String   @default("")
+  sortOrder     Int      @default(0)
+
+  project     Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  ownerMember ProjectMember?         @relation("ExecutionOwner", fields: [ownerMemberId], references: [id], onDelete: SetNull)
+  taskLinks   ProjectExecutionTask[]
+
+  @@index([projectId, sortOrder])
+}
+
+model ProjectExecutionTask {
+  executionId  String
+  ganttTaskId  String
+  relationType String   @default("PRIMARY")
+  createdAt    DateTime @default(now())
+
+  execution ProjectExecution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  ganttTask ProjectGanttTask @relation(fields: [ganttTaskId], references: [id], onDelete: Cascade)
+
+  @@id([executionId, ganttTaskId])
+  @@index([ganttTaskId])
 }
 
 model ProjectGanttDependency {
@@ -409,6 +443,7 @@ model ProjectMember {
   account        UserAccount?            @relation(fields: [accountId], references: [id], onDelete: SetNull)
   ganttTasks     ProjectGanttTask[]
   ganttTaskLinks ProjectGanttTaskOwner[]
+  executionOwners ProjectExecution[]      @relation("ExecutionOwner")
 
   @@unique([projectId, accountId])
 }

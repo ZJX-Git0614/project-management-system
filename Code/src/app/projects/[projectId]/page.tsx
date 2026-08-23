@@ -28,6 +28,7 @@ import { ProjectGanttPanel } from "@/components/project-gantt-panel";
 import { ProjectBudgetPanel } from "@/components/project-budget-panel";
 import { ProjectDocumentListPanel } from "@/components/project-document-list-panel";
 import { ProjectEarnedValuePanel } from "@/components/project-earned-value-panel";
+import { ProjectExecutionPanel } from "@/components/project-execution-panel";
 
 interface Project {
   id: string;
@@ -159,6 +160,7 @@ const ProjectDetailContent = () => {
       {activeGroup === "project" && <ProjectInfoTab projectId={projectId} onRefresh={fetchProject} />}
       {activeGroup === "performance" && <ProjectEarnedValuePanel projectId={projectId} projectStatus={project.status} />}
       {activeGroup === "gantt" && <ProjectGanttPanel projectId={projectId} projectStatus={project.status} />}
+      {activeGroup === "execution" && <ProjectExecutionPanel projectId={projectId} projectStatus={project.status} />}
       {activeGroup === "documents" && (
         <ProjectDocumentListPanel projectId={projectId} projectStatus={project.status} />
       )}

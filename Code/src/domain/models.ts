@@ -102,6 +102,32 @@ export interface ProjectGanttDependency extends BaseEntity {
   predecessorTask?: Pick<ProjectGanttTask, "id" | "taskCode" | "taskName">;
 }
 
+export interface ProjectExecutionTaskLink {
+  executionId: string;
+  ganttTaskId: string;
+  relationType: string;
+  createdAt?: string;
+  task?: Pick<
+    ProjectGanttTask,
+    "id" | "taskCode" | "taskName" | "taskCategory" | "parentId" | "startDate" | "finishDate" | "progress"
+  >;
+}
+
+export interface ProjectExecution extends BaseEntity {
+  projectId: string;
+  name: string;
+  type: string;
+  ownerMemberId?: string | null;
+  status: string;
+  description: string;
+  sortOrder: number;
+  ownerMember?: Pick<ProjectMember, "id" | "personName" | "roleName"> | null;
+  taskLinks: ProjectExecutionTaskLink[];
+  planStart?: string;
+  planFinish?: string;
+  progress?: number;
+}
+
 export interface ProjectGanttDeletionPreview {
   rootTaskIds: string[];
   rootTasks: Array<Pick<ProjectGanttTask, "id" | "taskCode" | "taskName">>;

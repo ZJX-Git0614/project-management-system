@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 
 import { FLAT_PERMISSION_NODES } from "@/lib/permissions";
 import { ASSISTANT_TOOL_CATALOG } from "@/lib/assistant-settings";
+import { getProjectModuleRegistry } from "@/lib/module-registry";
 
 const sensitiveFieldPattern = /(password|secret|token|apiKey|hash|encrypted|credential)/iu;
 
@@ -18,9 +19,13 @@ export const buildAssistantCapabilitySnapshot = (enabledToolIds: ReadonlySet<str
   const executablePermissionPrefixes = new Set(tools
     .flatMap((tool) => tool.permissions)
     .map((permission) => permission.split(":")[0]));
-  const modules = FLAT_PERMISSION_NODES
+  const registeredModules = getProjectModuleRegistry().map((module) => ({ key: module.key, label: module.label }));
+  const permissionModules = FLAT_PERMISSION_NODES
     .filter((node) => node.type === "page" || node.type === "section")
     .map((node) => ({ key: node.key, label: node.label }));
+  const modules = Array.from(new Map(
+    [...registeredModules, ...permissionModules].map((module) => [module.key, module]),
+  ).values());
   const projectModels = Prisma.dmmf.datamodel.models
     .filter((model) => model.fields.some((field) => field.name === "projectId"))
     .map((model) => {

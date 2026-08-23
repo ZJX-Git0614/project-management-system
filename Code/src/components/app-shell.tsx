@@ -5,6 +5,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
+  Boxes,
   CalendarDays,
   ChartNoAxesCombined,
   ClipboardList,
@@ -347,6 +348,13 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
               active: isDetailGroupActive(fullPath, "gantt"),
               permissionKey: getDetailGroupPermissionKey("gantt"),
               icon: <TrendingUp className="size-4" />,
+            },
+            {
+              href: currentProjectId ? `/projects/${currentProjectId}?nav=execution` : "/projects",
+              label: "项目执行阶段",
+              active: isDetailGroupActive(fullPath, "execution"),
+              permissionKey: getDetailGroupPermissionKey("execution"),
+              icon: <Boxes className="size-4" />,
             },
             {
               href: "/weekly-items",
