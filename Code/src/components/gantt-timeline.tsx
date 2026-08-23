@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { ArrowDown, ArrowUp, CalendarClock, ChevronDown, ChevronLeft, ChevronRight, ChevronRight as MenuChevronRight, ClipboardPaste, Columns3, Copy, Eraser, Filter, GripVertical, IndentDecrease, IndentIncrease, ListTree, Plus, Scissors, Star, Trash2, TriangleAlert, UserRoundCog, ZoomIn, ZoomOut } from "lucide-react";
+import { CalendarClock, ChevronDown, ChevronLeft, ChevronRight, ChevronRight as MenuChevronRight, ClipboardPaste, Columns3, Copy, Eraser, Filter, GripVertical, IndentDecrease, IndentIncrease, ListTree, Plus, Scissors, Star, Trash2, TriangleAlert, UserRoundCog, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { GanttDateField } from "@/components/gantt-date-field";
@@ -295,22 +295,25 @@ const resolveTimelineLabelLayout = ({
   barLeft,
   barWidth,
   label,
+  labelLaneStart,
   timelineWidth,
 }: {
   barLeft: number;
   barWidth: number;
   label: string;
+  labelLaneStart: number;
   timelineWidth: number;
 }) => {
-  // Keep labels after the bar. The timeline reserves a label lane so labels
-  // never cover the task bar or its dependency connectors.
+  // Keep text in a dedicated lane after the date grid. Connectors are only
+  // drawn inside the grid, so labels cannot obscure logic lines or task bars.
   const labelWidth = Math.max(48, estimateTimelineLabelWidth(label));
+  const absoluteLeft = Math.max(labelLaneStart, barLeft + barWidth + BAR_LABEL_GAP);
   const availableWidth = Math.max(
     48,
-    timelineWidth - barLeft - barWidth - BAR_LABEL_GAP - BAR_LABEL_EDGE_PADDING,
+    timelineWidth - absoluteLeft - BAR_LABEL_EDGE_PADDING,
   );
   return {
-    left: barWidth + BAR_LABEL_GAP,
+    left: absoluteLeft - barLeft,
     side: "right" as const,
     width: Math.min(labelWidth, availableWidth),
   };
@@ -581,12 +584,15 @@ const GanttColumnFilterMenu = ({
 };
 
 const getTickEvery = (dayWidth: number) => {
-  if (dayWidth >= 30) return 1;
-  if (dayWidth >= 15) return 3;
-  if (dayWidth >= 7) return 5;
-  if (dayWidth >= 5) return 7;
-  if (dayWidth >= 3) return 15;
-  return 30;
+  const preferred = dayWidth >= 30 ? 1
+    : dayWidth >= 15 ? 3
+      : dayWidth >= 7 ? 5
+        : dayWidth >= 5 ? 7
+          : dayWidth >= 3 ? 15
+            : 30;
+  // A date label needs roughly 42px. At smaller zoom levels, preserve a
+  // readable interval instead of rendering overlapping T0/date labels.
+  return Math.max(preferred, Math.ceil(42 / Math.max(dayWidth, 1)));
 };
 
 const formatFloat = (minutes: number | null | undefined) => {
@@ -937,9 +943,25 @@ const GanttTimelineContent = ({
   const criticalRows = useMemo(() => {
     const calculatedCriticalTaskIds = resourceAwareCpm.projectCriticalTaskIds;
     if (calculatedCriticalTaskIds.size === 0) return rows;
-    return rows.map((row) => calculatedCriticalTaskIds.has(row.id)
-      ? { ...row, isCritical: true, scheduleStatus: "CRITICAL" as const }
-      : row);
+    return rows.map((row) => {
+      const metrics = resourceAwareCpm.metricsByTaskId.get(row.id);
+      if (!metrics) return row;
+      return {
+        ...row,
+        // Runtime CPM is authoritative. In particular, a resource-critical
+        // path may also carry NEGATIVE_FLOAT when it breaches a locked parent
+        // boundary. Preserve that conflict state instead of replacing it with
+        // a stale persisted CRITICAL/NORMAL value.
+        isCritical: calculatedCriticalTaskIds.has(row.id),
+        scheduleStatus: metrics.scheduleStatus,
+        totalFloatMinutes: metrics.totalFloatMinutes,
+        freeFloatMinutes: metrics.freeFloatMinutes,
+        earlyStartDate: metrics.earlyStartDate,
+        earlyFinishDate: metrics.earlyFinishDate,
+        lateStartDate: metrics.lateStartDate,
+        lateFinishDate: metrics.lateFinishDate,
+      };
+    });
   }, [resourceAwareCpm, rows]);
   const criticalPaths = useMemo(
     () => buildGanttCriticalPaths(criticalRows, [
@@ -1667,6 +1689,7 @@ const GanttTimelineContent = ({
     MIN_TIMELINE_WIDTH,
     visibleDays * config.dayWidth + BAR_LABEL_GAP + timelineLabelReserve + BAR_LABEL_EDGE_PADDING,
   );
+  const timelineLabelLaneStart = visibleDays * config.dayWidth + BAR_LABEL_GAP;
   const bodyHeight = visibleRows.length * ROW_HEIGHT;
   const todayOffset = diffDays(visibleStartDate, new Date().toISOString().slice(0, 10));
   const todayX = todayOffset >= 0 && todayOffset < visibleDays ? todayOffset * config.dayWidth : null;
@@ -2005,7 +2028,7 @@ const GanttTimelineContent = ({
                   strokeWidth={1.4}
                 />
               )}
-              {dependencyLinks.map((link) => {
+              {dependencyLinks.map((link, linkIndex) => {
                 const from = rowById.get(link.predecessorId);
                 const to = rowById.get(link.successorId);
                 if (!from || !to || from.row.spanDays <= 0 || to.row.spanDays <= 0) return null;
@@ -2023,13 +2046,14 @@ const GanttTimelineContent = ({
                     fromY={fromY}
                     toX={toX}
                     toY={toY}
+                    laneOffset={(linkIndex % 4) * 7}
                     tone={criticalPathTaskIds.has(link.predecessorId) && criticalPathTaskIds.has(link.successorId)
                       ? "critical"
                       : "dependency"}
                   />
                 );
               })}
-              {resourceLinks.map((link) => {
+              {resourceLinks.map((link, linkIndex) => {
                 const from = rowById.get(link.predecessorTaskId);
                 const to = rowById.get(link.successorTaskId);
                 if (!from || !to || from.row.spanDays <= 0 || to.row.spanDays <= 0) return null;
@@ -2047,6 +2071,7 @@ const GanttTimelineContent = ({
                     fromY={fromY}
                     toX={toX}
                     toY={toY}
+                    laneOffset={(linkIndex % 4) * 7}
                     tone={criticalPathTaskIds.has(link.predecessorTaskId) && criticalPathTaskIds.has(link.successorTaskId)
                       ? "critical"
                       : "resource"}
@@ -2064,6 +2089,7 @@ const GanttTimelineContent = ({
                 barLeft: left,
                 barWidth: width,
                 label: timelineLabel,
+                labelLaneStart: timelineLabelLaneStart,
                 timelineWidth,
               });
               const progress = Math.min(100, Math.max(0, row.progress ?? 0));
@@ -2929,52 +2955,6 @@ const ActualWorkHoursInput = ({
   );
 };
 
-const GanttHalfDaySlotControl = ({
-  disabled,
-  label,
-  onChange,
-  value,
-}: {
-  disabled: boolean;
-  label: string;
-  onChange: (value: GanttHalfDay) => void;
-  value: GanttHalfDay;
-}) => (
-  <div
-    className="ml-0.5 flex h-6 w-3 shrink-0 flex-col text-muted-foreground/70"
-    aria-label={`${label}${value === "AM" ? "上半日" : "下半日"}`}
-  >
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={() => onChange("AM")}
-      className={cn(
-        "flex h-3 min-h-0 items-center justify-center bg-transparent p-0 transition-colors hover:text-foreground disabled:cursor-default disabled:opacity-45",
-        value === "AM" && "text-foreground",
-      )}
-      title={`${label}：上半日`}
-      aria-label={`${label}：上半日`}
-      aria-pressed={value === "AM"}
-    >
-      <ArrowUp className="size-2.5" strokeWidth={2} />
-    </button>
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={() => onChange("PM")}
-      className={cn(
-        "flex h-3 min-h-0 items-center justify-center bg-transparent p-0 transition-colors hover:text-foreground disabled:cursor-default disabled:opacity-45",
-        value === "PM" && "text-foreground",
-      )}
-      title={`${label}：下半日`}
-      aria-label={`${label}：下半日`}
-      aria-pressed={value === "PM"}
-    >
-      <ArrowDown className="size-2.5" strokeWidth={2} />
-    </button>
-  </div>
-);
-
 const EditableTaskRow = ({
   calendarMode,
   canEdit,
@@ -3539,116 +3519,60 @@ const EditableTaskRow = ({
       )}
       {isColumnVisible("startDate") && (
         <div data-gantt-column-key="startDate" className="flex min-w-0 items-center overflow-hidden">
-          <div className="min-w-0 flex-1">
-            <GanttDateField
-              value={draft.startDate}
-              displayValue={row.startDisplayLabel}
-              onChange={(value) => updateDateDraft(withPlannedStart, value)}
-              onCommit={(value) => commitDateDraft(withPlannedStart, value, "startDate")}
-              disabled={startDateReadOnly}
-              readOnly={startDateReadOnly || relativePlanReadOnly}
-              slot={draft.startSlot}
-              ariaLabel="计划开始"
-              required
-            />
-          </div>
-          {!startDateReadOnly && !relativePlanReadOnly && draft.startDate && (
-            <GanttHalfDaySlotControl
-              disabled={false}
-              label="计划开始"
-              value={draft.startSlot}
-              onChange={(startSlot) => {
-                const nextDraft = resolvePlanDraft(draft, { startSlot });
-                setDraft(nextDraft);
-                if (!taskDraftEquals(row, nextDraft, calendarMode)) void onUpdateTask?.(row, nextDraft, "startDate");
-              }}
-            />
-          )}
+          <GanttDateField
+            value={draft.startDate}
+            displayValue={row.startDisplayLabel}
+            onChange={(value) => updateDateDraft(withPlannedStart, value)}
+            onCommit={(value) => commitDateDraft(withPlannedStart, value, "startDate")}
+            disabled={startDateReadOnly}
+            readOnly={startDateReadOnly || relativePlanReadOnly}
+            slot={draft.startSlot}
+            ariaLabel="计划开始"
+            required
+          />
         </div>
       )}
       {isColumnVisible("endDate") && (
         <div data-gantt-column-key="endDate" className="flex min-w-0 items-center overflow-hidden">
-          <div className="min-w-0 flex-1">
-            <GanttDateField
-              value={draft.endDate}
-              displayValue={row.finishDisplayLabel}
-              onChange={(value) => updateDateDraft(withPlannedEnd, value)}
-              onCommit={(value) => commitDateDraft(withPlannedEnd, value, "endDate")}
-              disabled={endDateReadOnly}
-              readOnly={endDateReadOnly || relativePlanReadOnly}
-              slot={draft.finishSlot}
-              ariaLabel="计划完成"
-              min={draft.startDate}
-              required={draft.durationDays > 0}
-            />
-          </div>
-          {!endDateReadOnly && !relativePlanReadOnly && draft.endDate && (
-            <GanttHalfDaySlotControl
-              disabled={false}
-              label="计划完成"
-              value={draft.finishSlot}
-              onChange={(finishSlot) => {
-                const nextDraft = resolvePlanDraft(draft, { finishSlot });
-                setDraft(nextDraft);
-                if (!taskDraftEquals(row, nextDraft, calendarMode)) void onUpdateTask?.(row, nextDraft, "endDate");
-              }}
-            />
-          )}
+          <GanttDateField
+            value={draft.endDate}
+            displayValue={row.finishDisplayLabel}
+            onChange={(value) => updateDateDraft(withPlannedEnd, value)}
+            onCommit={(value) => commitDateDraft(withPlannedEnd, value, "endDate")}
+            disabled={endDateReadOnly}
+            readOnly={endDateReadOnly || relativePlanReadOnly}
+            slot={draft.finishSlot}
+            ariaLabel="计划完成"
+            min={draft.startDate}
+            required={draft.durationDays > 0}
+          />
         </div>
       )}
       {isColumnVisible("actualStartDate") && (
         <div data-gantt-column-key="actualStartDate" className="flex min-w-0 items-center overflow-hidden">
-          <div className="min-w-0 flex-1">
-            <GanttDateField
-              value={draft.actualStartDate}
-              onChange={(value) => updateDateDraft(withActualStart, value)}
-              onCommit={(value) => commitDateDraft(withActualStart, value, "actualStartDate", true)}
-              disabled={actualReadOnly}
-              readOnly={actualReadOnly}
-              slot={draft.actualStartSlot}
-              ariaLabel="实际开始"
-            />
-          </div>
-          {!actualReadOnly && draft.actualStartDate && (
-            <GanttHalfDaySlotControl
-              disabled={false}
-              label="实际开始"
-              value={draft.actualStartSlot}
-              onChange={(actualStartSlot) => {
-                const nextDraft = { ...draft, actualStartSlot };
-                setDraft(nextDraft);
-                if (!taskDraftEquals(row, nextDraft, calendarMode)) void onUpdateTask?.(row, nextDraft, "actualStartDate");
-              }}
-            />
-          )}
+          <GanttDateField
+            value={draft.actualStartDate}
+            onChange={(value) => updateDateDraft(withActualStart, value)}
+            onCommit={(value) => commitDateDraft(withActualStart, value, "actualStartDate", true)}
+            disabled={actualReadOnly}
+            readOnly={actualReadOnly}
+            slot={draft.actualStartSlot}
+            ariaLabel="实际开始"
+          />
         </div>
       )}
       {isColumnVisible("actualEndDate") && (
         <div data-gantt-column-key="actualEndDate" className="flex min-w-0 items-center overflow-hidden">
-          <div className="min-w-0 flex-1">
-            <GanttDateField
-              value={draft.actualEndDate}
-              onChange={(value) => updateDateDraft(withActualEnd, value)}
-              onCommit={(value) => commitDateDraft(withActualEnd, value, "actualEndDate", true)}
-              disabled={actualReadOnly}
-              readOnly={actualReadOnly}
-              slot={draft.actualFinishSlot}
-              ariaLabel="实际完成"
-              min={draft.actualStartDate || undefined}
-            />
-          </div>
-          {!actualReadOnly && draft.actualEndDate && (
-            <GanttHalfDaySlotControl
-              disabled={false}
-              label="实际完成"
-              value={draft.actualFinishSlot}
-              onChange={(actualFinishSlot) => {
-                const nextDraft = { ...draft, actualFinishSlot };
-                setDraft(nextDraft);
-                if (!taskDraftEquals(row, nextDraft, calendarMode)) void onUpdateTask?.(row, nextDraft, "actualEndDate");
-              }}
-            />
-          )}
+          <GanttDateField
+            value={draft.actualEndDate}
+            onChange={(value) => updateDateDraft(withActualEnd, value)}
+            onCommit={(value) => commitDateDraft(withActualEnd, value, "actualEndDate", true)}
+            disabled={actualReadOnly}
+            readOnly={actualReadOnly}
+            slot={draft.actualFinishSlot}
+            ariaLabel="实际完成"
+            min={draft.actualStartDate || undefined}
+          />
         </div>
       )}
       {isColumnVisible("estimatedWorkHours") && (
@@ -3935,35 +3859,48 @@ const DependencyConnector = ({
   fromY,
   toX,
   toY,
+  laneOffset = 0,
   tone = "dependency",
 }: {
   fromX: number;
   fromY: number;
   toX: number;
   toY: number;
+  laneOffset?: number;
   tone?: "dependency" | "critical" | "resource";
 }) => {
-  const elbow = Math.max(fromX + 12, Math.min(toX - 12, fromX + 28));
-  const endX = Math.max(toX - 4, 0);
+  const forward = toX >= fromX;
+  const clearance = 14 + laneOffset;
+  const elbow = forward
+    ? Math.max(fromX + 8, Math.min(toX - 8, fromX + clearance))
+    : Math.min(fromX - 8, Math.max(toX + 8, fromX - clearance));
+  const endX = forward ? Math.max(toX - 4, 0) : toX + 4;
   const path = `M ${fromX} ${fromY} L ${elbow} ${fromY} L ${elbow} ${toY} L ${endX} ${toY}`;
 
   const resource = tone === "resource";
   const critical = tone === "critical";
-  const color = resource ? "#38bdf8" : critical ? "#ef4444" : "#cbd5e1";
+  const color = resource ? "#38bdf8" : critical ? "#ef4444" : "#94a3b8";
   return (
     <g>
       <title>{resource ? "资源关键链" : critical ? "关键路径 FS 依赖" : "FS 依赖：紧前任务完成后开始"}</title>
-      <path d={path} fill="none" stroke="#020617" strokeWidth={resource || critical ? 4 : 3.5} opacity={0.7} strokeLinecap="round" strokeLinejoin="round" />
+      {(resource || critical) && <path d={path} fill="none" stroke="#020617" strokeWidth={4} opacity={0.72} strokeLinecap="round" strokeLinejoin="round" />}
       <path
         d={path}
         data-gantt-link-tone={tone}
         fill="none"
         stroke={color}
-        strokeWidth={resource || critical ? 2.25 : 1.8}
+        strokeWidth={resource || critical ? 2.15 : 1.2}
+        strokeDasharray={resource ? "5 3" : critical ? undefined : "4 4"}
+        opacity={resource || critical ? 1 : 0.72}
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <polygon points={`${endX},${toY - 5} ${endX},${toY + 5} ${toX + 4},${toY}`} fill={color} />
+      <polygon
+        points={forward
+          ? `${endX},${toY - 4} ${endX},${toY + 4} ${toX + 4},${toY}`
+          : `${endX},${toY - 4} ${endX},${toY + 4} ${toX - 4},${toY}`}
+        fill={color}
+      />
     </g>
   );
 };

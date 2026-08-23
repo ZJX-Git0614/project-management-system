@@ -6,15 +6,16 @@ import {
   calculateTaskFinishDate,
   calculateTaskStartDate,
   ganttTaskWorkSlots,
+  materializeGanttOffsetDate,
   nextTaskStartDate,
   normalizeGanttDurationDays,
+  normalizeTaskFinishDate,
   normalizeTaskStartDate,
   shiftTaskDate,
   type GanttCalendarMode,
 } from "@/lib/gantt-calendar";
 import {
   GANTT_MINUTES_PER_DAY,
-  calculateGanttCpm,
   ganttDependencyLagMinutes,
   ganttFloatDays,
   type GanttCpmMetrics,
@@ -63,6 +64,7 @@ export type ResourceScheduleIssueCode =
   | "MISSING_START_DATE"
   | "MISSING_DURATION"
   | "PARENT_BOUNDARY_VIOLATION"
+  | "DEPENDENCY_WINDOW_VIOLATION"
   | "PROJECT_HARD_FINISH_VIOLATION"
   | "RESOURCE_CAPACITY_EXCEEDED"
   | "RESOURCE_ASSIGNMENT_EXCEEDS_ALLOCATION"
@@ -292,6 +294,77 @@ const dateMin = (values: Array<string | null | undefined>) => values.filter(vali
 const dateDiff = (startDate: string, finishDate: string) => {
   if (!validDate(startDate) || !validDate(finishDate)) return 0;
   return Math.round((Date.parse(`${finishDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`)) / 86_400_000);
+};
+
+/**
+ * Returns the scheduling-calendar offset from `anchorDate` to `targetDate`.
+ * The dates originate from the same scheduler, so working-day stepping keeps
+ * the relative layout intact while rematerializing it around another anchor.
+ */
+const schedulingDateOffset = (
+  anchorDate: string,
+  targetDate: string,
+  mode: GanttCalendarMode,
+) => {
+  if (!validDate(anchorDate) || !validDate(targetDate)) return null;
+  if (anchorDate === targetDate) return 0;
+  const direction = targetDate > anchorDate ? 1 : -1;
+  let cursor = anchorDate;
+  let offset = 0;
+  for (let attempt = 0; attempt < MAX_SEARCH_DAYS; attempt += 1) {
+    const next = shiftTaskDate(cursor, direction, mode);
+    if (!validDate(next) || next === cursor) return null;
+    cursor = next;
+    offset += direction;
+    if (cursor === targetDate) return offset;
+    if ((direction > 0 && cursor > targetDate) || (direction < 0 && cursor < targetDate)) return null;
+  }
+  return null;
+};
+
+/**
+ * A duration-backward run does not recalculate the execution topology in
+ * reverse. It first uses the normal forward resource/FS algorithm against an
+ * internal anchor, then rematerializes the resulting relative layout so its
+ * latest movable leaf finishes on the selected WBS completion date.
+ */
+const alignForwardLayoutToBackwardFinish = (params: {
+  tasks: ScheduledTask[];
+  currentProjectId: string;
+  hardFinishDate: string;
+  mode: GanttCalendarMode;
+}) => {
+  if (!validDate(params.hardFinishDate)) return params.tasks;
+  // In a working-day plan the WBS finish is an inclusive work slot. If the
+  // user enters a weekend/statutory rest day, anchor the whole mirrored
+  // layout on the latest working day before it instead of occupying the rest
+  // day with the final task.
+  const effectiveHardFinishDate = normalizeTaskFinishDate(params.hardFinishDate, params.mode);
+  const movableProjectLeaves = params.tasks.filter((task) => (
+    task.projectId === params.currentProjectId
+    && isMovableTask(task)
+    && validDate(task.startDate)
+    && validDate(task.finishDate)
+  ));
+  const sourceCompletionDate = dateMax(movableProjectLeaves.map((task) => task.finishDate));
+  if (!sourceCompletionDate) return params.tasks;
+
+  return params.tasks.map((task) => {
+    if (
+      task.projectId !== params.currentProjectId
+      || !isMovableTask(task)
+      || !validDate(task.startDate)
+      || !validDate(task.finishDate)
+    ) return task;
+    const startOffset = schedulingDateOffset(sourceCompletionDate, task.startDate, params.mode);
+    const finishOffset = schedulingDateOffset(sourceCompletionDate, task.finishDate, params.mode);
+    if (startOffset === null || finishOffset === null) return task;
+    return {
+      ...task,
+      startDate: shiftTaskDate(effectiveHardFinishDate, startOffset, params.mode),
+      finishDate: shiftTaskDate(effectiveHardFinishDate, finishOffset, params.mode),
+    };
+  });
 };
 const lockedBoundaryOvertimeHours = (
   task: Pick<ResourceSchedulingTask, "finishDate">,
@@ -599,6 +672,110 @@ const criticalWeights = (tasks: ResourceSchedulingTask[]) => {
   return weights;
 };
 
+type SchedulingSuccessor = {
+  successorId: string;
+  dependency: ResourceScheduleDependency;
+  /**
+   * Capacity serialization is an internal scheduling constraint. It must not
+   * be written back as a user-maintained FS dependency.
+   */
+  resourceSerial?: boolean;
+};
+
+/**
+ * Returns the logical forward execution order without looking at persisted
+ * dates or resource availability. A backward run uses this order to preserve
+ * who works before whom while merely reversing the date calculation from the
+ * WBS completion anchor.
+ */
+const logicalForwardExecutionOrder = (
+  tasks: ResourceSchedulingTask[],
+  rank: (left: ResourceSchedulingTask, right: ResourceSchedulingTask) => number,
+) => {
+  const byId = new Map(tasks.map((task) => [task.id, task] as const));
+  const inDegree = new Map<string, number>(tasks.map((task) => [task.id, 0]));
+  const predecessorIdsByTask = new Map(tasks.map((task) => [task.id, new Set<string>()] as const));
+  const successorsByPredecessor = new Map<string, string[]>();
+  const explicitFsChainTaskIds = new Set<string>();
+
+  tasks.forEach((task) => task.predecessorDependencies.filter(isGanttFsDependency).forEach((dependency) => {
+    const predecessorId = dependency.predecessorTaskId;
+    if (!byId.has(predecessorId) || predecessorId === task.id) return;
+    inDegree.set(task.id, (inDegree.get(task.id) ?? 0) + 1);
+    predecessorIdsByTask.get(task.id)?.add(predecessorId);
+    successorsByPredecessor.set(predecessorId, [...(successorsByPredecessor.get(predecessorId) ?? []), task.id]);
+    explicitFsChainTaskIds.add(predecessorId);
+    explicitFsChainTaskIds.add(task.id);
+  }));
+
+  const completed = new Set<string>();
+  const ready = tasks.filter((task) => (inDegree.get(task.id) ?? 0) === 0);
+  const compareReady = (left: ResourceSchedulingTask, right: ResourceSchedulingTask) => {
+    const hasCompletedFsPredecessor = (task: ResourceSchedulingTask) => (
+      [...(predecessorIdsByTask.get(task.id) ?? [])].some((predecessorId) => completed.has(predecessorId))
+    );
+    return Number(hasCompletedFsPredecessor(right)) - Number(hasCompletedFsPredecessor(left))
+      || Number(explicitFsChainTaskIds.has(right.id)) - Number(explicitFsChainTaskIds.has(left.id))
+      || rank(left, right)
+      || left.sortOrder - right.sortOrder
+      || left.id.localeCompare(right.id);
+  };
+  const ordered: ResourceSchedulingTask[] = [];
+  while (ready.length > 0) {
+    ready.sort(compareReady);
+    const current = ready.shift()!;
+    ordered.push(current);
+    completed.add(current.id);
+    (successorsByPredecessor.get(current.id) ?? []).forEach((successorId) => {
+      const nextDegree = (inDegree.get(successorId) ?? 0) - 1;
+      inDegree.set(successorId, nextDegree);
+      if (nextDegree === 0) {
+        const successor = byId.get(successorId);
+        if (successor) ready.push(successor);
+      }
+    });
+  }
+
+  // The normal topology validation reports cycles separately. Keep this
+  // derived ordering deterministic while the user repairs a malformed graph.
+  if (ordered.length < tasks.length) {
+    const orderedIds = new Set(ordered.map((task) => task.id));
+    ordered.push(...tasks
+      .filter((task) => !orderedIds.has(task.id))
+      .sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id)));
+  }
+  return ordered;
+};
+
+/**
+ * A backward date calculation must not reverse the actual execution order of
+ * tasks sharing one person's capacity. Derive that order once from the
+ * forward logical graph, then use it as an internal FS-like rail only during
+ * the backward pass. These links never alter the WBS list or user dependencies.
+ */
+const backwardResourceSerialLinks = (
+  tasks: ResourceSchedulingTask[],
+  rank: (left: ResourceSchedulingTask, right: ResourceSchedulingTask) => number,
+) => {
+  const lastTaskByOwner = new Map<string, string>();
+  const links: Array<{ predecessorTaskId: string; successorTaskId: string; ownerKey: string }> = [];
+  logicalForwardExecutionOrder(tasks, rank).forEach((task) => {
+    if (!task.isLeaf || task.progress >= 100 || normalizeGanttDurationDays(task.durationDays) <= 0) return;
+    normalizedAssignments(task).forEach((assignment) => {
+      const previousTaskId = lastTaskByOwner.get(assignment.ownerKey);
+      if (previousTaskId && previousTaskId !== task.id) {
+        links.push({
+          predecessorTaskId: previousTaskId,
+          successorTaskId: task.id,
+          ownerKey: assignment.ownerKey,
+        });
+      }
+      lastTaskByOwner.set(assignment.ownerKey, task.id);
+    });
+  });
+  return links;
+};
+
 type ParentBounds = {
   /** Explicit LOCKED boundaries. Only these may block scheduling or baseline release. */
   earliestStart: string;
@@ -853,10 +1030,7 @@ const scheduleWithPriority = (params: {
     };
   }
   const byId = new Map(params.tasks.map((task) => [task.id, task]));
-  const successorsByPredecessor = new Map<string, Array<{
-    successorId: string;
-    dependency: ResourceScheduleDependency;
-  }>>();
+  const successorsByPredecessor = new Map<string, SchedulingSuccessor[]>();
   params.tasks.forEach((successor) => {
     successor.predecessorDependencies.filter(isGanttFsDependency).forEach((dependency) => {
       if (!byId.has(dependency.predecessorTaskId) || dependency.predecessorTaskId === successor.id) return;
@@ -866,8 +1040,43 @@ const scheduleWithPriority = (params: {
       ]);
     });
   });
+  // An explicit FS chain is a scheduling rail. Its members must win over an
+  // unrelated ready task when both compete for the same resource, even when
+  // the unrelated task has a higher business priority. Topological readiness
+  // alone is insufficient because it allows the scheduler to spend the next
+  // slot on unrelated work between a predecessor and its successor.
+  const explicitFsChainTaskIds = new Set<string>();
+  params.tasks.forEach((task) => {
+    task.predecessorDependencies.filter(isGanttFsDependency).forEach((dependency) => {
+      if (!byId.has(dependency.predecessorTaskId)) return;
+      explicitFsChainTaskIds.add(task.id);
+      explicitFsChainTaskIds.add(dependency.predecessorTaskId);
+    });
+  });
   const weights = criticalWeights(params.tasks);
   const rank = formalTaskPriorityCompare(weights);
+  if (params.direction === "BACKWARD" && !params.ignoreResourceCapacity) {
+    // A backwards pass answers "when must the work start?" It must preserve
+    // the forward logical order of work owned by the same person rather than
+    // letting reverse placement occupy the deadline with unrelated tasks.
+    backwardResourceSerialLinks(params.tasks, rank).forEach((link) => {
+      const successors = successorsByPredecessor.get(link.predecessorTaskId) ?? [];
+      if (successors.some((successor) => successor.successorId === link.successorTaskId)) return;
+      successorsByPredecessor.set(link.predecessorTaskId, [
+        ...successors,
+        {
+          successorId: link.successorTaskId,
+          dependency: {
+            predecessorTaskId: link.predecessorTaskId,
+            type: 1,
+            lag: 0,
+            lagFormat: 7,
+          },
+          resourceSerial: true,
+        },
+      ]);
+    });
+  }
   const scheduled = new Map<string, ScheduledTask>();
   const calendar = new ResourceCapacityCalendar();
   const projectStartAnchor = validDate(params.projectStartDate)
@@ -903,10 +1112,16 @@ const scheduleWithPriority = (params: {
       })
       .sort((left, right) => {
         if (params.direction === "BACKWARD") {
-          // Placement runs from the finish boundary backwards. Lower-ranked work
-          // is placed first so lower-float / higher-impact work receives the
-          // earlier completion slot after the backward pass is complete.
-          return -rank(left, right)
+          // In a backward pass, an already placed FS successor is the next
+          // scheduling anchor. Continue that chain before unrelated work;
+          // only then apply the normal impact/priority ordering.
+          const hasScheduledFsSuccessor = (task: ResourceSchedulingTask) => (
+            (successorsByPredecessor.get(task.id) ?? [])
+              .some(({ successorId }) => scheduled.has(successorId))
+          );
+          return Number(hasScheduledFsSuccessor(right)) - Number(hasScheduledFsSuccessor(left))
+            || Number(explicitFsChainTaskIds.has(right.id)) - Number(explicitFsChainTaskIds.has(left.id))
+            || -rank(left, right)
             || left.sortOrder - right.sortOrder
             || left.id.localeCompare(right.id);
         }
@@ -918,6 +1133,7 @@ const scheduleWithPriority = (params: {
           .filter(isGanttFsDependency)
           .some((dependency) => scheduled.has(dependency.predecessorTaskId));
         return Number(hasScheduledFsPredecessor(right)) - Number(hasScheduledFsPredecessor(left))
+          || Number(explicitFsChainTaskIds.has(right.id)) - Number(explicitFsChainTaskIds.has(left.id))
           || rank(left, right);
       });
     const task = ready[0];
@@ -985,15 +1201,28 @@ const scheduleWithPriority = (params: {
       })
       : findResourceStartDate({ task, requestedStartDate, latestFinishDate, calendar, mode: params.mode });
     if (!placement.startDate) {
-      const code = hardFinishCeiling ? "PROJECT_HARD_FINISH_VIOLATION"
-        : placement.reason === "PARENT_BOUNDARY_VIOLATION" ? "PARENT_BOUNDARY_VIOLATION"
-          : placement.reason === "MISSING_START_DATE" ? "MISSING_START_DATE"
-            : "RESOURCE_CAPACITY_EXCEEDED";
+      const hasLockedParentBoundary = bounds.lockedTaskIds.length > 0;
+      const hasDependencyWindow = dependencies.length > 0 || successorFinishCeilings.length > 0;
+      const code: ResourceScheduleIssueCode = placement.reason === "PARENT_BOUNDARY_VIOLATION"
+        ? hasLockedParentBoundary
+          ? "PARENT_BOUNDARY_VIOLATION"
+          : hasDependencyWindow
+            ? "DEPENDENCY_WINDOW_VIOLATION"
+            : hardFinishCeiling
+              ? "PROJECT_HARD_FINISH_VIOLATION"
+              : "RESOURCE_CAPACITY_EXCEEDED"
+        : placement.reason === "MISSING_START_DATE" ? "MISSING_START_DATE"
+          : "RESOURCE_CAPACITY_EXCEEDED";
+      const dependencyTaskIds = [
+        ...dependencies.map(({ predecessor }) => predecessor.id),
+        ...successorDependencies.map(({ successor }) => successor.id),
+      ];
+      const issueTaskIds = [...new Set([task.id, ...bounds.lockedTaskIds, ...dependencyTaskIds])];
       issues.push({
         id: `placement:${task.id}:${code}`,
         code,
-        severity: code === "PROJECT_HARD_FINISH_VIOLATION" || (code === "PARENT_BOUNDARY_VIOLATION" && bounds.lockedTaskIds.length > 0) ? "ERROR" : "WARNING",
-        taskIds: [task.id, ...bounds.lockedTaskIds],
+        severity: code === "PROJECT_HARD_FINISH_VIOLATION" || code === "PARENT_BOUNDARY_VIOLATION" ? "ERROR" : "WARNING",
+        taskIds: issueTaskIds,
         message: code === "PROJECT_HARD_FINISH_VIOLATION"
           ? `任务「${task.taskName || task.id}」无法在 WBS 完成锚点 ${hardFinishCeiling} 前满足依赖和资源约束。`
           : code === "PARENT_BOUNDARY_VIOLATION"
@@ -1006,9 +1235,13 @@ const scheduleWithPriority = (params: {
                 .join("、");
               return `任务「${task.taskName || task.id}」无法在锁定的父任务边界${boundaryText ? `（${boundaryText}）` : ""}内满足依赖和资源约束。`;
             })()
+            : code === "DEPENDENCY_WINDOW_VIOLATION"
+              ? `任务「${task.taskName || task.id}」受 FS 依赖窗口限制，无法在当前依赖关系和资源容量下完成。`
             : `任务「${task.taskName || task.id}」没有可用的资源容量排期位置。`,
         suggestion: code === "PARENT_BOUNDARY_VIOLATION"
           ? "请取消父任务的“锁定父任务边界”，或先把父任务完成边界调整到覆盖排期结果，再重新执行自动排期；系统不会静默越过锁定边界。"
+          : code === "DEPENDENCY_WINDOW_VIOLATION"
+            ? "优先完成该 FS 依赖链；或调整后续任务日期、工期、负责人容量或依赖关系，再重新执行自动排期。"
           : "调整负责人容量、工期、紧前关系或父任务边界。",
       });
       const fallbackStart = normalizeTaskStartDate(task.startDate, params.mode);
@@ -1424,27 +1657,38 @@ export const createResourceScheduleCandidates = (params: {
   modeOverride?: ResourceScheduleModeOverride;
 }): ResourceScheduleCandidateResult => {
   const projectStartDate = validDate(params.projectStartDate) ? params.projectStartDate! : "";
-  const hardFinishCeiling = validDate(params.hardFinishDate) ? params.hardFinishDate! : "";
   const modeOverride = normalizeModeOverride(params.modeOverride);
   const requiresWbsFinishDate = modeOverride === "DURATION_BACKWARD";
+  const requestedHardFinishDate = validDate(params.hardFinishDate) ? params.hardFinishDate! : "";
+  const hardFinishCeiling = requiresWbsFinishDate
+    ? normalizeTaskFinishDate(requestedHardFinishDate, params.calendarMode)
+    : requestedHardFinishDate;
+  // A backward run fixes the WBS finish, but it must retain the forward
+  // dependency/resource topology. We therefore solve it forward on an
+  // internal anchor, then rematerialize the whole layout against the finish.
+  const backwardMirrorsForwardLayout = requiresWbsFinishDate;
   // Forward scheduling does not require a concrete calendar date. Until the
   // project T0 is known, the same formal algorithm runs against an abstract
   // working-day calendar and persists only T0-relative offsets.
   const relativeSchedule = !projectStartDate && !requiresWbsFinishDate;
   const effectiveCalendarMode: GanttCalendarMode = relativeSchedule ? "CALENDAR_DAYS" : params.calendarMode;
-  const effectiveProjectStartDate = relativeSchedule ? GANTT_RELATIVE_T0_ANCHOR : projectStartDate;
-  // The legacy hard-finish column now stores only the WBS anchor used by a
-  // backward run. It must not become an implicit deadline for forward or
-  // unchanged scheduling modes.
-  const effectiveHardFinishCeiling = requiresWbsFinishDate ? hardFinishCeiling : "";
+  const effectiveProjectStartDate = relativeSchedule || backwardMirrorsForwardLayout
+    ? GANTT_RELATIVE_T0_ANCHOR
+    : projectStartDate;
+  // Never feed the WBS finish into the internal solver. Doing so makes the
+  // solver place work in reverse and changes the serial order for a shared
+  // responsible person. The boundary is applied once, after the forward
+  // topology has been calculated.
+  const effectiveHardFinishCeiling = "";
+  const cpmHardFinishCeiling = requiresWbsFinishDate ? hardFinishCeiling : "";
   const effectiveExpectedEndDate = relativeSchedule ? "" : params.expectedEndDate;
-  const effectiveDirection: ResourceScheduleDirection = relativeSchedule
+  const effectiveDirection: ResourceScheduleDirection = relativeSchedule || backwardMirrorsForwardLayout
     ? "FORWARD"
     : scheduleDirectionFor(modeOverride);
   const snapshotHash = resourceScheduleSnapshotHash(params.tasks, {
     projectStartDate,
     expectedEndDate: params.expectedEndDate,
-    hardFinishDate: hardFinishCeiling,
+    hardFinishDate: requestedHardFinishDate,
     calendarMode: params.calendarMode,
   });
   const currentProjectTasks = params.tasks.filter((task) => task.projectId === params.currentProjectId);
@@ -1489,7 +1733,28 @@ export const createResourceScheduleCandidates = (params: {
           ? abstractDateFromGanttOffset(task.relativeFinishOffsetDays)
           : "",
       }))
-    : params.tasks;
+    : projectStartDate && !requiresWbsFinishDate
+      ? params.tasks.map((task) => {
+        if (task.projectId !== params.currentProjectId) return task;
+        return {
+          ...task,
+          // A T0 plan persists only offsets. Once a real T0 is entered, those
+          // offsets must be materialized before the formal forward solver runs;
+          // otherwise every task looks unscheduled and the preview has no
+          // concrete changes to apply.
+          startDate: validDate(task.startDate)
+            ? task.startDate
+            : isGanttRelativeOffset(task.relativeStartOffsetDays)
+              ? materializeGanttOffsetDate(projectStartDate, task.relativeStartOffsetDays, params.calendarMode)
+              : "",
+          finishDate: validDate(task.finishDate)
+            ? task.finishDate
+            : isGanttRelativeOffset(task.relativeFinishOffsetDays)
+              ? materializeGanttOffsetDate(projectStartDate, task.relativeFinishOffsetDays, params.calendarMode)
+              : "",
+        };
+      })
+      : params.tasks;
   // Suggested durations are an input to this *preview only*. Applying the
   // candidate makes them formal in the same transaction as the calculated
   // dates, preventing the previous two-step "suggest then re-run" dead end.
@@ -1512,7 +1777,9 @@ export const createResourceScheduleCandidates = (params: {
     currentProjectId: params.currentProjectId,
     modeOverride,
     projectStartDate: effectiveProjectStartDate,
-    hardFinishDate: effectiveHardFinishCeiling,
+    // This is a validation anchor only. The internal solver always performs
+    // the same forward placement for a backward run.
+    hardFinishDate: hardFinishCeiling,
     relativeSchedule,
   });
   const preliminaryResult = scheduleWithPriority({
@@ -1565,7 +1832,15 @@ export const createResourceScheduleCandidates = (params: {
     hardFinishCeiling: effectiveHardFinishCeiling,
     direction: effectiveDirection,
   });
-  const calculatedChanges = scheduledResult.tasks
+  const finalScheduledTasks = backwardMirrorsForwardLayout
+    ? alignForwardLayoutToBackwardFinish({
+      tasks: scheduledResult.tasks,
+      currentProjectId: params.currentProjectId,
+      hardFinishDate: hardFinishCeiling,
+      mode: effectiveCalendarMode,
+    })
+    : scheduledResult.tasks;
+  const calculatedChanges = finalScheduledTasks
     .filter((task) => {
       const original = originalById.get(task.id);
       if (!task.isCurrentProject || !task.isLeaf || !original) return false;
@@ -1605,22 +1880,22 @@ export const createResourceScheduleCandidates = (params: {
     });
   const finalProjectTasks = mergeScheduledDatesIntoOriginal(
     proposedScheduleSourceTasks,
-    scheduledResult.tasks,
+    finalScheduledTasks,
     params.currentProjectId,
   );
   const finalCpm = calculateResourceAwareGanttCpm(
     finalProjectTasks,
     effectiveCalendarMode,
-    effectiveHardFinishCeiling,
+    cpmHardFinishCeiling,
   );
   const resourceConstrainedTaskIds = new Set(scheduledResult.resourceConstrainedTaskIds);
   const resourceCriticalChain = deriveResourceCriticalChain({
-    tasks: scheduledResult.tasks,
+    tasks: finalScheduledTasks,
     currentProjectId: params.currentProjectId,
   });
   const resourceCriticalChainTaskIds = new Set(resourceCriticalChain.taskIds);
   const taskExplanations = candidateTaskExplanations({
-    tasks: scheduledResult.tasks,
+    tasks: finalScheduledTasks,
     currentProjectId: params.currentProjectId,
     initialMetrics: initialCpm.metricsByTaskId,
     finalMetrics: finalCpm.metricsByTaskId,
@@ -1632,16 +1907,16 @@ export const createResourceScheduleCandidates = (params: {
   const criticalTaskIds = taskExplanations
     .filter((item) => item.isCritical)
     .map((item) => item.taskId);
-  const remainingConflicts = relevantConflicts(scheduledResult.tasks);
+  const remainingConflicts = relevantConflicts(finalScheduledTasks);
   const calculatedMetrics = metricsFor(
     proposedScheduleSourceTasks,
-    scheduledResult.tasks,
+    finalScheduledTasks,
     effectiveExpectedEndDate,
     conflicts,
     effectiveCalendarMode,
   );
   const relativeCompletionOffsetDays = relativeSchedule
-    ? scheduledResult.tasks
+    ? finalScheduledTasks
       .filter((task) => task.projectId === params.currentProjectId && task.isLeaf && validDate(task.finishDate))
       .map((task) => ganttOffsetFromAbstractDate(task.finishDate))
       .sort((left, right) => right - left)[0] ?? null
@@ -1667,10 +1942,16 @@ export const createResourceScheduleCandidates = (params: {
   const candidate: ResourceScheduleCandidate = {
     id: `${snapshotHash}:${FORMAL_RESOURCE_SCHEDULE_CANDIDATE_KIND}`,
     kind: FORMAL_RESOURCE_SCHEDULE_CANDIDATE_KIND,
-    title: relativeSchedule ? "正式自动排期（T0 相对计划）" : "正式自动排期",
+    title: relativeSchedule
+      ? "正式自动排期（T0 相对计划）"
+      : backwardMirrorsForwardLayout
+        ? "正式自动排期（倒排日期）"
+        : "正式自动排期",
     explanation: relativeSchedule
       ? "项目尚未填写具体 T0。系统以 T0 为第 0 个工作日，按 FS 紧前关系、负责人容量、下游影响和优先级计算相对工期；符合父级窗口和唯一负责人条件的未定工期子任务，会先得到系统建议，并在确认方案时与排期结果一并写入正式工期。FS 关系用于决定顺序，不会单独阻止建议生成。填写具体 T0 后才会按项目日历与法定节假日换算为真实日期。"
-      : "先按项目 T0、FS 紧前关系、日历和锁定边界计算网络浮动，再按负责人容量、下游影响和优先级安排未开始的叶子任务。对符合父级窗口和唯一负责人条件的未定工期子任务，系统在预览中使用建议工期，确认方案时才会与日期一并写入正式计划；FS 关系用于决定先后顺序。",
+      : backwardMirrorsForwardLayout
+        ? "先按正排规则确定 FS 紧前关系、负责人容量和优先级形成的执行布局，再将整套布局平移到指定 WBS 完成日期。倒排只反推日期，不会倒置任务顺序或改变同一负责人的资源占用顺序。"
+        : "先按项目 T0、FS 紧前关系、日历和锁定边界计算网络浮动，再按负责人容量、下游影响和优先级安排未开始的叶子任务。对符合父级窗口和唯一负责人条件的未定工期子任务，系统在预览中使用建议工期，确认方案时才会与日期一并写入正式计划；FS 关系用于决定先后顺序。",
     relativeSchedule,
     applicable: calculatedChanges.length > 0 && !hasBlockingIssue,
     snapshotHash,

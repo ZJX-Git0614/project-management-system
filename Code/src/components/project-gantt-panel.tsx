@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { BriefcaseBusiness, CalendarDays, ChevronDown, Download, FileSpreadsheet, FileType2, FlagTriangleRight, ListTree, LockKeyhole, Maximize2, Minimize2, Network, Redo2, TriangleAlert, Undo2, Upload, Users, WandSparkles } from "lucide-react";
 
@@ -286,6 +286,16 @@ type ResourceScheduleAnalysisView = {
   };
 };
 
+type ResourceAnalysisRequestContext = {
+  requestId: number;
+  projectId: string;
+};
+
+type ResourceAnalysisFetchResult = {
+  data: ResourceScheduleAnalysisView | null;
+  isCurrent: boolean;
+};
+
 type ResourceScheduleModeOverride = "PRESERVE" | "AUTO" | "DURATION_FORWARD" | "DURATION_BACKWARD";
 
 type ResourceScheduleRequest = {
@@ -446,6 +456,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const [resourceDialogOpen, setResourceDialogOpen] = useState(false);
   const [resourceAnalysisLoading, setResourceAnalysisLoading] = useState(false);
   const [resourceApplyingKind, setResourceApplyingKind] = useState<ResourceScheduleCandidateView["kind"] | null>(null);
+  const [boundaryResolvingTaskId, setBoundaryResolvingTaskId] = useState<string | null>(null);
   const [durationSuggestionsApplying, setDurationSuggestionsApplying] = useState(false);
   const [selectedDurationSuggestionIds, setSelectedDurationSuggestionIds] = useState<string[]>([]);
   const [resourceScheduleRequest, setResourceScheduleRequest] = useState<ResourceScheduleRequest>(DEFAULT_RESOURCE_SCHEDULE_REQUEST);
@@ -460,6 +471,7 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const [baselinePendingAction, setBaselinePendingAction] = useState<"VALIDATE" | "BEGIN_CHANGE" | "PUBLISH" | "REQUEST_APPROVAL" | null>(null);
   const historyFocusRequestIdRef = useRef(0);
   const resourceAnalysisRequestIdRef = useRef(0);
+  const resourceAnalysisProjectIdRef = useRef(projectId);
   const importInputRef = useRef<HTMLInputElement>(null);
   const processedAssistantAttachmentId = useRef<string | null>(null);
   const ganttCardRef = useRef<HTMLDivElement>(null);
@@ -472,6 +484,21 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const { notify } = useSystemFeedback();
   const { can } = usePermission();
   const searchParams = useSearchParams();
+
+  const beginResourceAnalysisRequest = useCallback((): ResourceAnalysisRequestContext | null => {
+    if (resourceAnalysisProjectIdRef.current !== projectId) return null;
+    const context = { requestId: resourceAnalysisRequestIdRef.current + 1, projectId };
+    resourceAnalysisRequestIdRef.current = context.requestId;
+    return context;
+  }, [projectId]);
+  const isCurrentResourceAnalysisRequest = useCallback((context: ResourceAnalysisRequestContext) => (
+    context.projectId === resourceAnalysisProjectIdRef.current
+    && context.requestId === resourceAnalysisRequestIdRef.current
+  ), []);
+
+  useLayoutEffect(() => {
+    resourceAnalysisProjectIdRef.current = projectId;
+  }, [projectId]);
 
   const readOnly = projectStatus === ProjectStatus.COMPLETED || projectStatus === ProjectStatus.VOIDED;
   const canView = can("project-gantt:view");
@@ -504,8 +531,9 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
   const fetchResourceAnalysis = useCallback(async (
     includeCandidates = false,
     request: ResourceScheduleRequest = DEFAULT_RESOURCE_SCHEDULE_REQUEST,
-  ) => {
-    const requestId = ++resourceAnalysisRequestIdRef.current;
+    context = beginResourceAnalysisRequest(),
+  ): Promise<ResourceAnalysisFetchResult> => {
+    if (!context) return { data: null, isCurrent: false };
     try {
       const query = new URLSearchParams();
       if (includeCandidates) query.set("includeCandidates", "1");
@@ -519,17 +547,26 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
       const data = await api.get<ResourceScheduleAnalysisView>(
         `/api/projects/${projectId}/gantt-tasks/resource-schedule${query.size > 0 ? `?${query.toString()}` : ""}`,
       );
-      if (requestId !== resourceAnalysisRequestIdRef.current) return data;
+      if (!isCurrentResourceAnalysisRequest(context)) return { data: null, isCurrent: false };
       setResourceAnalysis(data);
       setSelectedDurationSuggestionIds((current) => {
         const available = new Set((data.durationSuggestions ?? []).map((suggestion) => suggestion.taskId));
         return current.filter((taskId) => available.has(taskId));
       });
-      return data;
+      return { data, isCurrent: true };
     } catch {
-      if (requestId === resourceAnalysisRequestIdRef.current) setResourceAnalysis(null);
-      return null;
+      const isCurrent = isCurrentResourceAnalysisRequest(context);
+      if (isCurrent) setResourceAnalysis(null);
+      return { data: null, isCurrent };
     }
+  }, [beginResourceAnalysisRequest, isCurrentResourceAnalysisRequest, projectId]);
+
+  useEffect(() => {
+    setResourceAnalysis(null);
+    setResourceDialogOpen(false);
+    setResourceAnalysisLoading(false);
+    setResourceApplyingKind(null);
+    setBoundaryResolvingTaskId(null);
   }, [projectId]);
 
   const fetchTasks = useCallback(async ({
@@ -670,13 +707,10 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     });
     (resourceAnalysis?.issues ?? []).forEach((issue) => {
       issue.taskIds.forEach((taskId) => {
-        let currentTaskId: string | null = taskId;
-        const visited = new Set<string>();
-        while (currentTaskId && !visited.has(currentTaskId)) {
-          visited.add(currentTaskId);
-          append(currentTaskId, issue.message);
-          currentTaskId = taskById.get(currentTaskId)?.parentId ?? null;
-        }
+        // Issues already carry their concrete affected tasks. Bubbling these
+        // messages to every ancestor makes a child dependency window look like
+        // a locked parent-boundary violation in the WBS rows.
+        if (taskById.has(taskId)) append(taskId, issue.message);
       });
     });
     return Object.fromEntries(
@@ -799,18 +833,25 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     label: string,
     target: GanttHistoryFocusTarget,
     action: () => Promise<T>,
+    options: { waitForAfterSnapshot?: boolean; isActive?: () => boolean } = {},
   ): Promise<T> => {
     const beforeCapture = await captureHistorySnapshotWithinDeadline(`${label}:before`);
+    if (options.isActive && !options.isActive()) {
+      throw new Error("当前资源排期请求已失效");
+    }
     const result = await action();
     if (!beforeCapture.snapshot) {
-      setOperationError({
-        title: "操作已完成，但未加入撤销历史",
-        message: beforeCapture.warning ?? "操作前撤销快照不可用，本次操作无法通过撤销恢复。",
-      });
+      if (!options.isActive || options.isActive()) {
+        setOperationError({
+          title: "操作已完成，但未加入撤销历史",
+          message: beforeCapture.warning ?? "操作前撤销快照不可用，本次操作无法通过撤销恢复。",
+        });
+      }
       return result;
     }
     const beforeSnapshot = beforeCapture.snapshot;
-    void captureHistorySnapshotWithinDeadline(`${label}:after`).then((afterCapture) => {
+    const commitAfterSnapshot = (afterCapture: GanttHistorySnapshotCapture) => {
+      if (options.isActive && !options.isActive()) return;
       if (!afterCapture.snapshot) {
         setOperationError({
           title: "操作已完成，但未加入撤销历史",
@@ -826,19 +867,28 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
         afterSnapshotId: afterCapture.snapshot.snapshotId,
         target,
       });
-    });
+    };
+    const afterCaptureRequest = captureHistorySnapshotWithinDeadline(`${label}:after`);
+    if (options.waitForAfterSnapshot) {
+      commitAfterSnapshot(await afterCaptureRequest);
+    } else {
+      void afterCaptureRequest.then(commitAfterSnapshot);
+    }
     return result;
   };
 
   const openResourceScheduleDialog = async (
     request: ResourceScheduleRequest = DEFAULT_RESOURCE_SCHEDULE_REQUEST,
   ) => {
+    const context = beginResourceAnalysisRequest();
+    if (!context) return;
     setResourceScheduleRequest(request);
     setResourceDialogOpen(true);
     setResourceAnalysisLoading(true);
-    const analysis = await fetchResourceAnalysis(true, request);
+    const result = await fetchResourceAnalysis(true, request, context);
+    if (!result.isCurrent) return;
     setResourceAnalysisLoading(false);
-    if (!analysis) {
+    if (!result.data) {
       setResourceDialogOpen(false);
       setOperationError({ title: "资源排期分析失败", message: "无法读取当前资源冲突，请稍后重试" });
     }
@@ -874,6 +924,13 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
 
   const applyResourceScheduleCandidate = async (candidate: ResourceScheduleCandidateView) => {
     if (!resourceAnalysis || resourceApplyingKind || !canEditPlanning) return;
+    const currentAnalysisContext: ResourceAnalysisRequestContext = {
+      requestId: resourceAnalysisRequestIdRef.current,
+      projectId,
+    };
+    if (!isCurrentResourceAnalysisRequest(currentAnalysisContext)) return;
+    const operationContext = beginResourceAnalysisRequest();
+    if (!operationContext) return;
     setResourceApplyingKind(candidate.kind);
     try {
       await runWithSnapshotHistory(
@@ -893,27 +950,39 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
           if (resourceScheduleRequest.calendarModeOverride) {
             setCalendarMode(resourceScheduleRequest.calendarModeOverride);
           }
-          await fetchTasks();
+          await fetchTasks({ forceFresh: true, refreshResourceAnalysis: false });
         },
+        { waitForAfterSnapshot: true, isActive: () => isCurrentResourceAnalysisRequest(operationContext) },
       );
+      if (!isCurrentResourceAnalysisRequest(operationContext)) return;
       setResourceDialogOpen(false);
+      setResourceAnalysis(null);
     } catch (error) {
+      if (!isCurrentResourceAnalysisRequest(operationContext)) return;
       setOperationError({
         title: "应用资源排期失败",
         message: error instanceof Error ? error.message : "资源排期方案应用失败",
       });
+      setResourceApplyingKind(null);
       await fetchResourceAnalysis(true, resourceScheduleRequest);
     } finally {
-      setResourceApplyingKind(null);
+      if (isCurrentResourceAnalysisRequest(operationContext)) setResourceApplyingKind(null);
     }
   };
 
   const applyDurationSuggestions = async () => {
     if (!resourceAnalysis || durationSuggestionsApplying || selectedDurationSuggestionIds.length === 0 || !canEditPlanning) return;
+    const currentAnalysisContext: ResourceAnalysisRequestContext = {
+      requestId: resourceAnalysisRequestIdRef.current,
+      projectId,
+    };
+    if (!isCurrentResourceAnalysisRequest(currentAnalysisContext)) return;
     const accepted = await confirm(
       `确认将选中的 ${selectedDurationSuggestionIds.length} 条系统建议工期写入正式计划？写入后会参与依赖、资源容量和关键路径计算。`,
     );
-    if (!accepted) return;
+    if (!accepted || !isCurrentResourceAnalysisRequest(currentAnalysisContext)) return;
+    const operationContext = beginResourceAnalysisRequest();
+    if (!operationContext) return;
     setDurationSuggestionsApplying(true);
     try {
       await runWithSnapshotHistory(
@@ -928,13 +997,17 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
           });
           await fetchTasks({ forceFresh: true, refreshResourceAnalysis: false });
         },
+        { waitForAfterSnapshot: true, isActive: () => isCurrentResourceAnalysisRequest(operationContext) },
       );
+      if (!isCurrentResourceAnalysisRequest(operationContext)) return;
       setSelectedDurationSuggestionIds([]);
       // Writing suggested durations is a completed action, not a second scheduling decision.
       // Close the preview immediately so a successful confirmation cannot be mistaken for a stalled dialog.
       setResourceDialogOpen(false);
+      setDurationSuggestionsApplying(false);
       void fetchResourceAnalysis(true, resourceScheduleRequest);
     } catch (error) {
+      if (!isCurrentResourceAnalysisRequest(operationContext)) return;
       setOperationError({
         title: "确认建议工期失败",
         message: error instanceof Error ? error.message : "系统建议工期写入失败",
@@ -1626,6 +1699,45 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
     .filter((row) => row.isCritical)
     .length;
   const taskById = new Map(tasks.map((task) => [task.id, task] as const));
+  const resolveLockedParentBoundary = async (lockedParent: ProjectGanttTask) => {
+    if (!canEditPlanning || boundaryResolvingTaskId || resourceApplyingKind) return;
+    const operationContext = beginResourceAnalysisRequest();
+    if (!operationContext) return;
+    setBoundaryResolvingTaskId(lockedParent.id);
+    setResourceAnalysisLoading(true);
+    try {
+      await runWithSnapshotHistory(
+        "解除父任务锁定边界",
+        { taskIds: [lockedParent.id], columnKey: "parentBoundaryMode" },
+        async () => {
+          await api.put(`/api/projects/${projectId}/gantt-tasks/${lockedParent.id}`, {
+            parentBoundaryMode: "ROLLUP",
+          });
+          await fetchTasks({ forceFresh: true, refreshResourceAnalysis: false });
+        },
+        { waitForAfterSnapshot: true, isActive: () => isCurrentResourceAnalysisRequest(operationContext) },
+      );
+      if (!isCurrentResourceAnalysisRequest(operationContext)) return;
+      setResourceAnalysis(null);
+      const result = await fetchResourceAnalysis(true, resourceScheduleRequest, operationContext);
+      if (!result.isCurrent) return;
+      if (!result.data) {
+        setResourceDialogOpen(false);
+        setOperationError({ title: "重新计算失败", message: "父任务边界已解除，但资源排期方案未能重新生成，请重新打开自动排期。" });
+      }
+    } catch (error) {
+      if (!isCurrentResourceAnalysisRequest(operationContext)) return;
+      setOperationError({
+        title: "解除父任务边界失败",
+        message: error instanceof Error ? error.message : "无法解除父任务边界锁定",
+      });
+    } finally {
+      if (isCurrentResourceAnalysisRequest(operationContext)) {
+        setResourceAnalysisLoading(false);
+        setBoundaryResolvingTaskId(null);
+      }
+    }
+  };
   const renderLockedBoundaryActions = (issue: { code: string; taskIds: string[] }) => {
     if (issue.code !== "PARENT_BOUNDARY_VIOLATION") return null;
     const lockedParent = issue.taskIds
@@ -1643,11 +1755,25 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
           <span>父任务边界：已锁定 · {lockedParent.taskName || lockedParent.id}</span>
         </div>
         <div className="mt-1 flex flex-wrap gap-2">
-          <Button type="button" variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => focusParent("parentBoundaryMode")}>
-            解除锁定边界
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 text-[11px]"
+            disabled={!canEditPlanning || Boolean(resourceApplyingKind) || boundaryResolvingTaskId === lockedParent.id}
+            onClick={() => void resolveLockedParentBoundary(lockedParent)}
+          >
+            {boundaryResolvingTaskId === lockedParent.id ? "重新计算中..." : "解除锁定并重算"}
           </Button>
-          <Button type="button" variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => focusParent("finishDate")}>
-            扩大完成边界
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 text-[11px]"
+            disabled={Boolean(resourceApplyingKind) || Boolean(boundaryResolvingTaskId)}
+            onClick={() => focusParent("finishDate")}
+          >
+            调整边界后重算
           </Button>
         </div>
       </div>
@@ -1672,12 +1798,11 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
           fullScreen && "fixed inset-0 z-[120] flex h-screen w-screen flex-col overflow-hidden rounded-none border-0 bg-background",
         )}
       >
-        <CardHeader className="pb-2">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <CardTitle className="text-sm">项目WBS管理</CardTitle>
-            </div>
-            <div className="flex flex-wrap items-start justify-end gap-2">
+        <CardHeader className="space-y-3 pb-2">
+          <div>
+            <CardTitle className="text-sm">项目WBS管理</CardTitle>
+          </div>
+          <div className="flex flex-wrap items-start justify-start gap-2">
               <div className="inline-flex h-8 items-stretch border border-border/70 bg-background/35" role="group" aria-label="排期视图">
                 {([
                   ["WBS", "WBS 与甘特", ListTree],
@@ -1955,7 +2080,6 @@ export const ProjectGanttPanel = ({ projectId, projectStatus }: ProjectGanttPane
                 {fullScreen ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
               </Button>
             </div>
-          </div>
         </CardHeader>
         <CardContent className={cn("pb-0", fullScreen && "min-h-0 flex-1 overflow-hidden px-3")}>
           {scheduleView === "WBS" ? <GanttTimeline

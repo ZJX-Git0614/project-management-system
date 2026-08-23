@@ -431,9 +431,11 @@ export const calculateGanttCpm = (
     const ef = earlyFinish.get(task.id)!;
     const ls = lateStart.get(task.id)!;
     const lf = lateFinish.get(task.id)!;
+    const duration = durationById.get(task.id) ?? 0;
     // Total float is the CPM definition: late start minus early start. It is
     // intentionally independent from the persisted resource-levelled bar.
-    const totalFloatMinutes = ls - es;
+    const rawTotalFloatMinutes = ls - es;
+    const totalFloatMinutes = Math.max(0, rawTotalFloatMinutes);
     const edgeFloat = (outgoing.get(task.id) ?? []).map((edge) => (
       (earlyStart.get(edge.successorTaskId) ?? cpmFinishMinutes)
       - (es + edge.weightMinutes)
@@ -443,9 +445,9 @@ export const calculateGanttCpm = (
       : cpmFinishMinutes - ef;
     // Free float cannot exceed total float, including when a locked ancestor
     // boundary or an early required finish produces negative slack.
-    const freeFloatMinutes = Math.min(rawFreeFloatMinutes, totalFloatMinutes);
+    const freeFloatMinutes = Math.max(0, Math.min(rawFreeFloatMinutes, totalFloatMinutes));
     const completed = Number(task.progress ?? 0) >= 100;
-    const scheduleStatus = completed ? "NORMAL" : statusForFloat(totalFloatMinutes);
+    const scheduleStatus = completed ? "NORMAL" : statusForFloat(rawTotalFloatMinutes);
     // A hard deadline conflict can make the mathematically derived late
     // window precede the early window. Keep the conflict visible through the
     // negative float/status, but do not render an impossible date ordering.
@@ -528,7 +530,9 @@ export const calculateGanttCpm = (
     // persisted as another critical task and the UI shows duplicated paths.
     const status = childMetrics.some((item) => item.scheduleStatus === "INVALID_DEPENDENCY")
       ? "INVALID_DEPENDENCY"
-      : statusForFloat(totalFloatMinutes);
+      : childMetrics.some((item) => item.scheduleStatus === "NEGATIVE_FLOAT")
+        ? "NEGATIVE_FLOAT"
+        : statusForFloat(totalFloatMinutes);
     const metrics: GanttCpmMetrics = {
       earlyStartDate: calculated.map((item) => item.earlyStartDate).filter(Boolean).sort()[0] ?? "",
       earlyFinishDate: calculated.map((item) => item.earlyFinishDate).filter(Boolean).sort().at(-1) ?? "",

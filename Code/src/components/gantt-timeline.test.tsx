@@ -343,7 +343,7 @@ describe("GanttTimeline performance", () => {
     expect(screen.getByRole("button", { name: "关键路径 2 条" })).toBeInTheDocument();
   });
 
-  it("renders FS and resource-chain connectors as solid lines with distinct tones", () => {
+  it("renders critical, FS, and resource-chain connectors with readable distinct tones", () => {
     render(<GanttTimeline
       tasks={[
         task(1, { finishDate: "2026-07-30", durationDays: 3, totalFloatMinutes: 0, scheduleStatus: "CRITICAL" }),
@@ -382,11 +382,11 @@ describe("GanttTimeline performance", () => {
     const regularFs = document.querySelector('[data-gantt-link-tone="dependency"]');
     const resourceChain = document.querySelector('[data-gantt-link-tone="resource"]');
     expect(criticalFs).toHaveAttribute("stroke", "#ef4444");
-    expect(regularFs).toHaveAttribute("stroke", "#cbd5e1");
+    expect(regularFs).toHaveAttribute("stroke", "#94a3b8");
     expect(resourceChain).toHaveAttribute("stroke", "#38bdf8");
     expect(criticalFs).not.toHaveAttribute("stroke-dasharray");
-    expect(regularFs).not.toHaveAttribute("stroke-dasharray");
-    expect(resourceChain).not.toHaveAttribute("stroke-dasharray");
+    expect(regularFs).toHaveAttribute("stroke-dasharray", "4 4");
+    expect(resourceChain).toHaveAttribute("stroke-dasharray", "5 3");
   });
 
   it("keeps the full resource-constrained critical chain in path order", () => {

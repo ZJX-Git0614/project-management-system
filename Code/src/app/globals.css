@@ -263,7 +263,7 @@ body {
 .gantt-context-menu-item kbd {
   margin-left: auto;
   color: var(--app-text-dim);
-  font-size: 10px;
+  font-size: 11px;
   font-family: inherit;
 }
 

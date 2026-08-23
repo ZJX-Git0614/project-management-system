@@ -9,6 +9,7 @@ import {
   resourceScheduleSnapshotHash,
   type ResourceSchedulingTask,
 } from "@/lib/gantt-resource-schedule";
+import { isGanttWorkingDate, normalizeTaskFinishDate } from "@/lib/gantt-calendar";
 
 const createResourceScheduleCandidates = (
   params: Parameters<typeof createFormalResourceScheduleCandidates>[0],
@@ -131,6 +132,48 @@ describe("createResourceScheduleCandidates", () => {
       relativeStartOffsetDays: 2,
       relativeFinishOffsetDays: 2,
     });
+  });
+
+  it("填写具体 T0 后将已保存的相对排期物化为可应用的正排日期", () => {
+    const relativeTasks = [
+      task({
+        id: "task-a",
+        taskName: "A",
+        startDate: "",
+        finishDate: "",
+        durationDays: 2,
+        relativeStartOffsetDays: 0,
+        relativeFinishOffsetDays: 1,
+      }),
+      task({
+        id: "task-b",
+        taskName: "B",
+        startDate: "",
+        finishDate: "",
+        durationDays: 1,
+        sortOrder: 2,
+        relativeStartOffsetDays: 2,
+        relativeFinishOffsetDays: 2,
+        predecessorDependencies: [{ predecessorTaskId: "task-a" }],
+      }),
+    ];
+
+    const result = createFormalResourceScheduleCandidates({
+      tasks: relativeTasks,
+      currentProjectId: "project-1",
+      calendarMode: "WORKING_DAYS",
+      projectStartDate: "2026-01-05",
+      expectedEndDate: "",
+      modeOverride: "DURATION_FORWARD",
+    });
+    const candidate = formalCandidate(result);
+
+    expect(candidate.relativeSchedule).toBe(false);
+    expect(candidate.applicable).toBe(true);
+    expect(candidate.changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ taskId: "task-a", startDate: "2026-01-05", finishDate: "2026-01-06" }),
+      expect.objectContaining({ taskId: "task-b", startDate: "2026-01-07", finishDate: "2026-01-07" }),
+    ]));
   });
 
   it("WBS 完成锚点未确定时阻止倒排，避免伪造完成边界", () => {
@@ -292,6 +335,50 @@ describe("createResourceScheduleCandidates", () => {
       expect.objectContaining({ id: "predecessor", startDate: "2026-01-01", finishDate: "2026-01-01" }),
       expect.objectContaining({ id: "successor", startDate: "2026-01-02", finishDate: "2026-01-02" }),
       expect.objectContaining({ id: "unrelated", startDate: "2026-01-03", finishDate: "2026-01-03" }),
+    ]));
+  });
+
+  it("同一负责人下 FS 链首和后继连续优先于更长的高优先级无依赖任务", () => {
+    const tasks = [
+      task({
+        id: "chain-head",
+        startDate: "",
+        finishDate: "",
+        durationDays: 1,
+        schedulePriority: 1,
+        sortOrder: 2,
+      }),
+      task({
+        id: "chain-successor",
+        startDate: "",
+        finishDate: "",
+        durationDays: 1,
+        schedulePriority: 1,
+        sortOrder: 3,
+        predecessorDependencies: [{ predecessorTaskId: "chain-head" }],
+      }),
+      task({
+        id: "long-high-priority",
+        startDate: "",
+        finishDate: "",
+        durationDays: 3,
+        schedulePriority: 1000,
+        sortOrder: 1,
+      }),
+    ];
+    const result = createResourceScheduleCandidates({
+      tasks,
+      currentProjectId: "project-1",
+      calendarMode: "CALENDAR_DAYS",
+      expectedEndDate: "2026-01-10",
+      modeOverride: "DURATION_FORWARD",
+    });
+    const applied = applyResourceScheduleCandidate(tasks, formalCandidate(result));
+
+    expect(applied).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "chain-head", startDate: "2026-01-01", finishDate: "2026-01-01" }),
+      expect.objectContaining({ id: "chain-successor", startDate: "2026-01-02", finishDate: "2026-01-02" }),
+      expect.objectContaining({ id: "long-high-priority", startDate: "2026-01-03", finishDate: "2026-01-05" }),
     ]));
   });
 
@@ -883,6 +970,173 @@ describe("createResourceScheduleCandidates", () => {
       expect.objectContaining({ taskId: "successor", startDate: "2026-01-07", finishDate: "2026-01-08" }),
     ]));
     expect(candidate.issues).not.toContainEqual(expect.objectContaining({ code: "DEPENDENCY_CONSTRAINT" }));
+  });
+
+  it("工期固定倒排只反推日期，不反转同一负责人的逻辑执行顺序", () => {
+    const result = createResourceScheduleCandidates({
+      tasks: [
+        task({
+          id: "task-1-4-3",
+          taskName: "1.4.3",
+          startDate: "",
+          finishDate: "",
+          durationDays: 8,
+          sortOrder: 3,
+        }),
+        task({
+          id: "task-1-2-1",
+          taskName: "1.2.1",
+          startDate: "",
+          finishDate: "",
+          durationDays: 2,
+          sortOrder: 4,
+          predecessorDependencies: [{ predecessorTaskId: "task-1-4-3", type: 1 }],
+        }),
+        task({
+          id: "task-1-4-1",
+          taskName: "1.4.1",
+          startDate: "",
+          finishDate: "",
+          durationDays: 1,
+          sortOrder: 1,
+        }),
+        task({
+          id: "task-1-4-2",
+          taskName: "1.4.2",
+          startDate: "",
+          finishDate: "",
+          durationDays: 1,
+          sortOrder: 2,
+        }),
+      ],
+      currentProjectId: "project-1",
+      calendarMode: "CALENDAR_DAYS",
+      expectedEndDate: "2026-01-12",
+      hardFinishDate: "2026-01-12",
+      modeOverride: "DURATION_BACKWARD",
+    });
+    const candidate = formalCandidate(result);
+
+    expect(candidate.changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ taskId: "task-1-4-3", startDate: "2026-01-01", finishDate: "2026-01-08" }),
+      expect.objectContaining({ taskId: "task-1-2-1", startDate: "2026-01-09", finishDate: "2026-01-10" }),
+      expect.objectContaining({ taskId: "task-1-4-1", startDate: "2026-01-11", finishDate: "2026-01-11" }),
+      expect.objectContaining({ taskId: "task-1-4-2", startDate: "2026-01-12", finishDate: "2026-01-12" }),
+    ]));
+  });
+
+  it("工期固定倒排保留正排的资源与依赖布局，只平移到 WBS 完成日", () => {
+    const tasks = [
+      task({
+        id: "independent",
+        taskName: "独立任务",
+        startDate: "",
+        finishDate: "",
+        durationDays: 1,
+        sortOrder: 1,
+      }),
+      task({
+        id: "predecessor",
+        taskName: "紧前任务",
+        startDate: "",
+        finishDate: "",
+        durationDays: 2,
+        sortOrder: 2,
+      }),
+      task({
+        id: "successor",
+        taskName: "紧后任务",
+        startDate: "",
+        finishDate: "",
+        durationDays: 1,
+        sortOrder: 3,
+        predecessorDependencies: [{ predecessorTaskId: "predecessor", type: 1 }],
+      }),
+      task({
+        id: "parallel-owner",
+        taskName: "并行负责人任务",
+        ownerKeys: ["account:user-2"],
+        startDate: "",
+        finishDate: "",
+        durationDays: 3,
+        sortOrder: 4,
+      }),
+    ];
+    const forward = formalCandidate(createResourceScheduleCandidates({
+      tasks,
+      currentProjectId: "project-1",
+      calendarMode: "CALENDAR_DAYS",
+      projectStartDate: "2026-02-01",
+      expectedEndDate: "",
+      modeOverride: "DURATION_FORWARD",
+    }));
+    const backward = formalCandidate(createResourceScheduleCandidates({
+      tasks,
+      currentProjectId: "project-1",
+      calendarMode: "CALENDAR_DAYS",
+      projectStartDate: "",
+      hardFinishDate: "2026-02-20",
+      expectedEndDate: "",
+      modeOverride: "DURATION_BACKWARD",
+    }));
+    const forwardById = new Map(forward.changes.map((change) => [change.taskId, change] as const));
+    const backwardById = new Map(backward.changes.map((change) => [change.taskId, change] as const));
+    const forwardCompletion = [...forwardById.values()]
+      .map((change) => change.finishDate)
+      .sort()
+      .at(-1)!;
+    const backwardCompletion = [...backwardById.values()]
+      .map((change) => change.finishDate)
+      .sort()
+      .at(-1)!;
+    const offsetFromCompletion = (completion: string, date: string) => (
+      Math.round((Date.parse(`${date}T00:00:00Z`) - Date.parse(`${completion}T00:00:00Z`)) / 86_400_000)
+    );
+
+    expect(backwardCompletion).toBe("2026-02-20");
+    for (const taskId of ["independent", "predecessor", "successor", "parallel-owner"]) {
+      const forwardChange = forwardById.get(taskId)!;
+      const backwardChange = backwardById.get(taskId)!;
+      expect(offsetFromCompletion(backwardCompletion, backwardChange.startDate)).toBe(
+        offsetFromCompletion(forwardCompletion, forwardChange.startDate),
+      );
+      expect(offsetFromCompletion(backwardCompletion, backwardChange.finishDate)).toBe(
+        offsetFromCompletion(forwardCompletion, forwardChange.finishDate),
+      );
+    }
+    expect(backwardById.get("successor")!.startDate > backwardById.get("predecessor")!.finishDate).toBe(true);
+  });
+
+  it("工作日倒排遇到休息日完成锚点时向前落到最近工作日", () => {
+    const requestedFinishDate = "2026-01-11"; // Sunday
+    const effectiveFinishDate = normalizeTaskFinishDate(requestedFinishDate, "WORKING_DAYS");
+    expect(isGanttWorkingDate(requestedFinishDate)).toBe(false);
+    expect(isGanttWorkingDate(effectiveFinishDate)).toBe(true);
+
+    const result = createResourceScheduleCandidates({
+      tasks: [task({
+        id: "working-day-backward",
+        startDate: "",
+        finishDate: "",
+        durationDays: 2,
+      })],
+      currentProjectId: "project-1",
+      calendarMode: "WORKING_DAYS",
+      projectStartDate: "",
+      expectedEndDate: "",
+      hardFinishDate: requestedFinishDate,
+      modeOverride: "DURATION_BACKWARD",
+    });
+    const candidate = formalCandidate(result);
+    const change = candidate.changes.find((item) => item.taskId === "working-day-backward");
+
+    expect(change).toMatchObject({
+      startDate: expect.any(String),
+      finishDate: effectiveFinishDate,
+    });
+    expect(isGanttWorkingDate(change!.startDate)).toBe(true);
+    expect(isGanttWorkingDate(change!.finishDate)).toBe(true);
+    expect(change!.finishDate).not.toBe(requestedFinishDate);
   });
 
   it("工期固定倒排不会把计划开始误当成完成端排期锚点", () => {

@@ -292,13 +292,14 @@ export const resolveGanttCriticalTaskIds = (
       ))
       .map((task) => task.id));
   }
-  const resourceAwareCriticalIds = new Set(tasks
-    .filter((task) => (
-      !parentTaskIds.has(task.id)
-      && Number(task.progress ?? 0) < 100
-      && resourceAwareCpm.metricsByTaskId.get(task.id)?.isCritical
-    ))
-    .map((task) => task.id));
+  const resourceAwareCriticalIds = new Set(
+    [...resourceAwareCpm.projectCriticalTaskIds].filter((taskId) => {
+      const task = tasks.find((candidate) => candidate.id === taskId);
+      return Boolean(task)
+        && !parentTaskIds.has(taskId)
+        && Number(task?.progress ?? 0) < 100;
+    }),
+  );
   if (resourceAwareCriticalIds.size > 0) return resourceAwareCriticalIds;
 
   if (!hasPersistedCpm) return findGanttCriticalTaskIds(tasks);

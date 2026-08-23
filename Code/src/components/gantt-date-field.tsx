@@ -28,7 +28,7 @@ interface GanttDateFieldProps {
   displayValue?: string;
 }
 
-const SEGMENT_CLASS = "!h-5 !min-h-0 !border-0 !bg-transparent !p-0 text-center font-mono text-[10px] tabular-nums !shadow-none !ring-0";
+const SEGMENT_CLASS = "!h-5 !min-h-0 !border-0 !bg-transparent !p-0 text-center font-mono text-[11px] tabular-nums !shadow-none !ring-0";
 
 export const GanttDateField = ({
   value,
@@ -165,7 +165,7 @@ export const GanttDateField = ({
         inputMode="numeric"
         maxLength={4}
         placeholder={String(currentYear)}
-        className={cn(SEGMENT_CLASS, "!w-[30px]")}
+        className={cn(SEGMENT_CLASS, "!w-[34px]")}
         disabled={disabled}
         aria-label={`${ariaLabel}年份`}
       />
@@ -178,7 +178,7 @@ export const GanttDateField = ({
         inputMode="numeric"
         maxLength={2}
         placeholder="月"
-        className={cn(SEGMENT_CLASS, "!w-[16px]")}
+        className={cn(SEGMENT_CLASS, "!w-[18px]")}
         disabled={disabled}
         aria-label={`${ariaLabel}月份`}
       />
@@ -191,7 +191,7 @@ export const GanttDateField = ({
         inputMode="numeric"
         maxLength={2}
         placeholder="日"
-        className={cn(SEGMENT_CLASS, "!w-[16px]")}
+        className={cn(SEGMENT_CLASS, "!w-[18px]")}
         disabled={disabled}
         aria-label={`${ariaLabel}日期`}
       />

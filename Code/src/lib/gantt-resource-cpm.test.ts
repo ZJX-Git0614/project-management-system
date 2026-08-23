@@ -71,7 +71,27 @@ describe("resource-aware gantt CPM", () => {
       isCritical: true,
       scheduleStatus: "NEGATIVE_FLOAT",
     });
-    expect(result.metricsByTaskId.get("1.4.1")?.totalFloatMinutes).toBeLessThan(0);
+    expect(result.metricsByTaskId.get("1.4.1")?.totalFloatMinutes).toBe(0);
+    expect(result.metricsByTaskId.get("parent")).toMatchObject({
+      isCritical: false,
+      scheduleStatus: "NEGATIVE_FLOAT",
+    });
+  });
+
+  it("propagates invalid dependency semantics through summary rows", () => {
+    const result = calculateResourceAwareGanttCpm([
+      task("root", "2026-08-17", "2026-08-20", 4, { parentId: null, ownerKeys: [] }),
+      task("parent", "2026-08-17", "2026-08-20", 4, { parentId: "root", ownerKeys: [] }),
+      task("external", "2026-08-17", "2026-08-17", 1, { parentId: null }),
+      task("invalid-child", "2026-08-17", "2026-08-17", 1, {
+        parentId: "parent",
+        predecessorDependencies: [{ predecessorTaskId: "external", type: 3, lag: 0, lagFormat: 7 }],
+      }),
+    ], "WORKING_DAYS");
+
+    expect(result.metricsByTaskId.get("invalid-child")?.scheduleStatus).toBe("INVALID_DEPENDENCY");
+    expect(result.metricsByTaskId.get("parent")?.scheduleStatus).toBe("INVALID_DEPENDENCY");
+    expect(result.metricsByTaskId.get("root")?.scheduleStatus).toBe("INVALID_DEPENDENCY");
   });
 
   it("does not create a derived cycle when an explicit dependency points backwards", () => {

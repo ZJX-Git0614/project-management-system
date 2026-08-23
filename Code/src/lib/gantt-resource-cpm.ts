@@ -2,6 +2,7 @@ import {
   calculateGanttCpm,
   type CpmGanttDependency,
   type CpmGanttTask,
+  type GanttCpmMetrics,
   type GanttCpmResult,
 } from "@/lib/gantt-cpm";
 import { isGanttFsDependency, normalizeGanttScheduleMode } from "@/lib/gantt-planning-rules";
@@ -371,15 +372,60 @@ export const calculateResourceAwareGanttCpm = (
       ...metrics,
       totalFloatMinutes: normalizedFloat,
       freeFloatMinutes: normalizedFreeFloat,
-      scheduleStatus: normalizedFloat === 0 ? "CRITICAL" : metrics.scheduleStatus,
-      isCritical: true,
+      scheduleStatus: metrics.scheduleStatus === "INVALID_DEPENDENCY" || metrics.scheduleStatus === "NEGATIVE_FLOAT"
+        ? metrics.scheduleStatus
+        : normalizedFloat === 0 ? "CRITICAL" : metrics.scheduleStatus,
+      // A locked parent can make the longest resource chain infeasible. It
+      // must remain a negative-float warning, but hiding it from criticality
+      // conceals the chain that is causing the boundary conflict. Keep both
+      // signals: NEGATIVE_FLOAT describes feasibility; isCritical identifies
+      // the zero-slack structural path that must be resolved first.
+      isCritical: metrics.scheduleStatus !== "INVALID_DEPENDENCY",
     });
   });
+
+  // Resource criticality may add a task to the longest resource chain even
+  // when a locked boundary gives it negative float. Preserve that semantic
+  // state on every WBS ancestor without changing the executable critical-path
+  // contract or marking summary rows as independently critical.
+  const propagateSummaryStatus = (taskId: string, visiting = new Set<string>()): GanttCpmMetrics["scheduleStatus"] | null => {
+    if (visiting.has(taskId)) return "INVALID_DEPENDENCY";
+    const nextVisiting = new Set(visiting).add(taskId);
+    const childStatuses = (normalizedTasks
+      .filter((task) => task.parentId === taskId)
+      .map((child) => {
+        if (normalizedTasks.some((task) => task.parentId === child.id)) {
+          propagateSummaryStatus(child.id, nextVisiting);
+        }
+        return metricsByTaskId.get(child.id)?.scheduleStatus;
+      }));
+    const current = metricsByTaskId.get(taskId);
+    if (!current) return null;
+    const status = current.scheduleStatus === "INVALID_DEPENDENCY"
+      || childStatuses.includes("INVALID_DEPENDENCY")
+      ? "INVALID_DEPENDENCY"
+      : current.scheduleStatus === "NEGATIVE_FLOAT"
+        || childStatuses.includes("NEGATIVE_FLOAT")
+        ? "NEGATIVE_FLOAT"
+        : null;
+    if (status) {
+      metricsByTaskId.set(taskId, { ...current, scheduleStatus: status });
+    }
+    return status ?? current.scheduleStatus;
+  };
+  normalizedTasks
+    .filter((task) => normalizedTasks.some((candidate) => candidate.parentId === task.id))
+    .forEach((task) => { propagateSummaryStatus(task.id); });
+  const projectCriticalTaskIds = new Set(
+    [...criticalTaskIds].filter((taskId) => (
+      metricsByTaskId.get(taskId)?.scheduleStatus !== "INVALID_DEPENDENCY"
+    )),
+  );
 
   return {
     ...constrained,
     metricsByTaskId,
-    projectCriticalTaskIds: criticalTaskIds,
+    projectCriticalTaskIds,
     resourceLinks,
   };
 };

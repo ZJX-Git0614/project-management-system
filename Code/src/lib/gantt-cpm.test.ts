@@ -60,14 +60,15 @@ describe("gantt CPM", () => {
     expect(result.metricsByTaskId.get("sf")).toMatchObject({ scheduleStatus: "INVALID_DEPENDENCY", earlyStartDate: "" });
   });
 
-  it("exposes negative float when the required finish is earlier than the network finish", () => {
+  it("keeps negative-float conflicts visible without rendering negative float values", () => {
     const result = calculateGanttCpm([
       task("a", 3),
       task("b", 3, ["a"]),
     ], "CALENDAR_DAYS", "2026-07-05");
 
     expect(result.metricsByTaskId.get("a")).toMatchObject({
-      totalFloatMinutes: -GANTT_MINUTES_PER_DAY,
+      totalFloatMinutes: 0,
+      freeFloatMinutes: 0,
       scheduleStatus: "NEGATIVE_FLOAT",
       isCritical: false,
     });

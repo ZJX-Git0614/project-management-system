@@ -72,7 +72,7 @@ const taskExplanation = (task: ProjectGanttTask, criticalIds: Set<string>) => {
       : "FS 紧前任务：无",
     task.totalFloatMinutes == null
       ? "总浮动：尚未计算"
-      : `总浮动：${Math.round(task.totalFloatMinutes / 450 * 10) / 10} 天`,
+      : `总浮动：${Math.round(Math.max(0, task.totalFloatMinutes) / 450 * 10) / 10} 天`,
     `父级边界：${task.parentBoundaryMode === "LOCKED" ? "锁定" : "自动汇总"}`,
   ];
   if (criticalIds.has(task.id)) details.push("关键路径：是");

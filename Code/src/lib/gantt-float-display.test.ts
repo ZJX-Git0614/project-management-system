@@ -36,12 +36,12 @@ describe("gantt float display boundary", () => {
     )).toBe(0);
   });
 
-  it("preserves negative float and caps relative T0 float", () => {
+  it("does not render negative float and caps relative T0 float", () => {
     expect(ganttFloatMinutesWithinRelativeBoundary(
       12,
       -GANTT_MINUTES_PER_DAY,
       12,
-    )).toBe(-GANTT_MINUTES_PER_DAY);
+    )).toBe(0);
     expect(ganttFloatMinutesWithinRelativeBoundary(
       4,
       7 * GANTT_MINUTES_PER_DAY,

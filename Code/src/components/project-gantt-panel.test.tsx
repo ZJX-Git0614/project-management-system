@@ -206,10 +206,12 @@ const backgroundGanttGet = (url: string) => {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 describe("ProjectGanttPanel", () => {
@@ -599,8 +601,49 @@ describe("ProjectGanttPanel", () => {
 
   it("shows locked parent state and boundary resolution choices in the resource preview", async () => {
     const lockedParent = { ...rootTask, parentBoundaryMode: "LOCKED" as const };
+    let boundaryLocked = true;
+    const afterSnapshot = deferred<{ snapshotId: string }>();
+    mocks.post.mockImplementation((url: string, body: { label?: string }) => {
+      if (url.endsWith("/history/snapshots")) {
+        return body.label === "解除父任务锁定边界:after"
+          ? afterSnapshot.promise
+          : Promise.resolve({ snapshotId: "locked-parent-snapshot" });
+      }
+      return Promise.resolve({});
+    });
+    mocks.put.mockImplementation((_url: string, body: Record<string, unknown>) => {
+      if (body.parentBoundaryMode === "ROLLUP") boundaryLocked = false;
+      return Promise.resolve({ ...lockedParent, parentBoundaryMode: boundaryLocked ? "LOCKED" : "ROLLUP" });
+    });
     mocks.get.mockImplementation((url: string) => {
       if (url.includes("/gantt-tasks/resource-schedule") && url.includes("includeCandidates=1")) {
+        if (!boundaryLocked) {
+          return Promise.resolve({
+            revision: 8,
+            snapshotHash: "unlocked-parent-preview",
+            conflicts: [],
+            issues: [],
+            durationSuggestions: [],
+            durationSuggestionIssues: [],
+            candidates: [{
+              id: "unlocked-parent-candidate",
+              kind: "FORMAL",
+              title: "正式排期",
+              explanation: "测试解除锁定后重新计算",
+              relativeSchedule: false,
+              applicable: true,
+              changes: [],
+              remainingConflicts: [],
+              issues: [],
+              resourceConstrainedTaskIds: [],
+              resourceCriticalChainTaskIds: [],
+              resourceCriticalChainLinks: [],
+              criticalTaskIds: [],
+              taskExplanations: [],
+              metrics: { completionDate: "2026-07-24", delayedDays: 0, movedTaskCount: 0, totalShiftDays: 0 },
+            }],
+          });
+        }
         return Promise.resolve({
           revision: 7,
           snapshotHash: "locked-parent-preview",
@@ -640,7 +683,10 @@ describe("ProjectGanttPanel", () => {
       if (url.endsWith("/members")) return Promise.resolve([]);
       if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
       if (url.endsWith("/deletions")) return Promise.resolve([]);
-      return Promise.resolve([lockedParent, childTask]);
+      return Promise.resolve([
+        boundaryLocked ? lockedParent : { ...lockedParent, parentBoundaryMode: "ROLLUP" as const },
+        childTask,
+      ]);
     });
 
     render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
@@ -649,8 +695,126 @@ describe("ProjectGanttPanel", () => {
     await screen.findByTestId("gantt-timeline");
     await user.click(screen.getByRole("button", { name: /自动排期/ }));
     await screen.findByText("父任务边界：已锁定 · 根任务");
-    expect(screen.getByRole("button", { name: "解除锁定边界" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "扩大完成边界" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "解除锁定并重算" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "调整边界后重算" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "解除锁定并重算" }));
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith(
+      "/api/projects/project-1/gantt-tasks/task-1",
+      { parentBoundaryMode: "ROLLUP" },
+    ));
+    const resourcePreviewCalls = () => mocks.get.mock.calls.filter(([url]) => (
+      String(url).includes("/gantt-tasks/resource-schedule")
+      && String(url).includes("includeCandidates=1")
+    ));
+    expect(resourcePreviewCalls()).toHaveLength(1);
+    afterSnapshot.resolve({ snapshotId: "locked-parent-after-snapshot" });
+    await waitFor(() => expect(resourcePreviewCalls()).toHaveLength(2));
+    await waitFor(() => expect(screen.queryByText("父任务边界：已锁定 · 根任务")).not.toBeInTheDocument());
+  });
+
+  it("does not restore a stale resource response after applying a candidate", async () => {
+    const staleRefresh = deferred<Record<string, unknown>>();
+    let backgroundResourceRequestCount = 0;
+    const candidate = {
+      id: "formal-candidate",
+      kind: "FORMAL" as const,
+      title: "正式排期",
+      explanation: "测试候选应用",
+      relativeSchedule: false,
+      applicable: true,
+      changes: [],
+      remainingConflicts: [],
+      issues: [],
+      resourceConstrainedTaskIds: [],
+      resourceCriticalChainTaskIds: [],
+      resourceCriticalChainLinks: [],
+      criticalTaskIds: [],
+      taskExplanations: [],
+      metrics: { completionDate: "2026-07-24", delayedDays: 0, movedTaskCount: 0, totalShiftDays: 0 },
+    };
+    const currentAnalysis = {
+      revision: 1,
+      snapshotHash: "current-analysis",
+      conflicts: [],
+      issues: [],
+      candidates: [candidate],
+      durationSuggestions: [],
+      durationSuggestionIssues: [],
+    };
+    const staleAnalysis = {
+      ...currentAnalysis,
+      candidates: [],
+      issues: [{
+        id: "stale-issue",
+        code: "STALE",
+        severity: "WARNING" as const,
+        taskIds: [rootTask.id],
+        message: "旧资源响应不应复活",
+        suggestion: "",
+      }],
+    };
+    mocks.get.mockImplementation((url: string) => {
+      if (url.includes("/gantt-tasks/resource-schedule")) {
+        if (url.includes("includeCandidates=1")) return Promise.resolve(currentAnalysis);
+        backgroundResourceRequestCount += 1;
+        return backgroundResourceRequestCount === 1
+          ? Promise.resolve({ ...currentAnalysis, candidates: [] })
+          : staleRefresh.promise;
+      }
+      if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      if (url.endsWith("/deletions")) return Promise.resolve([]);
+      return Promise.resolve([rootTask]);
+    });
+    let snapshotCount = 0;
+    mocks.post.mockImplementation((url: string) => {
+      if (url.endsWith("/history/snapshots")) {
+        snapshotCount += 1;
+        return Promise.resolve({ snapshotId: `candidate-snapshot-${snapshotCount}` });
+      }
+      return Promise.resolve({});
+    });
+
+    render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
+
+    const user = userEvent.setup();
+    await screen.findByTestId("gantt-timeline");
+    await user.click(screen.getByRole("button", { name: /自动排期/ }));
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() => expect(backgroundResourceRequestCount).toBe(2));
+    await user.click(await screen.findByRole("button", { name: "应用正式排期" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "正式自动排期预览" })).not.toBeInTheDocument());
+
+    staleRefresh.resolve(staleAnalysis);
+    await waitFor(() => expect(screen.getByRole("button", { name: /自动排期/ })).toHaveTextContent("自动排期 0"));
+    expect(screen.queryByText("旧资源响应不应复活")).not.toBeInTheDocument();
+  });
+
+  it("ignores a resource response from the previous project after switching projects", async () => {
+    const oldProjectResource = deferred<Record<string, unknown>>();
+    mocks.get.mockImplementation((url: string) => {
+      if (url.includes("/api/projects/project-1/gantt-tasks/resource-schedule")) return oldProjectResource.promise;
+      if (url.includes("/api/projects/project-2/gantt-tasks") && !url.endsWith("/baseline")) {
+        return Promise.reject(new Error("项目切换测试不加载旧 WBS"));
+      }
+      if (url.endsWith("/export")) return Promise.resolve({ mppExport: false });
+      if (url.endsWith("/members")) return Promise.resolve([]);
+      if (url.endsWith("/gantt-settings")) return Promise.resolve({ calendarMode: "CALENDAR_DAYS", hoursPerDay: 7.5 });
+      if (url.endsWith("/deletions")) return Promise.resolve([]);
+      return Promise.resolve([rootTask]);
+    });
+
+    const view = render(<ProjectGanttPanel projectId="project-1" projectStatus={ProjectStatus.IN_PROGRESS} />);
+    const user = userEvent.setup();
+    await screen.findByTestId("gantt-timeline");
+    await user.click(screen.getByRole("button", { name: /自动排期/ }));
+    view.rerender(<ProjectGanttPanel projectId="project-2" projectStatus={ProjectStatus.IN_PROGRESS} />);
+    await screen.findByTestId("gantt-timeline");
+
+    oldProjectResource.reject(new Error("旧项目资源响应失败"));
+    await waitFor(() => expect(screen.queryByText("资源排期分析失败")).not.toBeInTheDocument());
+    expect(screen.queryByRole("dialog", { name: "正式自动排期预览" })).not.toBeInTheDocument();
   });
 
   it("does not let a stalled history snapshot block applying duration suggestions", async () => {

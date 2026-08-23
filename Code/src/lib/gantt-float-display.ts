@@ -15,7 +15,8 @@ const clampPositiveFloatMinutes = (
   availableMinutes: number,
 ) => {
   const normalized = normalizeFloatMinutes(floatMinutes);
-  if (normalized == null || normalized <= 0) return normalized;
+  if (normalized == null) return null;
+  if (normalized <= 0) return 0;
   return Math.min(normalized, Math.max(0, availableMinutes));
 };
 
