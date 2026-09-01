@@ -2,6 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { AlertTriangle } from "lucide-react";
 import { ProjectStatus } from "@/domain/enums";
 import { PROJECT_STATUS_LABEL } from "@/lib/constants";
 import { resolveDetailGroup } from "@/lib/navigation";
@@ -9,6 +10,7 @@ import { useCurrentProject } from "@/contexts/current-project-context";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -19,12 +21,14 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useConfirm } from "@/components/confirm-provider";
+import { ModalDialog } from "@/components/modal-dialog";
 import { usePermission } from "@/lib/use-permission";
 import { api } from "@/lib/api-client";
 import { ProjectGanttPanel } from "@/components/project-gantt-panel";
 import { ProjectBudgetPanel } from "@/components/project-budget-panel";
 import { ProjectDocumentListPanel } from "@/components/project-document-list-panel";
 import { ProjectEarnedValuePanel } from "@/components/project-earned-value-panel";
+import { ProjectExecutionPanel } from "@/components/project-execution-panel";
 
 interface Project {
   id: string;
@@ -39,12 +43,15 @@ interface Project {
   status: ProjectStatus;
   createdAt: string;
   updatedAt: string;
+  ganttTasks?: Array<{ id: string; finishDate?: string }>;
 }
 
 interface ProjectMember {
   id: string;
   projectId: string;
+  accountId?: string | null;
   roleName: string;
+  roleNames?: string[];
   personName: string;
   createdAt: string;
 }
@@ -54,6 +61,16 @@ interface AccountItem {
   displayName: string;
   enabled: boolean;
   assignedRoleNames: string[];
+}
+
+interface MemberRemovalImpact {
+  member: Pick<ProjectMember, "id" | "accountId" | "personName" | "roleName">;
+  replacementCandidates: Array<Pick<ProjectMember, "id" | "accountId" | "personName" | "roleName">>;
+  defaultReplacementMemberId: string | null;
+  tasks: Array<{ id: string; taskCode: string; taskName: string }>;
+  weeklyItems: Array<{ id: string; matterCode: string; title: string }>;
+  risks: Array<{ id: string; riskCode: string; riskName: string }>;
+  totalAssignments: number;
 }
 
 export default function ProjectDetailPage() {
@@ -143,6 +160,7 @@ const ProjectDetailContent = () => {
       {activeGroup === "project" && <ProjectInfoTab projectId={projectId} onRefresh={fetchProject} />}
       {activeGroup === "performance" && <ProjectEarnedValuePanel projectId={projectId} projectStatus={project.status} />}
       {activeGroup === "gantt" && <ProjectGanttPanel projectId={projectId} projectStatus={project.status} />}
+      {activeGroup === "execution" && <ProjectExecutionPanel projectId={projectId} projectStatus={project.status} />}
       {activeGroup === "documents" && (
         <ProjectDocumentListPanel projectId={projectId} projectStatus={project.status} />
       )}
@@ -159,12 +177,15 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
   const { can, canAny } = usePermission();
   const [editOpen, setEditOpen] = useState(false);
   const [memberDialogOpen, setMemberDialogOpen] = useState(false);
+  const [memberRemovalImpact, setMemberRemovalImpact] = useState<MemberRemovalImpact | null>(null);
+  const [memberRemovalLoadingId, setMemberRemovalLoadingId] = useState<string | null>(null);
 
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [clientName, setClientName] = useState("");
   const [amount, setAmount] = useState(0);
   const [startDate, setStartDate] = useState("");
+  const [expectedEndDate, setExpectedEndDate] = useState("");
 
   const fetchProject = useCallback(async () => {
     try {
@@ -178,6 +199,7 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
       setClientName(data.clientName);
       setAmount(data.amountWan);
       setStartDate(data.startDate);
+      setExpectedEndDate(data.expectedEndDate);
     } catch {
       // handled
     } finally {
@@ -189,6 +211,12 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
     fetchProject();
   }, [fetchProject]);
 
+  useEffect(() => {
+    const refreshMembers = () => { void fetchProject(); };
+    window.addEventListener("focus", refreshMembers);
+    return () => window.removeEventListener("focus", refreshMembers);
+  }, [fetchProject]);
+
   if (loading || !project) {
     return <div className="text-sm text-slate-500">加载中...</div>;
   }
@@ -196,8 +224,19 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
   const canEdit = can("project-info:edit");
   const canManageStatus = canAny(["project-info:start", "project-info:complete", "project-info:void", "project-info:restore"]);
   const canManageMembers = can("project-members:create") && can("project-members:delete");
+  const latestWbsFinishDate = (project.ganttTasks ?? []).reduce(
+    (latest, task) => task.finishDate && task.finishDate > latest ? task.finishDate : latest,
+    "",
+  );
+  const wbsExceedsExpectedEnd = Boolean(
+    project.expectedEndDate && latestWbsFinishDate && latestWbsFinishDate > project.expectedEndDate,
+  );
 
   const handleUpdate = async () => {
+    if (startDate && expectedEndDate && expectedEndDate < startDate) {
+      alert("预计结项时间不能早于项目 T0");
+      return;
+    }
     try {
       await api.put(`/api/projects/${projectId}`, {
         name,
@@ -205,6 +244,7 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
         clientName,
         amountWan: amount,
         startDate,
+        expectedEndDate,
       });
       setEditOpen(false);
       await fetchProject();
@@ -231,11 +271,24 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
     };
 
     try {
-      await api.put(`/api/projects/${projectId}`, { status: statusMap[action] });
+      const result = await api.put<{ approvalRequired?: boolean }>(`/api/projects/${projectId}`, { status: statusMap[action] });
+      if (result.approvalRequired) alert("项目状态变更审批已发起，可在审批中心查看进度。");
       await fetchProject();
       onRefresh();
     } catch (error) {
       alert(error instanceof Error ? error.message : "操作失败");
+    }
+  };
+
+  const openMemberRemoval = async (member: ProjectMember) => {
+    setMemberRemovalLoadingId(member.id);
+    try {
+      const impact = await api.get<MemberRemovalImpact>(`/api/projects/${projectId}/members/${member.id}`);
+      setMemberRemovalImpact(impact);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "读取成员负责事项失败");
+    } finally {
+      setMemberRemovalLoadingId(null);
     }
   };
 
@@ -281,12 +334,22 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
               <InlineEditField label="合同金额(万元)">
                 <Input type="number" value={amount} onChange={(e) => setAmount(Number(e.target.value))} className="h-8 text-xs" />
               </InlineEditField>
-              <InlineEditField label="开始时间" required>
-                <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="h-8 text-xs" required />
+              <InlineEditField label="项目 T0">
+                <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="h-8 text-xs" />
               </InlineEditField>
               <InlineEditField label="预计结项">
-                <span className="text-muted-foreground">-</span>
+                <div>
+                  <Input type="date" value={expectedEndDate} min={startDate || undefined} onChange={(e) => setExpectedEndDate(e.target.value)} className="h-8 text-xs" />
+                  {latestWbsFinishDate && expectedEndDate && latestWbsFinishDate > expectedEndDate && (
+                    <div className="mt-1 flex items-center gap-1 text-[11px] text-amber-500">
+                      <AlertTriangle className="size-3" />WBS 计划最晚完成日为 {latestWbsFinishDate}
+                    </div>
+                  )}
+                </div>
               </InlineEditField>
+              <p className="col-span-full text-[11px] leading-4 text-muted-foreground">
+                项目 T0 未确定时可留空。正式自动排期将显示为 T0、T0+N；后续填写项目 T0 后，系统会按项目日历换算为具体日期。
+              </p>
               <div className="flex items-center gap-2">
                 <span className="text-muted-foreground min-w-[100px]">状态：</span>
                 <Badge>{PROJECT_STATUS_LABEL[project.status]}</Badge>
@@ -298,8 +361,12 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
               <FieldRow label="项目编号" value={project.code || "-"} />
               <FieldRow label="甲方单位" value={project.clientName || "-"} />
               <FieldRow label="合同金额(万元)" value={String(project.amountWan)} />
-              <FieldRow label="开始时间" value={project.startDate || "-"} />
-              <FieldRow label="预计结项" value={project.expectedEndDate || "-"} />
+              <FieldRow label="项目 T0" value={project.startDate || "未确定（使用相对排期）"} />
+              <FieldRow
+                label="预计结项"
+                value={project.expectedEndDate || "-"}
+                warning={wbsExceedsExpectedEnd ? `WBS 计划最晚完成日为 ${latestWbsFinishDate}，已晚于预计结项时间` : undefined}
+              />
               <div className="flex items-center gap-2">
                 <span className="text-muted-foreground">状态：</span>
                 <Badge>{PROJECT_STATUS_LABEL[project.status]}</Badge>
@@ -357,7 +424,7 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
             <TableBody>
               {members.map((m) => (
                 <TableRow key={m.id}>
-                  <TableCell>{m.roleName}</TableCell>
+                  <TableCell>{m.roleNames?.join("、") || m.roleName}</TableCell>
                   <TableCell className="font-medium">{m.personName}</TableCell>
                   <TableCell>
                     {can("project-members:delete") && project.status !== ProjectStatus.COMPLETED && project.status !== ProjectStatus.VOIDED && (
@@ -365,17 +432,10 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
                         variant="ghost"
                         size="sm"
                         className="h-7 text-xs text-destructive"
-                        onClick={async () => {
-                          if (!(await confirm(`确认移除成员「${m.personName}」（${m.roleName}）？`))) return;
-                          try {
-                            await api.delete(`/api/projects/${projectId}/members/${m.id}`);
-                            await fetchProject();
-                          } catch (err) {
-                            alert(err instanceof Error ? err.message : "移除失败");
-                          }
-                        }}
+                        disabled={memberRemovalLoadingId === m.id}
+                        onClick={() => void openMemberRemoval(m)}
                       >
-                        移除
+                        {memberRemovalLoadingId === m.id ? "检查中..." : "移除"}
                       </Button>
                     )}
                   </TableCell>
@@ -396,6 +456,7 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
       {memberDialogOpen && (
         <AddMemberDialog
           projectId={projectId}
+          existingAccountIds={members.flatMap((member) => member.accountId ? [member.accountId] : [])}
           onClose={() => setMemberDialogOpen(false)}
           onSuccess={async () => {
             setMemberDialogOpen(false);
@@ -403,14 +464,153 @@ const ProjectInfoTab = ({ projectId, onRefresh }: { projectId: string; onRefresh
           }}
         />
       )}
+      {memberRemovalImpact && (
+        <RemoveMemberDialog
+          key={memberRemovalImpact.member.id}
+          projectId={projectId}
+          impact={memberRemovalImpact}
+          onClose={() => setMemberRemovalImpact(null)}
+          onSuccess={async () => {
+            setMemberRemovalImpact(null);
+            await fetchProject();
+            onRefresh();
+          }}
+        />
+      )}
     </div>
   );
 };
 
-const FieldRow = ({ label, value }: { label: string; value: string }) => (
+const RemoveMemberDialog = ({
+  projectId,
+  impact,
+  onClose,
+  onSuccess,
+}: {
+  projectId: string;
+  impact: MemberRemovalImpact;
+  onClose: () => void;
+  onSuccess: () => Promise<void>;
+}) => {
+  const [replacementMemberId, setReplacementMemberId] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const needsAssignmentChoice = impact.totalAssignments > 0;
+  const canSubmit = !needsAssignmentChoice || Boolean(replacementMemberId);
+
+  const removeMember = async () => {
+    if (!canSubmit) return;
+    setSubmitting(true);
+    try {
+      const replacement = replacementMemberId || "__UNASSIGNED__";
+      const query = new URLSearchParams({
+        confirmed: "true",
+        replacementMemberId: replacement,
+      });
+      await api.delete(`/api/projects/${projectId}/members/${impact.member.id}?${query.toString()}`);
+      await onSuccess();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "移除失败");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const responsibilityGroups = [
+    {
+      label: "WBS 任务",
+      items: impact.tasks.map((task) => `${task.taskCode || "无编号"} · ${task.taskName || "未命名任务"}`),
+    },
+    {
+      label: "项目事项",
+      items: impact.weeklyItems.map((item) => `${item.matterCode || "无编号"} · ${item.title || "未命名事项"}`),
+    },
+    {
+      label: "风险",
+      items: impact.risks.map((risk) => `${risk.riskCode || "无编号"} · ${risk.riskName || "未命名风险"}`),
+    },
+  ].filter((group) => group.items.length > 0);
+
+  return (
+    <ModalDialog
+      open
+      title="移除项目成员"
+      onClose={submitting ? () => undefined : onClose}
+      size="md"
+      footer={
+        <>
+          <Button type="button" variant="outline" size="sm" disabled={submitting} onClick={onClose}>取消</Button>
+          <Button
+            type="button"
+            variant="destructive"
+            size="sm"
+            disabled={!canSubmit || submitting}
+            onClick={() => void removeMember()}
+          >
+            {submitting ? "交接中..." : "确认移除"}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4 text-sm">
+        <div className="flex items-start gap-3 rounded-md border border-amber-500/35 bg-amber-500/8 px-3 py-3">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" aria-hidden="true" />
+          <div className="min-w-0">
+            <div className="font-medium">将移除 {impact.member.personName}（{impact.member.roleName}）</div>
+            <div className="mt-1 text-xs leading-5 text-muted-foreground">
+              {needsAssignmentChoice
+                ? `当前发现 ${impact.totalAssignments} 项负责关系，删除前必须选择接替负责人或未分配。`
+                : "未发现该成员的负责关系。"}
+            </div>
+          </div>
+        </div>
+
+        {responsibilityGroups.length > 0 && (
+          <div className="max-h-64 space-y-3 overflow-auto border-y border-border py-3">
+            {responsibilityGroups.map((group) => (
+              <div key={group.label} className="grid gap-1.5 sm:grid-cols-[92px_1fr]">
+                <div className="text-xs font-medium text-muted-foreground">{group.label}（{group.items.length}）</div>
+                <div className="space-y-1">
+                  {group.items.map((item) => (
+                    <div key={item} className="truncate text-xs" title={item}>{item}</div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {needsAssignmentChoice && (
+          <label className="grid gap-1.5">
+            <span className="text-xs font-medium text-muted-foreground">接替负责人</span>
+            <Select
+              value={replacementMemberId}
+              onChange={(event) => setReplacementMemberId(event.target.value)}
+              aria-label="接替负责人"
+            >
+              <option value="">请选择</option>
+              <option value="__UNASSIGNED__">未分配</option>
+              {impact.replacementCandidates.map((candidate) => (
+                <option key={candidate.id} value={candidate.id}>
+                  {candidate.personName}（{candidate.roleName}）
+                </option>
+              ))}
+            </Select>
+          </label>
+        )}
+      </div>
+    </ModalDialog>
+  );
+};
+
+const FieldRow = ({ label, value, warning }: { label: string; value: string; warning?: string }) => (
   <div className="flex items-center gap-2">
     <span className="text-muted-foreground min-w-[100px]">{label}：</span>
     <span className="font-medium">{value}</span>
+    {warning && (
+      <span title={warning} aria-label={warning}>
+        <AlertTriangle className="size-3.5 text-amber-500" />
+      </span>
+    )}
   </div>
 );
 
@@ -445,61 +645,54 @@ const FormField = ({ label, required, children }: { label: string; required?: bo
 
 const AddMemberDialog = ({
   projectId,
+  existingAccountIds,
   onClose,
   onSuccess,
 }: {
   projectId: string;
+  existingAccountIds: string[];
   onClose: () => void;
   onSuccess: () => Promise<void>;
 }) => {
-  const [roleName, setRoleName] = useState("");
-  const [personName, setPersonName] = useState("");
-  const [roles, setRoles] = useState<{ id: string; roleName: string }[]>([]);
+  const [accountId, setAccountId] = useState("");
   const [accounts, setAccounts] = useState<AccountItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    Promise.all([
-      api.get<{ id: string; roleName: string }[]>("/api/role-config"),
-      api.get<AccountItem[]>("/api/accounts"),
-    ])
-      .then(([roleData, accountData]) => {
-        setRoles(roleData.map((role) => ({ id: role.id, roleName: role.roleName })));
-        setAccounts(accountData);
-        if (roleData.length > 0) setRoleName(roleData[0].roleName);
-      })
+    api.get<AccountItem[]>("/api/accounts")
+      .then((accountData) => setAccounts(accountData))
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
 
   const candidates = useMemo(() => {
-    const seen = new Set<string>();
+    const existingIds = new Set(existingAccountIds);
     return accounts
-      .filter((account) => account.enabled && account.assignedRoleNames.includes(roleName))
-      .filter((account) => {
-        if (seen.has(account.displayName)) return false;
-        seen.add(account.displayName);
-        return true;
-      });
-  }, [accounts, roleName]);
+      .filter((account) => account.enabled && account.assignedRoleNames.length > 0)
+      .filter((account) => !existingIds.has(account.id));
+  }, [accounts, existingAccountIds]);
 
   useEffect(() => {
-    if (!personName) return;
-    if (!candidates.some((account) => account.displayName === personName)) {
-      setPersonName("");
+    if (!accountId) return;
+    if (!candidates.some((account) => account.id === accountId)) {
+      setAccountId("");
     }
-  }, [candidates, personName]);
+  }, [accountId, candidates]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!roleName || !personName) {
-      alert("请选择角色和人员");
+    if (!accountId) {
+      alert("请选择人员");
       return;
     }
     setSubmitting(true);
     try {
-      await api.post(`/api/projects/${projectId}/members`, { roleName, personName });
+      const account = candidates.find((candidate) => candidate.id === accountId);
+      await api.post(`/api/projects/${projectId}/members`, {
+        personName: account?.displayName,
+        accountId,
+      });
       await onSuccess();
     } catch (err) {
       alert(err instanceof Error ? err.message : "添加失败");
@@ -519,36 +712,22 @@ const AddMemberDialog = ({
             <div className="py-6 text-center text-xs text-muted-foreground">加载中...</div>
           ) : (
             <form onSubmit={handleSubmit} className="space-y-3">
-              <FormField label="角色" required>
-                <select
-                  value={roleName}
-                  onChange={(e) => {
-                    setRoleName(e.target.value);
-                    setPersonName("");
-                  }}
-                  className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
-                >
-                  {roles.map((r) => (
-                    <option key={r.id} value={r.roleName}>{r.roleName}</option>
-                  ))}
-                </select>
-              </FormField>
               <FormField label="人员" required>
                 {candidates.length === 0 ? (
                   <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                    该角色暂无可用账号，请在「后台账号管理」中新增账号或为账号分配该项目角色。
+                    暂无可添加账号。账号必须已启用、拥有至少一个有效角色，且不能在同一项目重复添加。
                   </div>
                 ) : (
                   <select
-                    value={personName}
-                    onChange={(e) => setPersonName(e.target.value)}
+                    value={accountId}
+                    onChange={(e) => setAccountId(e.target.value)}
                     className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
                     required
                   >
                     <option value="">请选择人员</option>
                     {candidates.map((account) => (
-                      <option key={account.id} value={account.displayName}>
-                        {account.displayName}
+                      <option key={account.id} value={account.id}>
+                        {account.displayName}（{account.assignedRoleNames.join("、")}）
                       </option>
                     ))}
                   </select>

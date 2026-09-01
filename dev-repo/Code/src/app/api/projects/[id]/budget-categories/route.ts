@@ -1,8 +1,8 @@
 import { NextRequest } from "next/server";
 
 import { prisma } from "@/lib/prisma";
-import { getUserFromRequest } from "@/lib/auth";
-import { ensureMutableProject, err, notFound, ok, unauthorized } from "@/lib/api-utils";
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
+import { ensureMutableProject, err, notFound, ok, unauthorizedFromRequest, forbidden } from "@/lib/api-utils"
 import { BudgetCategoryKind } from "@/domain/enums";
 
 const VALID_KINDS = new Set<string>(Object.values(BudgetCategoryKind));
@@ -33,8 +33,9 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const user = getUserFromRequest(req);
-  if (!user) return unauthorized();
+  const user = await getAuthenticatedUser(req);
+  if (!user) return unauthorizedFromRequest(req);
+  if (!await userHasPermission(user, "project-budget:view")) return forbidden();
 
   const project = await prisma.project.findUnique({ where: { id } });
   if (!project) return notFound("项目");
@@ -52,8 +53,9 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const user = getUserFromRequest(req);
-  if (!user) return unauthorized();
+  const user = await getAuthenticatedUser(req);
+  if (!user) return unauthorizedFromRequest(req);
+  if (!await userHasPermission(user, "project-budget:create")) return forbidden();
 
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;

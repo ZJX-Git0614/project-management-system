@@ -65,69 +65,79 @@ const selectedHierarchyRoots = <T extends GanttHierarchyTask>(
   });
 };
 
-const setSiblingOrder = <T extends GanttHierarchyTask>(
-  tasks: Map<string, T>,
-  siblingIds: string[],
-  parentId: string | null,
-) => {
-  siblingIds.forEach((taskId, index) => {
-    const task = tasks.get(taskId);
-    if (!task) return;
-    tasks.set(taskId, {
-      ...task,
-      parentId,
-      sortOrder: index + 1,
-    });
-  });
-};
-
 export const changeGanttTaskHierarchy = <T extends GanttHierarchyTask>(
   sourceTasks: T[],
   selectedTaskIds: string[],
   direction: GanttHierarchyDirection,
 ) => {
   const original = new Map(sourceTasks.map((task) => [task.id, task]));
-  const tasks = new Map(sourceTasks.map((task) => [task.id, { ...task }]));
-  const selectedRoots = selectedHierarchyRoots(tasks, selectedTaskIds);
+  const sourceById = new Map(sourceTasks.map((task) => [task.id, { ...task }]));
+  const orderedIds = flattenHierarchyIds(sourceById);
+  const selectedRoots = selectedHierarchyRoots(sourceById, selectedTaskIds);
   const selectedRootSet = new Set(selectedRoots);
+  const depthById = new Map<string, number>();
+  const resolveDepth = (taskId: string, visiting = new Set<string>()): number => {
+    const cached = depthById.get(taskId);
+    if (cached !== undefined) return cached;
+    const parentId = sourceById.get(taskId)?.parentId ?? null;
+    if (!parentId || !sourceById.has(parentId) || visiting.has(parentId)) {
+      depthById.set(taskId, 0);
+      return 0;
+    }
+    const depth = resolveDepth(parentId, new Set(visiting).add(taskId)) + 1;
+    depthById.set(taskId, depth);
+    return depth;
+  };
+  orderedIds.forEach((taskId) => resolveDepth(taskId));
+
+  const depthDeltaById = new Map<string, number>();
   const movedTaskIds: string[] = [];
-  const outdentAnchorByParent = new Map<string, string>();
 
   for (const taskId of selectedRoots) {
-    const task = tasks.get(taskId);
+    const task = sourceById.get(taskId);
     if (!task) continue;
+    const taskDepth = depthById.get(taskId) ?? 0;
 
     if (direction === "INDENT") {
       const currentParentId = task.parentId ?? null;
-      const siblings = orderedSiblingIds(tasks, currentParentId);
+      const siblings = orderedSiblingIds(sourceById, currentParentId);
       const taskIndex = siblings.indexOf(taskId);
       const previousSiblingId = taskIndex > 0 ? siblings[taskIndex - 1] : null;
       if (!previousSiblingId || selectedRootSet.has(previousSiblingId)) continue;
-
-      setSiblingOrder(tasks, siblings.filter((id) => id !== taskId), currentParentId);
-      const newSiblings = orderedSiblingIds(tasks, previousSiblingId);
-      setSiblingOrder(tasks, [...newSiblings, taskId], previousSiblingId);
-      movedTaskIds.push(taskId);
+    } else if (taskDepth === 0) {
       continue;
     }
 
-    const oldParentId = task.parentId ?? null;
-    if (!oldParentId) continue;
-    const oldParent = tasks.get(oldParentId);
-    if (!oldParent) continue;
-
-    const oldSiblings = orderedSiblingIds(tasks, oldParentId).filter((id) => id !== taskId);
-    setSiblingOrder(tasks, oldSiblings, oldParentId);
-
-    const newParentId = oldParent.parentId ?? null;
-    const targetSiblings = orderedSiblingIds(tasks, newParentId).filter((id) => id !== taskId);
-    const anchorId = outdentAnchorByParent.get(oldParentId) ?? oldParentId;
-    const anchorIndex = targetSiblings.indexOf(anchorId);
-    const insertAt = anchorIndex >= 0 ? anchorIndex + 1 : targetSiblings.length;
-    targetSiblings.splice(insertAt, 0, taskId);
-    setSiblingOrder(tasks, targetSiblings, newParentId);
-    outdentAnchorByParent.set(oldParentId, taskId);
+    const rootIndex = orderedIds.indexOf(taskId);
+    const delta = direction === "INDENT" ? 1 : -1;
+    for (let index = rootIndex; index < orderedIds.length; index += 1) {
+      const branchTaskId = orderedIds[index];
+      const branchDepth = depthById.get(branchTaskId) ?? 0;
+      if (index > rootIndex && branchDepth <= taskDepth) break;
+      depthDeltaById.set(branchTaskId, (depthDeltaById.get(branchTaskId) ?? 0) + delta);
+    }
     movedTaskIds.push(taskId);
+  }
+
+  if (movedTaskIds.length === 0) {
+    return { tasks: sourceTasks, changedTasks: [] as T[], movedTaskIds };
+  }
+
+  const tasks = new Map(sourceTasks.map((task) => [task.id, { ...task }]));
+  const latestTaskAtDepth: string[] = [];
+  const siblingCursor = new Map<string, number>();
+  for (const taskId of orderedIds) {
+    const task = tasks.get(taskId);
+    if (!task) continue;
+    const originalDepth = depthById.get(taskId) ?? 0;
+    const desiredDepth = Math.max(0, Math.min(originalDepth + (depthDeltaById.get(taskId) ?? 0), latestTaskAtDepth.length));
+    const parentId = desiredDepth > 0 ? latestTaskAtDepth[desiredDepth - 1] ?? null : null;
+    const key = parentKey(parentId);
+    const sortOrder = (siblingCursor.get(key) ?? 0) + 1;
+    siblingCursor.set(key, sortOrder);
+    tasks.set(taskId, { ...task, parentId, sortOrder });
+    latestTaskAtDepth[desiredDepth] = taskId;
+    latestTaskAtDepth.length = desiredDepth + 1;
   }
 
   const changedTasks = [...tasks.values()].filter((task) => {
@@ -156,7 +166,7 @@ const categoryLeaf = (task: Pick<GanttHierarchyCategorizedTask, "taskCategory" |
 
 /**
  * Rebuilds only the moved branches' category paths after a hierarchy change.
- * The terminal category remains user-owned; obsolete ancestor segments are replaced.
+ * The terminal category is retained while obsolete ancestor segments are replaced.
  */
 export const synchronizeGanttTaskCategories = <T extends GanttHierarchyCategorizedTask>(
   tasks: T[],
@@ -204,4 +214,52 @@ export const synchronizeGanttTaskCategories = <T extends GanttHierarchyCategoriz
       ? { ...task, taskCategory: resolveCategory(task.id) }
       : task
   ));
+};
+
+/** Keeps category paths aligned when a task name used as a category segment changes. */
+export const synchronizeGanttTaskCategoriesAfterNameChange = <T extends GanttHierarchyCategorizedTask>(
+  tasks: T[],
+  taskId: string,
+  previousName: string,
+  nextName: string,
+): T[] => {
+  const before = previousName.trim();
+  const after = nextName.trim();
+  if (!after || before === after) return tasks;
+
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
+  if (!taskById.has(taskId)) return tasks;
+
+  const childIdsByParentId = new Map<string, string[]>();
+  tasks.forEach((task) => {
+    if (!task.parentId) return;
+    childIdsByParentId.set(task.parentId, [...(childIdsByParentId.get(task.parentId) ?? []), task.id]);
+  });
+
+  const affectedTaskIds = new Set<string>();
+  const visit = (id: string) => {
+    if (affectedTaskIds.has(id)) return;
+    affectedTaskIds.add(id);
+    (childIdsByParentId.get(id) ?? []).forEach(visit);
+  };
+  visit(taskId);
+
+  return tasks.map((task) => {
+    if (!affectedTaskIds.has(task.id)) return task;
+
+    const category = task.taskCategory.trim();
+    if (!before) {
+      return task.id === taskId && !category
+        ? { ...task, taskCategory: after }
+        : task;
+    }
+
+    const nextCategory = category
+      .split("/")
+      .map((segment) => segment.trim())
+      .filter(Boolean)
+      .map((segment) => segment === before ? after : segment)
+      .join(" / ");
+    return nextCategory !== category ? { ...task, taskCategory: nextCategory } : task;
+  });
 };

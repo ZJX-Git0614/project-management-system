@@ -1,7 +1,14 @@
 "use client";
 
 import { type ReactNode } from "react";
-import { ModalDialog } from "./modal-dialog";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -23,31 +30,23 @@ export function ConfirmDialog({
   onCancel,
 }: ConfirmDialogProps) {
   return (
-    <ModalDialog
-      open={open}
-      title={title}
-      onClose={onCancel}
-      size="sm"
-      footer={
-        <>
-          <button
-            type="button"
-            onClick={onCancel}
-            className="rounded-md border border-slate-300 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
-          >
+    <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onCancel()}>
+      <DialogContent className="max-w-sm gap-0 overflow-hidden p-0">
+        <DialogHeader className="border-b border-border px-5 py-4 pr-14">
+          <DialogTitle>{title}</DialogTitle>
+        </DialogHeader>
+        <div className="px-5 py-5">
+          <p className="whitespace-pre-line text-sm leading-6 text-foreground">{message}</p>
+        </div>
+        <DialogFooter className="border-t border-border bg-background/20 px-5 py-3">
+          <Button type="button" variant="outline" onClick={onCancel}>
             {cancelLabel}
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            className="rounded-md bg-slate-800 px-4 py-2 text-sm text-white hover:bg-slate-700"
-          >
+          </Button>
+          <Button type="button" onClick={onConfirm}>
             {confirmLabel}
-          </button>
-        </>
-      }
-    >
-      <p className="text-sm text-slate-700">{message}</p>
-    </ModalDialog>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

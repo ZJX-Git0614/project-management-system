@@ -1,23 +1,36 @@
 import { rm } from "node:fs/promises"
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getUserFromRequest } from "@/lib/auth"
-import { ok, unauthorized, notFound, ensureMutableProject, isStatusTransitionAllowed } from "@/lib/api-utils"
-import { getOrderedGanttTasks, serializeGanttTask } from "@/lib/gantt-task-service"
+import { ok, err, forbidden, notFound, ensureMutableProject, unauthorizedFromRequest } from "@/lib/api-utils"
+import { APPROVAL_BUSINESS_TYPES, approvalBusinessIdForProjectStatus } from "@/lib/approval-workflow"
+import { serializeApprovalInstance, startApprovalWorkflow } from "@/lib/approval-workflow-server"
+import {
+  getOrderedGanttTasks,
+  materializeProjectGanttRelativeSchedule,
+  refreshProjectGanttDerivedState,
+  serializeGanttTaskList,
+} from "@/lib/gantt-task-service"
 import { getProjectDocumentDirectory } from "@/lib/project-document-storage"
+import { assertProjectStatusTransition, projectStatusActionPermission } from "@/lib/project-lifecycle"
+import { getValidProjectRoleNames, serializeProjectMember } from "@/lib/project-member-view"
+import { getAuthenticatedUser, requireSystemAdmin, userHasPermission } from "@/lib/server-auth"
 
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req)
+  if (!user) return unauthorizedFromRequest(req)
+  if (!await userHasPermission(user, "project-info:view")) return forbidden()
 
   const project = await prisma.project.findUnique({
     where: { id },
     include: {
-      projectMembers: true,
+      projectMembers: {
+        include: { account: { select: { displayName: true, assignedRoleNames: true } } },
+        orderBy: [{ personName: "asc" }, { createdAt: "asc" }],
+      },
       weeklyItems: { orderBy: { dueDate: "asc" } },
       todos: { orderBy: { createdAt: "desc" } },
       operationHistories: { orderBy: { createdAt: "desc" }, take: 50 },
@@ -25,17 +38,17 @@ export async function GET(
   })
 
   if (!project) return notFound("项目")
-  const ganttTasks = await getOrderedGanttTasks(id)
+  const [ganttTasks, validRoleNames] = await Promise.all([
+    getOrderedGanttTasks(id),
+    getValidProjectRoleNames(prisma),
+  ])
 
   return ok({
     ...project,
     createdAt: project.createdAt.toISOString(),
     updatedAt: project.updatedAt.toISOString(),
-    projectMembers: project.projectMembers.map((m) => ({
-      ...m,
-      createdAt: m.createdAt.toISOString(),
-    })),
-    ganttTasks: ganttTasks.map(serializeGanttTask),
+    projectMembers: project.projectMembers.map((member) => serializeProjectMember(member, validRoleNames)),
+    ganttTasks: serializeGanttTaskList(ganttTasks),
     weeklyItems: project.weeklyItems.map((w) => ({
       ...w,
       createdAt: w.createdAt.toISOString(),
@@ -56,21 +69,41 @@ export async function PUT(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req)
+  if (!user) return unauthorizedFromRequest(req)
 
   const existing = await prisma.project.findUnique({ where: { id } })
   if (!existing) return notFound("项目")
 
   const body = await req.json()
   const isOnlyStatusChange = Object.keys(body).length === 1 && body.status !== undefined
-  if (
-    !isOnlyStatusChange ||
-    !isStatusTransitionAllowed(existing.status, body.status)
-  ) {
-    const m = await ensureMutableProject(id)
-    if (m) return m
+  if (body.status !== undefined && !isOnlyStatusChange) {
+    return err("项目状态变更必须单独提交审批，请先保存其他项目信息")
   }
+  const statusPermission = projectStatusActionPermission(existing.status, String(body.status || ""))
+  if (!await userHasPermission(user, isOnlyStatusChange ? statusPermission : "project-info:edit")) return forbidden()
+  if (isOnlyStatusChange) {
+    const targetStatus = String(body.status || "")
+    if (targetStatus === existing.status) {
+      return ok({ ...existing, createdAt: existing.createdAt.toISOString() })
+    }
+    try {
+      assertProjectStatusTransition(existing.status, targetStatus)
+      const approval = await startApprovalWorkflow({
+        projectId: id,
+        businessType: APPROVAL_BUSINESS_TYPES.PROJECT_STATUS_CHANGE,
+        businessId: approvalBusinessIdForProjectStatus(id),
+        requester: user,
+        payload: { fromStatus: existing.status, targetStatus },
+      })
+      return ok({ approvalRequired: true, approvalInstance: serializeApprovalInstance(approval) }, 202)
+    } catch (error) {
+      return err(error instanceof Error ? error.message : "项目状态变更审批发起失败")
+    }
+  }
+
+  const m = await ensureMutableProject(id)
+  if (m) return m
 
   const updateData: Record<string, unknown> = {}
 
@@ -82,24 +115,39 @@ export async function PUT(
   if (body.repairCycleDays !== undefined)
     updateData.repairCycleDays = body.repairCycleDays
   if (body.startDate !== undefined) updateData.startDate = body.startDate
-  if (body.status !== undefined) updateData.status = body.status
-
-  const startDate =
-    body.startDate !== undefined ? body.startDate : existing.startDate
-  const repairCycleDays =
-    body.repairCycleDays !== undefined
-      ? body.repairCycleDays
-      : existing.repairCycleDays
-  if (startDate && repairCycleDays) {
-    const start = new Date(startDate)
-    start.setDate(start.getDate() + Number(repairCycleDays))
-    updateData.expectedEndDate = start.toISOString().split("T")[0]
+  if (body.expectedEndDate !== undefined) updateData.expectedEndDate = body.expectedEndDate
+  if (body.ganttHardFinishDate !== undefined) updateData.ganttHardFinishDate = body.ganttHardFinishDate
+  if (body.startDate !== undefined || body.expectedEndDate !== undefined) {
+    const startDate = String(body.startDate !== undefined ? body.startDate : existing.startDate).trim()
+    const expectedEndDate = String(body.expectedEndDate !== undefined ? body.expectedEndDate : existing.expectedEndDate).trim()
+    if (startDate && !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return err("开始时间格式应为 YYYY-MM-DD，或留空使用相对 T0 排期")
+    if (expectedEndDate && !/^\d{4}-\d{2}-\d{2}$/.test(expectedEndDate)) return err("预计结项时间格式应为 YYYY-MM-DD，或留空")
+    if (startDate && expectedEndDate && expectedEndDate < startDate) return err("预计结项时间不能早于开始时间")
+  }
+  if (body.ganttHardFinishDate !== undefined) {
+    const ganttHardFinishDate = String(body.ganttHardFinishDate ?? "").trim()
+    if (ganttHardFinishDate && !/^\d{4}-\d{2}-\d{2}$/.test(ganttHardFinishDate)) {
+      return err("WBS 完成锚点格式应为 YYYY-MM-DD，或留空取消倒排锚点")
+    }
+    updateData.ganttHardFinishDate = ganttHardFinishDate
   }
 
-  const project = await prisma.project.update({
-    where: { id },
-    data: updateData,
-  })
+  const previousStartDate = String(existing.startDate ?? "").trim()
+  const nextStartDate = String(body.startDate !== undefined ? body.startDate : existing.startDate ?? "").trim()
+  const setConcreteT0 = !/^\d{4}-\d{2}-\d{2}$/.test(previousStartDate)
+    && /^\d{4}-\d{2}-\d{2}$/.test(nextStartDate)
+  const project = await prisma.$transaction(async (tx) => {
+    const updated = await tx.project.update({
+      where: { id },
+      data: updateData,
+    })
+    if (setConcreteT0) {
+      await materializeProjectGanttRelativeSchedule(id, nextStartDate, undefined, tx)
+    } else if (body.startDate !== undefined || body.expectedEndDate !== undefined || body.ganttHardFinishDate !== undefined) {
+      await refreshProjectGanttDerivedState(id, undefined, tx)
+    }
+    return updated
+  }, { timeout: 30_000, maxWait: 10_000 })
 
   return ok({ ...project, createdAt: project.createdAt.toISOString() })
 }
@@ -109,8 +157,8 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await requireSystemAdmin(req)
+  if ("status" in user) return user
 
   const existing = await prisma.project.findUnique({ where: { id } })
   if (!existing) return notFound("项目")

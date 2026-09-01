@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getUserFromRequest } from "@/lib/auth"
-import { ok, err, unauthorized, notFound } from "@/lib/api-utils"
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
+import { ok, err, notFound, unauthorizedFromRequest, forbidden } from "@/lib/api-utils"
 import { renumberRiskCodes } from "@/lib/risk-register-codes"
 
 export async function POST(
@@ -9,8 +9,9 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req);
+  if (!user) return unauthorizedFromRequest(req);
+  if (!await userHasPermission(user, "risk-register:edit")) return forbidden();
 
   const project = await prisma.project.findUnique({ where: { id } })
   if (!project) return notFound("项目")

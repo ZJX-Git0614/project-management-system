@@ -3,11 +3,14 @@ import { describe, expect, it } from "vitest";
 import {
   isScheduleConversionRequest,
   isScheduleMergeRequest,
+  isWbsBaselineApprovalRequest,
+  parseApprovalProcessIntent,
   parseGanttDepthPruneIntent,
   parseGanttTaskCreateIntent,
   parseGanttTaskDeleteIntent,
   parseGanttTaskTextUpdateIntent,
   parseHierarchyIntent,
+  parseProjectStatusApprovalIntent,
   parseRiskCreationName,
   parseRiskDeleteIntent,
   parseRiskStatusUpdateIntent,
@@ -31,6 +34,10 @@ describe("assistant action intent parsing", () => {
       .toEqual({ matterCode: "Matter007", status: "IN_PROGRESS", progress: 35 });
     expect(parseWeeklyItemUpdateIntent("将 Matter007 完成度设置为 35%"))
       .toEqual({ matterCode: "Matter007", status: undefined, progress: 35 });
+    expect(parseWeeklyItemUpdateIntent("将 Matter007 状态改为已完成"))
+      .toEqual({ matterCode: "Matter007", status: "DONE", progress: undefined });
+    expect(parseWeeklyItemUpdateIntent("将 Matter007 状态改为已取消"))
+      .toBeNull();
     expect(parseWeeklyItemUpdateIntent("查看 Matter007"))
       .toBeNull();
   });
@@ -45,14 +52,16 @@ describe("assistant action intent parsing", () => {
       .toBe("供应商交付延期");
     expect(parseRiskCreationName("从计划分析冲突创建风险"))
       .toBeNull();
+    expect(parseRiskCreationName("帮我把以上风险写入风险登记册"))
+      .toBeNull();
     expect(parseRiskCreationName("有哪些风险"))
       .toBeNull();
   });
 
   it("parses safe, fully specified Gantt creation and deletion commands", () => {
-    expect(parseGanttTaskCreateIntent("新增任务：接口联调；任务类别：软件开发；计划开始：2026-08-01；工期：2.5"))
-      .toEqual({ taskName: "接口联调", taskCategory: "软件开发", startDate: "2026-08-01", durationDays: 2.5, parentTaskCode: undefined });
-    expect(parseGanttTaskCreateIntent("新增任务：接口联调；任务类别：软件开发"))
+    expect(parseGanttTaskCreateIntent("新增任务：接口联调；计划开始：2026-08-01；工期：2.5"))
+      .toEqual({ taskName: "接口联调", startDate: "2026-08-01", durationDays: 2.5, parentTaskCode: undefined });
+    expect(parseGanttTaskCreateIntent("新增任务：接口联调"))
       .toBeNull();
     expect(parseGanttTaskDeleteIntent("删除 Task3.2 和 Task4"))
       .toEqual({ taskCodes: ["Task3.2", "Task4"] });
@@ -97,5 +106,30 @@ describe("assistant action intent parsing", () => {
     expect(isScheduleConversionRequest(message)).toBe(true);
     expect(isScheduleMergeRequest(message)).toBe(false);
     expect(isScheduleConversionRequest("把这两个进度计划合并成系统可导入 Excel")).toBe(false);
+  });
+
+  it("parses only explicit approval commands", () => {
+    expect(parseProjectStatusApprovalIntent("申请将当前项目变更为已完成"))
+      .toEqual({ targetStatus: "COMPLETED" });
+    expect(parseProjectStatusApprovalIntent("当前项目是什么状态"))
+      .toBeNull();
+    expect(isWbsBaselineApprovalRequest("帮我申请发布当前 WBS 基线")).toBe(true);
+    expect(isWbsBaselineApprovalRequest("查看当前 WBS 基线")).toBe(false);
+  });
+
+  it("requires an explicit decision and preserves rejection reasons", () => {
+    expect(parseApprovalProcessIntent("同意审批《F26007：发布 WBS 基线》"))
+      .toEqual({
+        action: "approve",
+        approvalQuery: "F26007：发布 WBS 基线",
+        comment: undefined,
+      });
+    expect(parseApprovalProcessIntent("退回审批《F26007：发布 WBS 基线》，原因为计划日期未确认"))
+      .toEqual({
+        action: "return",
+        approvalQuery: "F26007：发布 WBS 基线",
+        comment: "计划日期未确认",
+      });
+    expect(parseApprovalProcessIntent("查看我的待审批")).toBeNull();
   });
 });

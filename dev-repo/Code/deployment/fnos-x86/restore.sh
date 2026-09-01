@@ -2,7 +2,6 @@
 set -eu
 cd "$(dirname "$0")"
 
-APP_IMAGE="ceastar-project-management:2026.07.30.3-amd64"
 DOCUMENT_VOLUME="ceastar-pms_document_storage"
 
 if [ "$#" -ne 2 ] || [ "$2" != "RESTORE" ]; then
@@ -22,6 +21,10 @@ configured_document_volume="$(sed -n 's/^PMS_DOCUMENT_VOLUME=//p' .env | tail -1
 [ -n "$configured_document_volume" ] && DOCUMENT_VOLUME="$configured_document_volume"
 postgres_container="$(docker compose ps -q postgres)"
 [ -n "$postgres_container" ] || { printf 'PostgreSQL is not running.\n' >&2; exit 1; }
+pms_container="$(docker compose ps -q pms)"
+[ -n "$pms_container" ] || { printf 'Ceastar PMS is not running.\n' >&2; exit 1; }
+APP_IMAGE="$(docker inspect --format '{{.Config.Image}}' "$pms_container")"
+[ -n "$APP_IMAGE" ] || { printf 'Cannot determine the current Ceastar PMS image.\n' >&2; exit 1; }
 
 docker compose stop pms
 docker cp "$backup_dir/database.dump" "$postgres_container:/tmp/database.dump"

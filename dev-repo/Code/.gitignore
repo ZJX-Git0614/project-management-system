@@ -11,6 +11,23 @@ coverage
 tsconfig.tsbuildinfo
 .local-runtime
 .codegraph
+__pycache__/
+*.py[cod]
+
+# Local analysis/runtime artifacts are never part of source synchronization.
+src/graphify-out/.graphify_*
+src/graphify-out/.vocab.txt
+src/graphify-out/memory/
+src/graphify-out/reflections/
+
+# Release images, packages, and database backups stay outside source control.
+outputs/
+*.dump
+deployment/**/images/*.tar
 
 .worktrees
 *.db*
+
+# Local analysis/runtime artifacts
+graphify-out/
+dist/

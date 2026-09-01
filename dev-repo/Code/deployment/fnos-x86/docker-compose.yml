@@ -18,7 +18,7 @@ services:
     restart: unless-stopped
 
   pms:
-    image: ceastar-project-management:2026.07.30.3-amd64
+    image: ${PMS_APP_IMAGE:-ceastar-project-management:2026.07.30.4-amd64}
     platform: linux/amd64
     ports:
       - "${PMS_PORT:-3000}:3000"
@@ -27,6 +27,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be configured in .env}
       ASSISTANT_CONFIG_ENCRYPTION_KEY: ${JWT_SECRET:?JWT_SECRET must be configured in .env}
       PROJECT_DOCUMENT_STORAGE_DIR: /app/.local-runtime/project-documents
+      COLLABORATION_ATTACHMENT_STORAGE_DIR: /app/.local-runtime/project-documents/.collaboration-attachments
       SYSTEM_BACKUP_DIR: /app/.local-runtime/system-backups
       SYSTEM_BACKUP_ALLOWED_ROOTS: /app/.local-runtime/system-backups,/data/system-backups
       PMS_WEB_WORKERS: ${PMS_WEB_WORKERS:-4}

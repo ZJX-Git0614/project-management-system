@@ -79,7 +79,7 @@ export async function POST(req: NextRequest) {
           data: {
             id: projectDocumentId,
             projectId,
-            directoryKey: [".mpp", ".xml", ".xlsx", ".csv"].includes(extension) ? "5.2《进度计划》" : "15.3变更管理",
+            directoryKey: [".mpp", ".xml", ".xls", ".xlsx", ".csv"].includes(extension) ? "5.2《进度计划》" : "15.3变更管理",
             originalName: file.name.trim(),
             storedName: projectDocumentStoredName,
             mimeType: file.type || "application/octet-stream",

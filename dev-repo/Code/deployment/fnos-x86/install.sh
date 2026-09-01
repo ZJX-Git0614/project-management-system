@@ -3,7 +3,7 @@ set -eu
 
 cd "$(dirname "$0")"
 
-APP_IMAGE="ceastar-project-management:2026.07.30.3-amd64"
+APP_IMAGE="ceastar-project-management:2026.07.30.4-amd64"
 POSTGRES_IMAGE="postgres:16-alpine"
 APP_IMAGE_FILE="images/ceastar-pms-linux-amd64.tar"
 POSTGRES_IMAGE_FILE="images/postgres-16-alpine-linux-amd64.tar"
@@ -88,6 +88,7 @@ POSTGRES_PASSWORD=${database_password}
 JWT_SECRET=${jwt_secret}
 PMS_PORT=3000
 PMS_WEB_WORKERS=4
+PMS_APP_IMAGE=${APP_IMAGE}
 PMS_DATABASE_VOLUME=ceastar-pms_pgdata
 PMS_DOCUMENT_VOLUME=ceastar-pms_document_storage
 EOF

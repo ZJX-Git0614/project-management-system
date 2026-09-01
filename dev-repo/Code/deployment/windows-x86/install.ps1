@@ -38,6 +38,38 @@ function Wait-ForApplication {
   throw "Ceastar PMS did not become ready within 180 seconds."
 }
 
+function New-PrivateSecret {
+  $bytes = New-Object byte[] 32
+  [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+  return ([System.BitConverter]::ToString($bytes)).Replace("-", "").ToLowerInvariant()
+}
+
+function Ensure-PrivateEnvironment {
+  $environmentPath = Join-Path $PSScriptRoot ".env"
+  $existing = if (Test-Path $environmentPath) { Get-Content -LiteralPath $environmentPath } else { @() }
+  $values = @{}
+  foreach ($line in $existing) {
+    if ($line -match '^\s*([A-Z0-9_]+)\s*=\s*"?([^"#\r\n]*)') {
+      $values[$matches[1]] = $matches[2].Trim()
+    }
+  }
+
+  foreach ($key in @("POSTGRES_PASSWORD", "JWT_SECRET", "ASSISTANT_CONFIG_ENCRYPTION_KEY")) {
+    $current = [string]($values[$key])
+    if (-not $current -or $current -match 'replace-on-install|replace-with|pms-dev-secret') {
+      $values[$key] = New-PrivateSecret
+    }
+  }
+
+  $preserved = $existing | Where-Object { $_ -notmatch '^\s*(POSTGRES_PASSWORD|JWT_SECRET|ASSISTANT_CONFIG_ENCRYPTION_KEY)=' }
+  $privateLines = @(
+    "POSTGRES_PASSWORD=$($values.POSTGRES_PASSWORD)",
+    "JWT_SECRET=$($values.JWT_SECRET)",
+    "ASSISTANT_CONFIG_ENCRYPTION_KEY=$($values.ASSISTANT_CONFIG_ENCRYPTION_KEY)"
+  )
+  Set-Content -LiteralPath $environmentPath -Value @($privateLines + $preserved) -Encoding UTF8
+}
+
 if (Test-Path ".installed") {
   if (-not $Force) {
     throw "This package has already been installed. Use start.ps1 to start it. Re-running install requires -Force and will overwrite the target database."
@@ -48,6 +80,20 @@ if (Test-Path ".installed") {
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
   throw "Docker Desktop is not installed or docker.exe is not in PATH."
 }
+
+Ensure-PrivateEnvironment
+
+$assistantBridgeInstaller = Join-Path $PSScriptRoot "install-assistant-service-bridge.ps1"
+if (-not (Test-Path $assistantBridgeInstaller)) {
+  throw "Missing deployment file: install-assistant-service-bridge.ps1"
+}
+& $assistantBridgeInstaller -DeploymentDirectory $PSScriptRoot -SourceDirectory $PSScriptRoot
+
+$drawioMcpInstaller = Join-Path $PSScriptRoot "install-drawio-mcp.ps1"
+if (-not (Test-Path $drawioMcpInstaller)) {
+  throw "Missing deployment file: install-drawio-mcp.ps1"
+}
+& $drawioMcpInstaller -SourceDirectory $PSScriptRoot
 
 docker info *> $null
 Assert-LastExitCode "Docker Desktop is not running. Start Docker Desktop and retry."

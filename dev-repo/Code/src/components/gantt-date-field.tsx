@@ -19,11 +19,16 @@ interface GanttDateFieldProps {
   onCommit: (value: string) => void;
   ariaLabel: string;
   disabled?: boolean;
+  /** Render a compact value instead of retaining the segmented editor. */
+  readOnly?: boolean;
+  /** Display-only half-day marker used when the task date is not editable. */
+  slot?: "AM" | "PM";
   min?: string;
   required?: boolean;
+  displayValue?: string;
 }
 
-const SEGMENT_CLASS = "!h-5 !min-h-0 !border-0 !bg-transparent !p-0 text-center font-mono text-[10px] tabular-nums !shadow-none !ring-0";
+const SEGMENT_CLASS = "!h-5 !min-h-0 !border-0 !bg-transparent !p-0 text-center font-mono text-[11px] tabular-nums !shadow-none !ring-0";
 
 export const GanttDateField = ({
   value,
@@ -31,8 +36,11 @@ export const GanttDateField = ({
   onCommit,
   ariaLabel,
   disabled = false,
+  readOnly = false,
+  slot = "AM",
   min,
   required = false,
+  displayValue,
 }: GanttDateFieldProps) => {
   const currentYear = new Date().getFullYear();
   const [parts, setParts] = useState<GanttDateParts>(() => splitGanttDate(value));
@@ -85,6 +93,10 @@ export const GanttDateField = ({
       return;
     }
     setParts(splitGanttDate(nextValue));
+    // Moving focus through an unchanged date field must not trigger a schedule
+    // recalculation. This is especially important for AUTO tasks, where an
+    // unrelated field edit can otherwise recompute the planned finish date.
+    if (nextValue === value) return;
     onChange(nextValue);
     onCommit(nextValue);
   };
@@ -117,6 +129,22 @@ export const GanttDateField = ({
     }
   };
 
+  if (readOnly) {
+    const dateValue = displayValue || value || "--";
+    const slotLabel = slot === "PM" ? "\u2193" : "\u2191";
+    const titleValue = value ? `${dateValue} ${slotLabel}` : dateValue;
+    return (
+      <output
+        className="gantt-date-display"
+        title={titleValue}
+        aria-label={ariaLabel}
+      >
+        <span className="gantt-date-display-value">{dateValue}</span>
+        {value && <span className="gantt-date-display-slot" aria-hidden="true">{slotLabel}</span>}
+      </output>
+    );
+  }
+
   return (
     <div
       className={cn(
@@ -137,7 +165,7 @@ export const GanttDateField = ({
         inputMode="numeric"
         maxLength={4}
         placeholder={String(currentYear)}
-        className={cn(SEGMENT_CLASS, "!w-[30px]")}
+        className={cn(SEGMENT_CLASS, "!w-[34px]")}
         disabled={disabled}
         aria-label={`${ariaLabel}年份`}
       />
@@ -150,7 +178,7 @@ export const GanttDateField = ({
         inputMode="numeric"
         maxLength={2}
         placeholder="月"
-        className={cn(SEGMENT_CLASS, "!w-[16px]")}
+        className={cn(SEGMENT_CLASS, "!w-[18px]")}
         disabled={disabled}
         aria-label={`${ariaLabel}月份`}
       />
@@ -163,7 +191,7 @@ export const GanttDateField = ({
         inputMode="numeric"
         maxLength={2}
         placeholder="日"
-        className={cn(SEGMENT_CLASS, "!w-[16px]")}
+        className={cn(SEGMENT_CLASS, "!w-[18px]")}
         disabled={disabled}
         aria-label={`${ariaLabel}日期`}
       />

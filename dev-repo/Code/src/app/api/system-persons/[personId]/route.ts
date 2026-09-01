@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getUserFromRequest } from "@/lib/auth"
-import { ok, unauthorized, notFound } from "@/lib/api-utils"
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth"
+import { ok, forbidden, notFound, unauthorizedFromRequest } from "@/lib/api-utils"
 
 // DELETE /api/system-persons/[personId]
 export async function DELETE(
@@ -9,8 +9,9 @@ export async function DELETE(
   { params }: { params: Promise<{ personId: string }> }
 ) {
   const { personId } = await params
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req)
+  if (!user) return unauthorizedFromRequest(req)
+  if (!await userHasPermission(user, "role-config:edit")) return forbidden()
 
   const person = await prisma.systemPerson.findUnique({
     where: { id: personId },

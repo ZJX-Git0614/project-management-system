@@ -1,10 +1,9 @@
 import { AppRole, ItemHealth, ItemPriority, ItemRiskStatus, ItemStatus, ProjectStatus, TodoStatus, TodoType } from "@/domain/enums";
 
 export const ITEM_STATUS_LABEL: Record<ItemStatus, string> = {
-  [ItemStatus.PENDING]: "待开始",
+  [ItemStatus.PENDING]: "未开始",
   [ItemStatus.IN_PROGRESS]: "进行中",
   [ItemStatus.DONE]: "已完成",
-  [ItemStatus.CANCELED]: "已取消",
 };
 
 export const ITEM_PRIORITY_LABEL: Record<ItemPriority, string> = {
@@ -49,5 +48,8 @@ export const TODO_STATUS_LABEL: Record<TodoStatus, string> = {
 
 export const TODO_TYPE_LABEL: Record<TodoType, string> = {
   [TodoType.WEEKLY_ITEM_OVERDUE]: "项目事项逾期",
+  [TodoType.APPROVAL_PENDING]: "审批待处理",
+  [TodoType.APPROVAL_REMINDER]: "审批提醒",
+  [TodoType.COLLABORATION_MENTION]: "协同提及",
   [TodoType.CUSTOM]: "自定义",
 };

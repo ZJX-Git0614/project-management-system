@@ -1,15 +1,17 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getUserFromRequest, hashPassword } from "@/lib/auth"
-import { ok, err, unauthorized, notFound } from "@/lib/api-utils"
+import { hashPassword } from "@/lib/auth"
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth"
+import { ok, err, unauthorizedFromRequest, forbidden, notFound } from "@/lib/api-utils"
 
 export async function PUT(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req)
+  if (!user) return unauthorizedFromRequest(req)
+  if (!await userHasPermission(user, "account-management:edit")) return forbidden()
 
   const existing = await prisma.userAccount.findUnique({ where: { id } })
   if (!existing) return notFound("账号")

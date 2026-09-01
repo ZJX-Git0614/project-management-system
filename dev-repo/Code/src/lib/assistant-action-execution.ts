@@ -2,6 +2,7 @@ import type { AssistantActionRun } from "@prisma/client";
 
 import { executeAssistantAction } from "@/lib/assistant-actions";
 import { getAssistantToolDefinition } from "@/lib/assistant-settings";
+import { normalizeAssistantRiskDrafts } from "@/lib/assistant-risk-drafts";
 import { prisma } from "@/lib/prisma";
 import type { AuthenticatedUser } from "@/lib/server-auth";
 
@@ -70,6 +71,21 @@ export const verifyAssistantActionResult = (action: AssistantActionRun) => {
       throw new Error("动作结果校验失败，生成文件未通过重新导入验证");
     }
   }
+  if (action.toolId === "risk.create.batch") {
+    const args = parseResult(action.argsJson);
+    const requestedRisks = normalizeAssistantRiskDrafts(args.risks);
+    const riskIds = Array.isArray(result.riskIds) ? result.riskIds.filter((value) => typeof value === "string" && value) : [];
+    const riskCodes = Array.isArray(result.riskCodes) ? result.riskCodes.filter((value) => typeof value === "string" && value) : [];
+    if (
+      requestedRisks.length === 0
+      || result.requestedCount !== requestedRisks.length
+      || result.processedCount !== requestedRisks.length
+      || riskIds.length !== requestedRisks.length
+      || riskCodes.length !== requestedRisks.length
+    ) {
+      throw new Error(`动作结果校验失败，要求登记 ${requestedRisks.length} 条风险，但批量登记结果不完整`);
+    }
+  }
   return { kind: tool.verifier, passed: true, checkedFields: tool.outputSchema.required };
 };
 
@@ -83,9 +99,14 @@ export const executeAssistantActionWithRecovery = async (
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       action = await executeAssistantAction(action, user);
-      if (action.status === "SUCCEEDED") verifyAssistantActionResult(action);
+      if (action.status === "SUCCEEDED") {
+        // 验收失败不能倒改已提交的业务副作用；保留成功状态及结果，
+        // 由调用方记录并呈现校验错误，避免重试造成重复写入。
+        verifyAssistantActionResult(action);
+      }
       return action;
     } catch (error) {
+      if (action.status === "SUCCEEDED") throw error;
       const failure = classifyAssistantActionError(error);
       const mayRetry = failure.retryable
         && tool?.idempotency === "REPLAY_SAFE"

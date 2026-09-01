@@ -1,8 +1,8 @@
 import { NextRequest } from "next/server";
 import type { Prisma } from "@prisma/client";
 
-import { getUserFromRequest } from "@/lib/auth";
-import { err, notFound, ok, unauthorized } from "@/lib/api-utils";
+import { err, notFound, ok } from "@/lib/api-utils";
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import {
   buildGanttExcel,
   buildGanttExcelTemplate,
@@ -10,7 +10,7 @@ import {
   convertProjectXmlToMpp,
   ganttTransferCapabilities,
 } from "@/lib/gantt-file-transfer";
-import { getOrderedGanttTasks, serializeGanttTask } from "@/lib/gantt-task-service";
+import { getOrderedGanttTasks, serializeGanttTaskList } from "@/lib/gantt-task-service";
 import { prisma } from "@/lib/prisma";
 
 const safeFileName = (value: string) => value.replace(/[\\/:*?"<>|\r\n]+/g, "_").slice(0, 80) || "project";
@@ -28,15 +28,16 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const user = getUserFromRequest(req);
-  if (!user) return unauthorized();
+  const user = await getAuthenticatedUser(req);
+  if (!user) return err("未登录", 401);
+  if (!(await userHasPermission(user, "project-gantt:view"))) return err("权限不足", 403);
 
   const format = req.nextUrl.searchParams.get("format")?.toLowerCase();
   if (!format) return ok(await ganttTransferCapabilities());
 
   const project = await prisma.project.findUnique({ where: { id }, select: { name: true, code: true } });
   if (!project) return notFound("项目");
-  const tasks = (await getOrderedGanttTasks(id)).map(serializeGanttTask);
+  const tasks = serializeGanttTaskList(await getOrderedGanttTasks(id));
   const scheduleMetadata = await prisma.projectScheduleImportMetadata.findUnique({ where: { projectId: id } });
   const baseName = safeFileName(project.code || project.name);
 

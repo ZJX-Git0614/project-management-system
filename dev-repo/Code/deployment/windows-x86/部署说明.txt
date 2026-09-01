@@ -56,6 +56,10 @@ PMS_BACKUP_HOST_DIR=D:/Ceastar-PMS-Backups
 - Docker 中的项目管理系统访问 Windows 本机 Ollama 时，供应商地址应填写：
   http://host.docker.internal:11434
 - 不要填写 http://127.0.0.1:11434，因为该地址在容器中指向容器自身。
+- 双击 assistant-services.bat 可以分别管理 Ollama 与 RAGLite 的启动、停止、重启、
+  健康检查、异常恢复和开机自启。两项开机自启默认均关闭。
+- RAGLite 需要先通过菜单指定现有安装目录；配置、日志和知识库数据保存在
+  C:\ProgramData\Ceastar-PMS，不会被 PMS 热更新或回滚覆盖。
 
 七、排查命令
 

@@ -99,16 +99,16 @@ git status --short
 每次更新使用两个版本变量：
 
 ```bash
-RELEASE_VERSION=2026.07.29.3
-RELEASE_STAMP=20260729-3
+RELEASE_VERSION=2026.08.04.3
+RELEASE_ID=20260804-3
 IMAGE_NAME=ceastar-project-management:${RELEASE_VERSION}-amd64
-PACKAGE_NAME=Ceastar-PMS-更新包-${RELEASE_STAMP}
+PACKAGE_NAME=Ceastar-PMS-Update-${RELEASE_ID}-blue-green
 ```
 
 规则：
 
 - `RELEASE_VERSION` 用于 Docker 镜像标签；
-- `RELEASE_STAMP` 用于更新包、回退镜像和状态文件；
+- `RELEASE_ID` 用于更新包、回退镜像和状态文件；
 - 新版本不得复用旧版本号；
 - 镜像标签必须以 `-amd64` 结尾，便于人工识别平台。
 
@@ -124,6 +124,8 @@ deployment/windows-x86/
 
 ```text
 image-name.txt
+release-id.txt
+build-update-package.sh
 update.ps1
 rollback.ps1
 更新手册.txt
@@ -132,31 +134,39 @@ rollback.ps1
 需要同步修改：
 
 - `image-name.txt` 中的新镜像标签；
-- `update.ps1` 中的回退镜像标签；
-- `update.ps1` 和 `rollback.ps1` 中的 `.ceastar-update-YYYYMMDD.state` 文件名；
+- `release-id.txt` 中的发布编号；
 - 更新手册中的版本号和更新包目录名。
+
+`update.ps1` 和 `rollback.ps1` 不再硬编码版本号；两者必须共同读取 `release-id.txt`，并使用 `.ceastar-update-$releaseId.state`。这样可以避免更新成功后因回退脚本查找了另一个状态文件而无法回退。
 
 检查是否还有旧版本号残留：
 
 ```bash
-rg -n '20260724|2026\.07\.24|rollback-' deployment/windows-x86
+rg -n "${PREVIOUS_RELEASE_ID}|${PREVIOUS_RELEASE_VERSION}|\\.ceastar-update-[0-9]" deployment/windows-x86
 ```
 
 将命令中的旧版本替换为上一次发布版本。所有残留都必须逐项确认，不能盲目批量替换路径中的其他日期。
 
 Windows 脚本兼容要求：
 
-- `.bat` 和 `.ps1` 使用 CRLF 换行；
-- 为避免控制台乱码，脚本输出优先使用 ASCII 英文；
-- 中文纯文本说明使用 UTF-8 with BOM；
+- 最终 ZIP 内的 `.bat`、`.ps1` 和 `.txt` 使用 CRLF 换行；
+- 含中文的 PowerShell 脚本使用 UTF-8 with BOM，批处理先执行 `chcp 65001`；
+- 中文纯文本说明使用 UTF-8；
 - 不要把密钥写入脚本或镜像。
 
 ## 7. 构建前验证源代码
 
-在仓库根目录执行：
+推荐直接使用仓库内的一键发布脚本。它会依次执行测试、Lint、类型检查、生产构建、`git diff --check`、`linux/amd64` 镜像构建、容器运行内容检查、镜像 SHA-256、ZIP 完整性和敏感文件扫描：
 
 ```bash
-npm ci
+deployment/windows-x86/build-update-package.sh "/目标输出目录"
+```
+
+脚本只把最终 ZIP 和 ZIP 的 `.sha256` 文件留在输出目录。若同版本产物已经存在，脚本会停止而不是覆盖。`SKIP_SOURCE_VERIFY=1` 和 `SKIP_IMAGE_BUILD=1` 只用于开发调试，不得用于正式交付。
+
+需要手动验证时，在仓库根目录执行：
+
+```bash
 npm test
 npm run lint
 npm run typecheck
@@ -218,6 +228,7 @@ docker run --rm --entrypoint sh "${IMAGE_NAME}" -c '
   java -version &&
   test -d /app/.next &&
   test -f /app/prisma/schema.prisma &&
+  test -f /app/prisma/manual-migrations/20260803_module_history_snapshots.sql &&
   test -f /opt/ceastar/mpp-converter.jar &&
   pg_dump --version | grep "PostgreSQL) 16\." &&
   pg_restore --version | grep "PostgreSQL) 16\." &&
@@ -238,6 +249,8 @@ linux/x64
 ## 10. 可选的临时运行验证
 
 正式更新前，优先使用独立测试数据库做一次容器启动验证。不要把测试容器连接到生产数据卷。
+
+目标 Windows 电脑上的正式更新采用分阶段蓝绿切换：蓝色旧容器继续占用 3000 端口；绿色新镜像通过 `docker compose run` 在 `127.0.0.1:3101-3110` 的空闲端口以单工作进程启动，连接现有数据库和文档卷，完成 Expand 兼容迁移与 `/login` 健康检查。验证通过后删除候选容器，再短暂重建正式 `pms` 容器。这不是带反向代理的双生产环境，因此最终端口接管仍有一次短暂中断。
 
 最低限度应确认：
 
@@ -314,21 +327,29 @@ ceastar-project-management:2026.07.29.3-amd64
 最终目录结构必须是：
 
 ```text
-Ceastar-PMS-更新包-YYYYMMDD/
+Ceastar-PMS-Update-YYYYMMDD-N-blue-green/
 ├── image-name.txt
+├── release-id.txt
 ├── image.sha256
+├── release-manifest.txt
 ├── update.bat
 ├── update.ps1
 ├── rollback.bat
 ├── rollback.ps1
+├── backup.ps1
+├── repair-mpp-export-service.bat
 ├── install-mpp-export-service.ps1
 ├── mpp-export-service.ps1
-├── 更新手册.txt
+├── Windows-Update-Guide-CN.txt
+├── Database-Migration-Guide-CN.txt
+├── Data-Security-Guide-CN.txt
 └── images/
     └── ceastar-pms-YYYY.MM.DD-amd64.tar
 ```
 
 从 `deployment/windows-x86/` 复制脚本和手册。不要复制以下内容：
+
+macOS 自带 Info-ZIP 对中文文件名的 UTF-8 标记不稳定，因此最终包内三份中文说明必须分别使用 `Windows-Update-Guide-CN.txt`、`Database-Migration-Guide-CN.txt` 和 `Data-Security-Guide-CN.txt`。文件内容仍为中文 UTF-8，文件名保持 ASCII 以兼容 Windows Explorer。
 
 ```text
 .env
@@ -347,16 +368,20 @@ node_modules/
 `update.ps1` 必须按以下顺序执行：
 
 1. 找到原部署目录中的 `docker-compose.yml` 和 `backup.ps1`；
-2. 检查 Docker Desktop；
-3. 校验镜像 tar 的 SHA-256；
-4. 把当前运行镜像标记为本次发布专用的 rollback 镜像；
-5. 调用原部署目录中的 `backup.ps1` 备份 PostgreSQL 和上传文档；
-6. `docker load` 加载新镜像；
-7. 把新镜像标记成原 `docker-compose.yml` 当前引用的镜像名；
-8. 只执行 `docker compose up -d --no-deps --force-recreate pms`；
-9. 等待 `http://localhost:3000/login` 恢复；
-10. 写入本次版本独立的状态文件，供 `rollback.ps1` 使用。
-11. 检测到 Windows 已安装 Microsoft Project 时，注册本机 MPP 导出服务；未安装时继续完成主系统更新。
+2. 读取并校验 `image-name.txt`、`release-id.txt`、镜像 tar 和 SHA-256；
+3. 检查 Docker Desktop，并把当前容器的实际镜像 ID 标记为本次发布专用的 rollback 镜像；
+4. 调用 `backup.ps1` 备份 PostgreSQL 和上传文档，并再次核对 `backup-manifest.json`；
+5. `docker load` 加载新镜像，拒绝非 `amd64` 镜像；
+6. 把新镜像标记成原 `docker-compose.yml` 当前引用的镜像名；
+7. 选择 `127.0.0.1:3101-3110` 的空闲端口，以 `PMS_WEB_WORKERS=1` 启动绿色候选容器；
+8. 等待绿色候选 `/login` 健康检查通过；失败时恢复旧镜像标签，正式容器不切换；
+9. 删除候选容器，只执行 `docker compose up -d --no-deps --force-recreate pms` 完成正式切换；
+10. 等待 `http://localhost:3000/login` 恢复；失败时自动恢复旧镜像并重建正式容器；
+11. 写入 `.ceastar-update-$releaseId.state`，供同一包的 `rollback.ps1` 使用。
+
+Windows PowerShell 5.1 会把 Docker Compose 写到 stderr 的正常进度行（例如 `Container ... Creating`）包装成 `ErrorRecord`。所有 `docker compose run/up` 必须通过统一原生命令包装器执行：临时把 `$ErrorActionPreference` 降为 `Continue`、合并并捕获输出，以 `$LASTEXITCODE` 判断成败，仅在退出码非 0 时把最后 20 行作为错误详情。禁止直接在 `$ErrorActionPreference = "Stop"` 下用 `*> $null` 执行这些命令。
+
+`rollback.ps1` 必须使用相同的发布编号和状态文件。它先备份当前数据，再以临时端口验证旧镜像，最后才切换 3000；回退验证或切换失败时恢复回退前的应用镜像。应用回退不执行数据库反向迁移。
 
 更新脚本不得执行：
 
@@ -400,7 +425,7 @@ unzip -l "/目标目录/${PACKAGE_NAME}.zip" | rg '__MACOSX|\.DS_Store|\.env|bac
 4. 启动 Docker Desktop；
 5. 等待当前用户保存操作并退出系统；
 6. 双击更新包中的 `update.bat`；
-7. 等待窗口显示 `Ceastar PMS update completed successfully.`；
+7. 等待窗口显示 `Ceastar PMS 更新成功`；
 8. 打开 `http://localhost:3000`，使用原账号登录；
 9. 检查项目、任务、事项、风险、预算和文档数据；
 10. 检查本次新增功能和数据库迁移结果。
@@ -428,6 +453,10 @@ unzip -l "/目标目录/${PACKAGE_NAME}.zip" | rg '__MACOSX|\.DS_Store|\.env|bac
 - [ ] 更新前自动备份逻辑仍然存在；
 - [ ] 更新过程只重建 `pms` 容器；
 - [ ] 回退镜像和状态文件使用本次独立版本号。
+- [ ] 更新与回退脚本共同读取 `release-id.txt`，没有硬编码状态文件版本；
+- [ ] 新版本和旧版本都经过临时候选端口健康检查后才允许切换 3000；
+- [ ] 候选或正式切换失败时自动恢复切换前应用镜像；
+- [ ] ZIP 外层 SHA-256 已生成并随包交付。
 
 ## 18. 常见问题
 
@@ -477,7 +506,7 @@ docker compose logs --tail 200 postgres
 
 ```text
 Release version:
-Release stamp:
+Release ID:
 Git branch:
 Git commit:
 Working tree status:

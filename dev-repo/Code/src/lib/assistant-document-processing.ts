@@ -5,7 +5,7 @@ import * as XLSX from "@e965/xlsx";
 
 import { parseGanttImportFile } from "@/lib/gantt-file-transfer";
 
-export const ASSISTANT_ATTACHMENT_EXTENSIONS = [".docx", ".xlsx", ".csv", ".pdf", ".txt", ".md", ".mpp", ".xml"] as const;
+export const ASSISTANT_ATTACHMENT_EXTENSIONS = [".docx", ".xls", ".xlsx", ".csv", ".pdf", ".txt", ".md", ".mpp", ".xml"] as const;
 export const MAX_ASSISTANT_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_ASSISTANT_EXTRACTED_CHARACTERS = 300_000;
 
@@ -36,6 +36,8 @@ export type DocumentExtractionResult = {
 const decodeXml = (value: string) => value
   .replace(/<w:tab\s*\/>/g, "\t")
   .replace(/<w:br\s*\/>/g, "\n")
+  .replace(/<\/w:tc>/g, "\t")
+  .replace(/<\/w:tr>/g, "\n")
   .replace(/<\/w:p>/g, "\n")
   .replace(/<[^>]+>/g, "")
   .replace(/&lt;/g, "<")
@@ -173,7 +175,7 @@ export const extractAssistantDocument = async (fileName: string, buffer: Buffer)
   let metadata: Record<string, unknown> = {};
   if ([".txt", ".md", ".csv", ".xml"].includes(extension)) content = buffer.toString("utf8");
   else if (extension === ".docx") content = extractDocx(buffer);
-  else if (extension === ".xlsx") {
+  else if (extension === ".xlsx" || extension === ".xls") {
     const workbook = extractWorkbook(buffer);
     content = workbook.content;
     metadata = { sheetNames: workbook.sheetNames };

@@ -1,8 +1,8 @@
 import { NextRequest } from "next/server";
 
 import { prisma } from "@/lib/prisma";
-import { getUserFromRequest } from "@/lib/auth";
-import { ensureMutableProject, err, notFound, ok, unauthorized } from "@/lib/api-utils";
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
+import { ensureMutableProject, err, notFound, ok, unauthorizedFromRequest, forbidden } from "@/lib/api-utils"
 import { BudgetCategoryKind } from "@/domain/enums";
 
 const VALID_KINDS = new Set<string>(Object.values(BudgetCategoryKind));
@@ -33,8 +33,9 @@ export async function PUT(
   { params }: { params: Promise<{ id: string; catId: string }> },
 ) {
   const { id, catId } = await params;
-  const user = getUserFromRequest(req);
-  if (!user) return unauthorized();
+  const user = await getAuthenticatedUser(req);
+  if (!user) return unauthorizedFromRequest(req);
+  if (!await userHasPermission(user, "project-budget:edit")) return forbidden();
 
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
@@ -83,8 +84,9 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string; catId: string }> },
 ) {
   const { id, catId } = await params;
-  const user = getUserFromRequest(req);
-  if (!user) return unauthorized();
+  const user = await getAuthenticatedUser(req);
+  if (!user) return unauthorizedFromRequest(req);
+  if (!await userHasPermission(user, "project-budget:delete")) return forbidden();
 
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;

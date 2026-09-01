@@ -113,6 +113,56 @@ body {
   }
 }
 
+@keyframes gantt-history-row-flash {
+  0% { background-color: rgba(56, 189, 248, 0.08); }
+  38% { background-color: rgba(56, 189, 248, 0.38); }
+  100% { background-color: transparent; }
+}
+
+@keyframes gantt-history-cell-flash {
+  0% { box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.2); background-color: rgba(56, 189, 248, 0.08); }
+  38% { box-shadow: inset 0 0 0 2px rgba(56, 189, 248, 0.85); background-color: rgba(56, 189, 248, 0.34); }
+  100% { box-shadow: inset 0 0 0 0 rgba(56, 189, 248, 0); background-color: transparent; }
+}
+
+.gantt-history-row-flash {
+  animation: gantt-history-row-flash 0.5s ease-out both;
+}
+
+.gantt-history-cell-flash {
+  position: relative;
+  z-index: 24;
+  animation: gantt-history-cell-flash 0.5s ease-out both;
+}
+
+/* 列表表格统一采用 WBS 风格：内容区透明，仅在悬停、选中或编辑聚焦时显示状态。 */
+[data-slot="table"] tbody tr {
+  background-color: transparent;
+}
+
+[data-slot="table"] tbody [data-slot="input"],
+[data-slot="table"] tbody [data-slot="select"],
+[data-slot="table"] tbody textarea {
+  border-color: transparent;
+  background-color: transparent;
+  box-shadow: none;
+}
+
+[data-slot="table"] tbody [data-slot="input"]:hover,
+[data-slot="table"] tbody [data-slot="select"]:hover,
+[data-slot="table"] tbody textarea:hover {
+  border-color: hsl(225 12% 24%);
+  background-color: rgba(255, 255, 255, 0.025);
+}
+
+[data-slot="table"] tbody [data-slot="input"]:focus-visible,
+[data-slot="table"] tbody [data-slot="select"]:focus-visible,
+[data-slot="table"] tbody textarea:focus-visible {
+  border-color: hsl(217 91% 60% / 0.58);
+  background-color: hsl(225 25% 5% / 0.82);
+  box-shadow: 0 0 0 2px hsl(217 91% 60% / 0.16);
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -129,6 +179,230 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: #3c3c40;
+}
+
+.gantt-scroll-viewport {
+  scrollbar-gutter: stable;
+  scrollbar-color: #3c3c40 #161619;
+  scrollbar-width: thin;
+}
+
+.gantt-scroll-viewport-embedded {
+  height: max(260px, calc(100dvh - 380px));
+}
+
+.gantt-scroll-viewport::-webkit-scrollbar {
+  width: 8px;
+  height: 10px;
+}
+
+.gantt-scroll-viewport::-webkit-scrollbar-track {
+  background: #161619;
+}
+
+.gantt-scroll-viewport::-webkit-scrollbar-thumb {
+  min-width: 36px;
+  border: 2px solid #161619;
+  border-radius: 999px;
+  background: #3c3c40;
+}
+
+.gantt-scroll-viewport::-webkit-scrollbar-thumb:hover {
+  background: #505056;
+}
+
+.gantt-context-menu {
+  width: min(286px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.gantt-context-menu-header {
+  padding: 4px 8px 8px;
+  color: var(--app-text-dim);
+  font-size: 12px;
+}
+
+.gantt-context-menu-separator {
+  height: 1px;
+  margin: 5px 2px;
+  background: var(--app-border);
+}
+
+.gantt-context-menu-item {
+  display: flex;
+  width: 100% !important;
+  min-width: 0;
+  min-height: 32px !important;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 4px;
+  padding: 0 8px;
+  background: transparent;
+  text-align: left;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.gantt-context-menu-item:hover:not(:disabled),
+.gantt-context-menu-item:focus-visible:not(:disabled) {
+  background: hsl(var(--accent));
+  color: hsl(var(--accent-foreground));
+  outline: none;
+}
+
+.gantt-context-menu-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.gantt-context-menu-item kbd {
+  margin-left: auto;
+  color: var(--app-text-dim);
+  font-size: 11px;
+  font-family: inherit;
+}
+
+.gantt-context-menu-item > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gantt-context-menu-item-danger {
+  color: hsl(var(--destructive));
+}
+
+.gantt-context-menu-submenu-anchor {
+  position: relative;
+}
+
+.gantt-context-submenu {
+  position: absolute;
+  top: -6px;
+  left: calc(100% + 6px);
+  z-index: 1;
+  width: 196px;
+  max-height: min(560px, calc(100vh - 24px));
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-panel);
+  box-shadow: var(--app-shadow-popover);
+}
+
+.gantt-context-submenu::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -7px;
+  width: 7px;
+  content: "";
+}
+
+.gantt-context-menu-open-left .gantt-context-submenu {
+  right: calc(100% + 6px);
+  left: auto;
+}
+
+.gantt-context-menu-open-left .gantt-context-submenu::before {
+  right: -7px;
+  left: auto;
+}
+
+.gantt-context-submenu-wide {
+  width: 300px;
+}
+
+/* Context submenus are portaled outside the scrollable root menu so they
+ * remain usable near viewport edges and are never clipped by its scrollbar. */
+.gantt-context-submenu.gantt-context-submenu-portal {
+  position: fixed;
+  z-index: 140;
+}
+
+.gantt-context-submenu.gantt-context-submenu-portal::before {
+  display: none;
+}
+
+.gantt-context-menu-hint {
+  padding: 5px 8px 2px;
+  color: var(--app-text-dim);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.gantt-context-insert-item {
+  display: grid;
+  grid-template-columns: max-content 46px minmax(0, 1fr);
+  gap: 6px;
+}
+
+.gantt-context-menu-item.gantt-context-insert-item > span {
+  overflow: visible;
+  white-space: nowrap;
+  text-overflow: clip;
+}
+
+.gantt-context-insert-item input {
+  width: 46px !important;
+  min-width: 46px !important;
+  max-width: 46px !important;
+  height: 24px;
+  padding: 0 4px !important;
+  border: 1px solid var(--app-border);
+  border-radius: 4px;
+  background: var(--app-panel-strong);
+  color: var(--app-text);
+  text-align: center;
+  font: inherit;
+}
+
+/* Display-only date cells must not inherit input geometry or background.
+ * Keeping the value in one non-wrapping line also prevents adjacent narrow
+ * columns from visually overlapping it. */
+.gantt-date-display,
+.gantt-readonly-metric {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  align-items: center;
+  overflow: hidden;
+  border: 0 !important;
+  border-radius: 0 !important;
+  padding: 0 4px;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: hsl(var(--muted-foreground));
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.gantt-date-display-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gantt-date-display-slot {
+  margin-left: 3px;
+  flex: none;
+}
+
+.gantt-readonly-metric {
+  justify-content: center;
+  padding-inline: 2px;
+  text-align: center;
 }
 
 a {
@@ -925,6 +1199,17 @@ button {
 
 button:hover:not(:disabled) {
   background: #171a1f;
+}
+
+button.app-control-selected,
+button.app-control-selected:hover:not(:disabled) {
+  border-color: #3b82f6 !important;
+  background: #2563eb !important;
+  color: #fff !important;
+}
+
+button.app-control-selected svg {
+  color: #fff !important;
 }
 
 button[data-slot="select"][data-variant="ghost"] {

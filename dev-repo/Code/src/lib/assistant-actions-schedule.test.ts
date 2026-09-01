@@ -26,7 +26,7 @@ const user = {
 
 const runtime = {
   agentEnabled: true,
-  agentEnabledToolIds: ["schedule.compare.file", "schedule.convert.file", "schedule.merge.files", "document.revision.generate"],
+  agentEnabledToolIds: ["schedule.import.preview", "schedule.compare.file", "schedule.convert.file", "schedule.merge.files", "document.revision.generate"],
   agentActionExpiryMinutes: 15,
 } as AssistantRuntimeConfig;
 
@@ -111,6 +111,86 @@ describe("schedule assistant actions", () => {
         argsJson: expect.stringContaining('"attachmentId":"attachment-1"'),
       }),
     }));
+  });
+
+  it("routes an explicit WBS import request to a non-mutating preview first", async () => {
+    mocks.prisma.assistantAttachment.findFirst.mockResolvedValue({ id: "attachment-import", originalName: "实施排期.xlsx" });
+    mocks.prisma.assistantActionRun.create.mockImplementation(async ({ data }) => ({
+      id: "action-import-preview",
+      ...data,
+      status: "PROPOSED",
+      resultJson: "{}",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      confirmedAt: null,
+      executedAt: null,
+    }));
+
+    const action = await proposeAssistantAction({
+      message: "把附件排期导入当前项目 WBS",
+      projectId: "project-1",
+      user,
+      runtime,
+      attachmentIds: ["attachment-import"],
+    });
+
+    expect(action).toMatchObject({ toolId: "schedule.import.preview", riskLevel: "LOW", title: "生成 WBS 导入预览" });
+    expect(mocks.prisma.assistantActionRun.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        toolId: "schedule.import.preview",
+        argsJson: expect.stringContaining('"hierarchyMode":"AUTO"'),
+      }),
+    }));
+  });
+
+  it("preserves an explicit flat-import instruction in the preview proposal", async () => {
+    mocks.prisma.assistantAttachment.findFirst.mockResolvedValue({ id: "attachment-flat", originalName: "实施排期.csv" });
+    mocks.prisma.assistantActionRun.create.mockImplementation(async ({ data }) => ({
+      id: "action-flat-preview",
+      ...data,
+      status: "PROPOSED",
+      resultJson: "{}",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      confirmedAt: null,
+      executedAt: null,
+    }));
+
+    await proposeAssistantAction({
+      message: "扁平导入这个排期，不要创建分类节点",
+      projectId: "project-1",
+      user,
+      runtime,
+      attachmentIds: ["attachment-flat"],
+    });
+
+    expect(mocks.prisma.assistantActionRun.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ argsJson: expect.stringContaining('"hierarchyMode":"FLAT"') }),
+    }));
+  });
+
+  it("routes an explicit DOCX schedule import request to preview instead of document rewriting", async () => {
+    mocks.prisma.assistantAttachment.findFirst.mockResolvedValue({ id: "attachment-docx-plan", originalName: "实施排期.docx" });
+    mocks.prisma.assistantActionRun.create.mockImplementation(async ({ data }) => ({
+      id: "action-docx-preview",
+      ...data,
+      status: "PROPOSED",
+      resultJson: "{}",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      confirmedAt: null,
+      executedAt: null,
+    }));
+
+    const action = await proposeAssistantAction({
+      message: "把附件里的排期导入当前项目 WBS",
+      projectId: "project-1",
+      user,
+      runtime,
+      attachmentIds: ["attachment-docx-plan"],
+    });
+
+    expect(action).toMatchObject({ toolId: "schedule.import.preview", riskLevel: "LOW" });
   });
 
   it("proposes an end-to-end document revision artifact", async () => {

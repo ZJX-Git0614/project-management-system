@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => {
     buildDatabaseAssistantAnswer: vi.fn(),
     callProjectAssistantModel: vi.fn(),
     planProjectAssistantQueryWithModel: vi.fn(),
+    analyzeAssistantRequestWithModel: vi.fn(),
     queryRagLite: vi.fn(),
     prisma,
   }
@@ -57,6 +58,9 @@ vi.mock("@/lib/project-assistant-model", () => ({
   callProjectAssistantModel: mocks.callProjectAssistantModel,
   planProjectAssistantQueryWithModel: mocks.planProjectAssistantQueryWithModel,
 }))
+vi.mock("@/lib/assistant-request-planner", () => ({
+  analyzeAssistantRequestWithModel: mocks.analyzeAssistantRequestWithModel,
+}))
 vi.mock("@/lib/raglite-client", () => ({ queryRagLite: mocks.queryRagLite }))
 vi.mock("@/lib/prisma", () => ({ prisma: mocks.prisma }))
 
@@ -79,6 +83,15 @@ const request = (message: string, attachmentIds: string[] = []) => new Request("
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({ message, projectId: "project-1", history: [], attachmentIds }),
+}) as never
+
+const streamRequest = (message: string) => new Request("http://localhost/api/assistant/chat", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Accept: "application/x-ndjson",
+  },
+  body: JSON.stringify({ message, projectId: "project-1", history: [], attachmentIds: [] }),
 }) as never
 
 describe("POST /api/assistant/chat", () => {
@@ -113,6 +126,7 @@ describe("POST /api/assistant/chat", () => {
       trace: { requested: false, outcome: "NO_ACTION", steps: [] },
     })
     mocks.planProjectAssistantQueryWithModel.mockResolvedValue(null)
+    mocks.analyzeAssistantRequestWithModel.mockImplementation(async ({ baseContract }) => baseContract)
     mocks.buildProjectAssistantContext.mockResolvedValue(context)
     mocks.callProjectAssistantModel.mockResolvedValue(null)
     mocks.queryRagLite.mockResolvedValue(null)
@@ -147,6 +161,24 @@ describe("POST /api/assistant/chat", () => {
     expect(mocks.callProjectAssistantModel).toHaveBeenCalledWith(expect.objectContaining({
       intent: expect.objectContaining({ identityOnly: true, domains: ["IDENTITY"] }),
     }))
+  })
+
+  it("streams real processing events, answer content, and the persisted result", async () => {
+    mocks.callProjectAssistantModel.mockResolvedValue("已根据当前项目数据完成分析。")
+    const { POST } = await import("./route")
+
+    const response = await POST(streamRequest("分析当前项目进度"))
+    const events = (await response.text())
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as { type: string; event?: { phase?: string; status?: string }; delta?: string })
+
+    expect(response.headers.get("content-type")).toContain("application/x-ndjson")
+    expect(response.headers.get("content-encoding")).toBe("identity")
+    expect(events.some((event) => event.type === "trace" && event.event?.phase === "UNDERSTAND" && event.event.status === "RUNNING")).toBe(true)
+    expect(events.some((event) => event.type === "trace" && event.event?.phase === "OBSERVE" && event.event.status === "SUCCEEDED")).toBe(true)
+    expect(events.some((event) => event.type === "answer_delta" && event.delta?.includes("完成分析"))).toBe(true)
+    expect(events.at(-1)?.type).toBe("result")
   })
 
   it("uses the domain agent resolution without asking the answer model to perform actions", async () => {
@@ -289,5 +321,92 @@ describe("POST /api/assistant/chat", () => {
       type: "action-result",
       action: { status: "SUCCEEDED" },
     })
+  })
+
+  it("finishes a filtered export only after the file and requested report are both verified", async () => {
+    mocks.requireUser.mockResolvedValue({
+      userId: "user-1",
+      username: "admin",
+      displayName: "管理员",
+      assignedRoleNames: ["管理员"],
+      assistantAccessMode: "AUTO_APPROVE",
+    })
+    const proposal = {
+      id: "action-export",
+      toolId: "project.export",
+      title: "导出任务进度",
+      description: "仅导出前端任务并生成进度报告",
+      riskLevel: "LOW",
+      status: "PROPOSED",
+      expiresAt: "2026-08-03T00:00:00.000Z",
+    }
+    const completed = {
+      ...proposal,
+      status: "SUCCEEDED",
+      result: {
+        message: "导出文件和进度报告已生成",
+        downloadUrl: "/api/assistant/actions/action-export/download",
+        matchedRowCount: 12,
+        progressReport: {
+          total: 12,
+          completed: 4,
+          inProgress: 6,
+          notStarted: 2,
+          overdue: 1,
+          averageProgress: 55.5,
+          categoryBreakdown: [{ category: "前端开发", total: 12, averageProgress: 55.5 }],
+          summary: "共 12 项，已完成 4 项、进行中 6 项、未开始 2 项，平均进度 55.5%，逾期未完成 1 项。",
+        },
+        includesProgressReport: true,
+        workbookSheets: ["项目进度", "进度总结"],
+      },
+    }
+    mocks.resolveProjectAssistantAction.mockResolvedValue({
+      action: proposal,
+      trace: {
+        requested: true,
+        outcome: "ACTION_READY",
+        toolId: "project.export",
+        objective: "导出前端任务并生成进度报告",
+        constraints: ["任务类别包含“前端”", "附带进度总结报告"],
+        observation: {
+          exportType: "gantt",
+          totalRows: 460,
+          matchedRows: 12,
+          appliedFilters: ["任务类别包含“前端”", "附带进度总结报告"],
+        },
+        toolArgs: {
+          exportType: "gantt",
+          taskCategoryKeywords: ["前端"],
+          includeProgressReport: true,
+        },
+        steps: [],
+      },
+    })
+    mocks.prisma.assistantActionRun.findFirst.mockResolvedValue({ id: proposal.id, userId: "user-1", status: "PROPOSED" })
+    mocks.executeAssistantActionAndAdvancePlan.mockResolvedValue({ action: completed })
+
+    const { POST } = await import("./route")
+    const response = await POST(request("帮我导出所有的前端任务，并且对当前前端任务进度总结出一份报告"))
+    const payload = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(payload.data.answer).toContain("已完成你的全部 2 项要求")
+    expect(payload.data.answer).toContain("任务进度总结")
+    expect(payload.data.answer).toContain("共 12 条记录")
+    expect(payload.data.assistantMessage.trace.agent.goalVerification).toMatchObject({
+      allRequiredPassed: true,
+      completedObjectives: 2,
+      requiredObjectives: 2,
+    })
+    expect(payload.data.assistantMessage.trace.agent.events.map((event: { phase: string }) => event.phase)).toEqual([
+      "UNDERSTAND",
+      "OBSERVE",
+      "PLAN",
+      "VALIDATE",
+      "EXECUTE",
+      "VERIFY",
+      "SYNTHESIZE",
+    ])
   })
 })

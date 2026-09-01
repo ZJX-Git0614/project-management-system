@@ -5,15 +5,19 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
+  Boxes,
   CalendarDays,
   ChartNoAxesCombined,
   ClipboardList,
   DatabaseBackup,
   FileText,
+  KeyRound,
+  Gavel,
   LayoutDashboard,
   ListTodo,
   LogOut,
   Menu,
+  MessagesSquare,
   PanelLeftClose,
   PanelLeftOpen,
   Search,
@@ -21,6 +25,7 @@ import {
   TrendingUp,
   User,
   Wallet,
+  Workflow,
   X,
 } from "lucide-react";
 import { useAuth } from "@/contexts/auth-context";
@@ -52,6 +57,7 @@ import { ProjectAssistant } from "@/components/project-assistant";
 import { useSystemFeedback } from "@/components/system-feedback-provider";
 import { api } from "@/lib/api-client";
 import { TODO_CHANGED_EVENT } from "@/lib/todo-events";
+import { ChangePasswordDialog } from "@/components/change-password-dialog";
 
 const AUTH_FREE_PATHS = ["/login", "/force-change-password"];
 const SIDEBAR_VISIBILITY_STORAGE_KEY = "pms.desktopSidebarVisible";
@@ -77,6 +83,7 @@ const SidebarContent = ({
   currentUser,
   onMobileClose,
   onLogout,
+  onChangePassword,
 }: {
   searchTerm: string;
   onSearchChange: (val: string) => void;
@@ -84,6 +91,7 @@ const SidebarContent = ({
   currentUser?: { id: string; username: string; assignedRoleNames: string[] };
   onMobileClose?: () => void;
   onLogout: () => void;
+  onChangePassword: () => void;
 }) => (
   <div className="flex h-full flex-col gap-3">
     {/* Search */}
@@ -177,6 +185,10 @@ const SidebarContent = ({
             {currentUser?.username} · {currentUser ? currentUser.assignedRoleNames.join("、") || "未分配角色" : "—"}
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
+          <DropdownMenuItem className="cursor-pointer" onClick={onChangePassword}>
+            <KeyRound className="size-3.5" />
+            修改密码
+          </DropdownMenuItem>
           <DropdownMenuItem className="cursor-pointer text-destructive" onClick={onLogout}>
             <LogOut className="size-3.5" />
             退出登录
@@ -201,6 +213,7 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
   const [desktopSidebarVisible, setDesktopSidebarVisible] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [todoCounts, setTodoCounts] = useState({ count: 0, notificationCount: 0 });
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
   const lastNotificationCountRef = useRef(0);
 
   const isAuthFree = AUTH_FREE_PATHS.includes(pathname);
@@ -331,10 +344,17 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
         ? [
             {
               href: currentProjectId ? `/projects/${currentProjectId}?nav=gantt` : "/projects",
-              label: "项目进度管理",
+              label: "项目WBS管理",
               active: isDetailGroupActive(fullPath, "gantt"),
               permissionKey: getDetailGroupPermissionKey("gantt"),
               icon: <TrendingUp className="size-4" />,
+            },
+            {
+              href: currentProjectId ? `/projects/${currentProjectId}?nav=execution` : "/projects",
+              label: "项目执行驾驶舱",
+              active: isDetailGroupActive(fullPath, "execution"),
+              permissionKey: getDetailGroupPermissionKey("execution"),
+              icon: <Boxes className="size-4" />,
             },
             {
               href: "/weekly-items",
@@ -389,6 +409,25 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
         : [],
     },
     {
+      title: "项目协同管理",
+      items: [
+        {
+          href: "/approvals",
+          label: "审批中心",
+          active: pathname === "/approvals",
+          permissionKey: "approval-center:view",
+          icon: <Gavel className="size-4" />,
+        },
+        {
+          href: "/collaboration",
+          label: "协同沟通",
+          active: pathname === "/collaboration",
+          permissionKey: "collaboration-center:view",
+          icon: <MessagesSquare className="size-4" />,
+        },
+      ],
+    },
+    {
       title: "系统设置",
       items: [
         {
@@ -404,6 +443,13 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
           active: pathname === "/admin/accounts",
           permissionKey: "account-management:view",
           icon: <ListTodo className="size-4" />,
+        },
+        {
+          href: "/admin/approval-workflows",
+          label: "审批流程配置",
+          active: pathname === "/admin/approval-workflows",
+          permissionKey: "approval-workflow-config:view",
+          icon: <Workflow className="size-4" />,
         },
         ...(isSuperAdmin
           ? [
@@ -457,6 +503,7 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
     currentUser,
     onMobileClose: () => setMobileOpen(false),
     onLogout: handleLogout,
+    onChangePassword: () => setChangePasswordOpen(true),
   };
 
   return (
@@ -557,6 +604,7 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
           currentProjectId={currentProjectId}
           currentProjectName={currentProject?.name}
         />
+        <ChangePasswordDialog open={changePasswordOpen} onOpenChange={setChangePasswordOpen} />
       </div>
     </TooltipProvider>
   );

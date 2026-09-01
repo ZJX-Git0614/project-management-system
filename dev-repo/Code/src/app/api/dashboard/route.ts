@@ -1,13 +1,14 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getUserFromRequest } from "@/lib/auth"
-import { ok, unauthorized } from "@/lib/api-utils"
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
+import { ok, unauthorizedFromRequest, forbidden } from "@/lib/api-utils"
 import { ProjectStatus } from "@/domain/enums"
 
 // GET /api/dashboard
 export async function GET(req: NextRequest) {
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req);
+  if (!user) return unauthorizedFromRequest(req);
+  if (!await userHasPermission(user, "overview:view")) return forbidden();
 
   const projects = await prisma.project.findMany({
     select: { status: true },

@@ -1,0 +1,59 @@
+Ceastar PMS 智能助手本地服务管理说明
+====================================
+
+一、入口
+
+管理员可直接在 PMS 的“智能助手设置”页面管理本机 Ollama 和 RAGLite。
+部署目录中的 assistant-services.bat 继续作为离线维护入口，用户不需要手工输入 PowerShell 命令。
+
+二、默认行为
+
+1. Ollama 和 RAGLite 的开机自启默认均为关闭。
+2. 两项服务可以分别启动、停止、重启和设置开机自启。
+3. 开启开机自启后，Windows 计划任务会在系统启动时运行守护进程；服务异常退出时会自动恢复。
+4. 手工停止服务后，本次开机期间不会被守护进程立即拉起；下次开机仍按自启设置恢复。
+5. PMS 页面通过仅管理员可访问的服务端接口连接 Windows 主机桥接，主机令牌不会发送到浏览器。
+
+三、持久化目录
+
+配置、运行日志和 RAGLite 知识库数据不会放在 PMS 更新目录中：
+
+配置：C:\ProgramData\Ceastar-PMS\assistant-services\assistant-services.json
+日志：C:\ProgramData\Ceastar-PMS\assistant-services\logs
+RAGLite 数据：C:\ProgramData\Ceastar-PMS\raglite-data
+桥接令牌：C:\ProgramData\Ceastar-PMS\assistant-services\bridge-token.txt
+
+因此 PMS 蓝绿更新、热更新和回滚不会覆盖 RAGLite 知识库。
+
+四、Ollama
+
+管理器会自动查找常见安装位置以及 PATH 中的 ollama.exe，并使用：
+
+OLLAMA_HOST=0.0.0.0:11434
+
+模型目录优先使用安装时当前用户的目录；当桥接以 SYSTEM 运行时，会自动扫描 Windows 用户目录中已有的 Ollama 模型：
+
+%USERPROFILE%\.ollama\models
+
+PMS 运行在 Docker 中，智能助手供应商地址应填写：
+
+http://host.docker.internal:11434
+
+五、RAGLite
+
+当前 PMS 包不强制捆绑 RAGLite。可在 PMS 智能助手设置页填写现有 RAGLite 安装目录、启动程序和参数，也可使用菜单第 6 项配置。
+
+常见 Python 虚拟环境可选择：
+
+安装目录\venv\Scripts\python.exe
+
+启动参数通常为：
+
+-m raglite
+
+具体命令以实际安装的 RAGLite 版本为准。配置完成并通过健康检查后，再开启 RAGLite 开机自启。
+
+六、权限
+
+开启或关闭开机自启需要创建 Windows 系统计划任务。如普通双击失败，请右键
+assistant-services.bat，选择“以管理员身份运行”。

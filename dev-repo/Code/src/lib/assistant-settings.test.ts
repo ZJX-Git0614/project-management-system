@@ -44,18 +44,27 @@ describe("assistant settings foundations", () => {
     const toolIds = ASSISTANT_TOOL_CATALOG.map((tool) => tool.id);
     expect(toolIds).toEqual(expect.arrayContaining([
       "todo.complete",
+      "approval.project-status.request",
+      "approval.wbs-baseline.request",
+      "approval.process",
+      "collaboration.message",
       "weekly.status.update",
       "risk.create",
+      "risk.create.batch",
       "risk.status.update",
       "schedule.compare.file",
+      "schedule.import.preview",
       "schedule.convert.file",
       "schedule.merge.files",
       "document.revision.generate",
+      "gantt.resource.optimize",
     ]));
     expect(ASSISTANT_TOOL_CATALOG.find((tool) => tool.id === "schedule.convert.file")).toMatchObject({
-      attachments: { min: 1, max: 1, extensions: [".mpp", ".xml", ".xlsx"] },
+      attachments: { min: 1, max: 1, extensions: [".mpp", ".xml", ".xls", ".xlsx"] },
       output: "FILE",
     });
+    expect(ASSISTANT_TOOL_CATALOG.find((tool) => tool.id === "schedule.import.preview")?.attachments?.extensions)
+      .toEqual(expect.arrayContaining([".mpp", ".xls", ".xlsx", ".csv", ".md", ".txt", ".docx", ".pdf"]));
   });
 
   it("publishes a complete executable contract for every tool", () => {
@@ -72,7 +81,24 @@ describe("assistant settings foundations", () => {
   it("rejects undeclared or invalid tool arguments before execution", () => {
     expect(validateAssistantToolArgs("gantt.progress.update", { taskId: "task-1", progress: 35 })).toMatchObject({ ok: true });
     expect(validateAssistantToolArgs("gantt.progress.update", { taskId: "task-1", progress: 101 })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("gantt.resource.optimize", { candidateKind: "FORMAL", revision: 3, snapshotHash: "hash" })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("gantt.resource.optimize", { candidateKind: "UNKNOWN", revision: 3, snapshotHash: "hash" })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("weekly.status.update", { weeklyItemId: "item-1", progress: 100 })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("weekly.status.update", { weeklyItemId: "item-1", status: "DONE", progress: 100 })).toMatchObject({ ok: false });
     expect(validateAssistantToolArgs("todo.create", { title: "核对计划", targetPersonName: "张三", injected: true })).toMatchObject({ ok: false });
     expect(validateAssistantToolArgs("schedule.merge.files", { attachmentIds: ["only-one"] })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("project.export", { exportType: "gantt", taskDepths: [1, 2, 3] })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("project.export", { exportType: "gantt", taskCategoryKeywords: ["前端"], includeProgressReport: true })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("project.export", { exportType: "budget", includeVisualization: true })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("project.export", { exportType: "gantt", includeProgressReport: "true" })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("project.export", { exportType: "gantt", taskDepths: [0, 2] })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("project.export", { exportType: "gantt", taskDepths: [1.5] })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("risk.create.batch", { risks: [{ riskName: "供应商延期风险" }] })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("risk.create.batch", { risks: [] })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("approval.project-status.request", { targetStatus: "COMPLETED" })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("approval.project-status.request", { targetStatus: "UNKNOWN" })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("approval.process", { action: "reject", instanceId: "approval-1", comment: "资料不完整" })).toMatchObject({ ok: true });
+    expect(validateAssistantToolArgs("approval.process", { action: "skip", instanceId: "approval-1" })).toMatchObject({ ok: false });
+    expect(validateAssistantToolArgs("collaboration.message", { threadId: "thread-1", content: "请补充评审意见" })).toMatchObject({ ok: true });
   });
 });

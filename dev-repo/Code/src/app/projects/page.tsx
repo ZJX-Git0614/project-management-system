@@ -112,6 +112,7 @@ export default function ProjectsPage() {
     deviceCount: number;
     repairCycleDays: number;
     startDate: string;
+    expectedEndDate: string;
     initialMember?: { roleName: string; personName: string };
   }) => {
     try {
@@ -158,7 +159,8 @@ export default function ProjectsPage() {
     };
 
     try {
-      await api.put(`/api/projects/${projectId}`, { status: statusMap[action] });
+      const result = await api.put<{ approvalRequired?: boolean }>(`/api/projects/${projectId}`, { status: statusMap[action] });
+      if (result.approvalRequired) alert("项目状态变更审批已发起，可在审批中心查看进度。");
       await fetchData();
     } catch (error) {
       alert(error instanceof Error ? error.message : "操作失败");
@@ -282,8 +284,8 @@ export default function ProjectsPage() {
                   <TableCell>{project.amountWan}</TableCell>
                   <TableCell>{project.deviceCount}</TableCell>
                   <TableCell>{project.repairCycleDays}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{project.startDate}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{project.expectedEndDate}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{project.startDate || "未确定"}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{project.expectedEndDate || "-"}</TableCell>
                   <TableCell>
                     <Badge variant={STATUS_BADGE_VARIANT[project.status] ?? "secondary"}>
                       {PROJECT_STATUS_LABEL[project.status as ProjectStatus] || project.status}

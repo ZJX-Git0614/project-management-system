@@ -15,7 +15,6 @@ export enum ItemStatus {
   PENDING = "PENDING",
   IN_PROGRESS = "IN_PROGRESS",
   DONE = "DONE",
-  CANCELED = "CANCELED",
 }
 
 export enum ItemPriority {
@@ -33,6 +32,9 @@ export enum TodoStatus {
 
 export enum TodoType {
   WEEKLY_ITEM_OVERDUE = "WEEKLY_ITEM_OVERDUE",
+  APPROVAL_PENDING = "APPROVAL_PENDING",
+  APPROVAL_REMINDER = "APPROVAL_REMINDER",
+  COLLABORATION_MENTION = "COLLABORATION_MENTION",
   CUSTOM = "CUSTOM",
 }
 

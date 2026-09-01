@@ -1,7 +1,10 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getUserFromRequest } from "@/lib/auth"
-import { ok, err, unauthorized, notFound } from "@/lib/api-utils"
+import { ok, err, forbidden, notFound, unauthorizedFromRequest } from "@/lib/api-utils"
+import { resolveProjectMemberAccount } from "@/lib/project-member-accounts"
+import { getValidProjectRoleNames, serializeProjectMember } from "@/lib/project-member-view"
+import { parseRoleNames } from "@/lib/role-assignments"
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth"
 
 // GET /api/projects/[id]/members
 export async function GET(
@@ -9,21 +12,20 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req)
+  if (!user) return unauthorizedFromRequest(req)
+  if (!await userHasPermission(user, "project-members:view")) return forbidden()
 
   const project = await prisma.project.findUnique({ where: { id }, select: { id: true } })
   if (!project) return notFound("项目")
 
   const members = await prisma.projectMember.findMany({
     where: { projectId: id },
-    orderBy: [{ roleName: "asc" }, { personName: "asc" }, { createdAt: "asc" }],
+    include: { account: { select: { displayName: true, assignedRoleNames: true } } },
+    orderBy: [{ personName: "asc" }, { createdAt: "asc" }],
   })
-  return ok(members.map((member) => ({
-    ...member,
-    createdAt: member.createdAt.toISOString(),
-    updatedAt: member.updatedAt.toISOString(),
-  })))
+  const validRoleNames = await getValidProjectRoleNames(prisma)
+  return ok(members.map((member) => serializeProjectMember(member, validRoleNames)))
 }
 
 // POST /api/projects/[id]/members
@@ -32,8 +34,9 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req)
+  if (!user) return unauthorizedFromRequest(req)
+  if (!await userHasPermission(user, "project-members:create")) return forbidden()
 
   const project = await prisma.project.findUnique({ where: { id } })
   if (!project) return notFound("项目")
@@ -42,29 +45,31 @@ export async function POST(
   }
 
   const body = await req.json()
-  if (!body.roleName || !body.personName) return err("角色和人员不能为空")
+  if (!body.accountId && !body.personName) return err("人员不能为空")
 
-  const account = await prisma.userAccount.findFirst({
-    where: {
-      displayName: body.personName,
-      enabled: true,
-    },
-    select: {
-      assignedRoleNames: true,
-    },
+  const account = await resolveProjectMemberAccount({
+    accountId: typeof body.accountId === "string" ? body.accountId : undefined,
+    personName: typeof body.personName === "string" ? body.personName : undefined,
   })
-  if (!account) return err("请选择后台账号管理中的启用账号")
+  if (!account) return err("请选择后台账号管理中的唯一启用账号")
 
-  const assignedRoleNames = JSON.parse(account.assignedRoleNames || "[]") as string[]
-  if (!assignedRoleNames.includes(body.roleName)) {
-    return err("所选人员未分配该项目角色，请先在后台账号管理中调整角色")
-  }
+  const validRoleNames = await getValidProjectRoleNames(prisma)
+  const assignedRoleNames = parseRoleNames(account.assignedRoleNames)
+    .filter((roleName) => validRoleNames.has(roleName))
+  if (assignedRoleNames.length === 0) return err("所选人员没有有效项目角色，请先在后台账号管理中分配角色")
+
+  const existingMember = await prisma.projectMember.findFirst({
+    where: { projectId: id, accountId: account.id },
+    select: { id: true },
+  })
+  if (existingMember) return err("该账号已经是项目成员，不能重复添加", 409)
 
   const member = await prisma.projectMember.create({
     data: {
       projectId: id,
-      roleName: body.roleName,
-      personName: body.personName,
+      accountId: account.id,
+      roleName: assignedRoleNames[0],
+      personName: account.displayName,
     },
   })
 
@@ -75,15 +80,13 @@ export async function POST(
       entityId: member.id,
       actionType: "CREATE",
       operator: user.displayName,
-      detail: `添加项目成员 ${body.personName}（${body.roleName}）`,
+      detail: `添加项目成员 ${account.displayName}（${assignedRoleNames.join("、")}）`,
     },
   })
 
   return ok(
     {
-      ...member,
-      createdAt: member.createdAt.toISOString(),
-      updatedAt: member.updatedAt.toISOString(),
+      ...serializeProjectMember({ ...member, account }, validRoleNames),
     },
     201
   )

@@ -17,6 +17,7 @@ interface AuthContextValue {
   login: (username: string, password: string) => Promise<AuthUser>
   logout: () => void
   refresh: () => Promise<void>
+  changePassword: (newPassword: string, oldPassword?: string) => Promise<AuthUser>
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined)
@@ -53,13 +54,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return userData
   }, [])
 
+  const changePassword = useCallback(async (newPassword: string, oldPassword?: string) => {
+    const result = await api.put<{ token: string; user: AuthUser }>("/api/auth/me", {
+      newPassword,
+      oldPassword,
+    })
+    api.saveAuth(result.token, result.user)
+    setUser(result.user)
+    return result.user
+  }, [])
+
   const logout = useCallback(() => {
     setUser(null)
+    if (typeof window !== "undefined") {
+      Object.keys(window.sessionStorage)
+        .filter((key) => key.startsWith("ceastar:gantt-history:"))
+        .forEach((key) => window.sessionStorage.removeItem(key))
+    }
     api.logout()
   }, [])
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, refresh }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, refresh, changePassword }}>
       {children}
     </AuthContext.Provider>
   )

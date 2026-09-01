@@ -1,14 +1,15 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getUserFromRequest } from "@/lib/auth"
-import { ok, unauthorized } from "@/lib/api-utils"
+import { ok, err } from "@/lib/api-utils"
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth"
 import { ProjectStatus } from "@/domain/enums"
 
 // GET /api/overview
 // 全局聚合：项目总数/状态分布、当前周事项统计
 export async function GET(req: NextRequest) {
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req)
+  if (!user) return err("未登录", 401)
+  if (!await userHasPermission(user, "project-gantt:view")) return err("权限不足", 403)
 
   const today = new Date()
   const day = today.getDay() || 7

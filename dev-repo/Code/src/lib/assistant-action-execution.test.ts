@@ -1,16 +1,26 @@
+import type { AssistantActionRun } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 
-import { classifyAssistantActionError } from "@/lib/assistant-action-execution";
+import { verifyAssistantActionResult } from "@/lib/assistant-action-execution";
 
-describe("assistant action failure classification", () => {
-  it.each([
-    ["当前账号没有执行权限", "PERMISSION_DENIED", false],
-    ["请选择一个需要转换的附件", "INPUT_REQUIRED", false],
-    ["一级任务已发生变化，请重新发起操作", "CONCURRENT_CHANGE", false],
-    ["fetch failed: ECONNRESET", "TEMPORARY_DEPENDENCY", true],
-    ["生成文件校验失败", "VERIFICATION_FAILED", false],
-    ["不支持的 Agent 工具", "UNSUPPORTED_TOOL", false],
-  ])("classifies %s", (message, code, retryable) => {
-    expect(classifyAssistantActionError(new Error(message))).toMatchObject({ code, retryable });
+const action = (processedCount: number) => ({
+  toolId: "risk.create.batch",
+  argsJson: JSON.stringify({ risks: [{ riskName: "进度延期风险" }, { riskName: "成本超支风险" }] }),
+  resultJson: JSON.stringify({
+    message: "批量登记完成",
+    requestedCount: 2,
+    processedCount,
+    riskIds: processedCount === 2 ? ["risk-1", "risk-2"] : ["risk-1"],
+    riskCodes: processedCount === 2 ? ["Risk001", "Risk002"] : ["Risk001"],
+  }),
+} as AssistantActionRun);
+
+describe("assistant action execution verification", () => {
+  it("accepts a complete batch risk result", () => {
+    expect(verifyAssistantActionResult(action(2))).toMatchObject({ passed: true });
+  });
+
+  it("rejects a partially processed risk batch", () => {
+    expect(() => verifyAssistantActionResult(action(1))).toThrow("要求登记 2 条风险");
   });
 });

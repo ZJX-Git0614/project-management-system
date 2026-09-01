@@ -1,9 +1,9 @@
 import { NextRequest } from "next/server";
 
-import { getUserFromRequest } from "@/lib/auth";
-import { ensureMutableProject, err, notFound, ok, unauthorized } from "@/lib/api-utils";
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
+import { ensureMutableProject, err, forbidden, notFound, ok, unauthorizedFromRequest } from "@/lib/api-utils"
 import { calculateEarnedValue } from "@/lib/earned-value";
-import { getOrderedGanttTasks, serializeGanttTask } from "@/lib/gantt-task-service";
+import { getOrderedGanttTasks, serializeGanttTaskList } from "@/lib/gantt-task-service";
 import { prisma } from "@/lib/prisma";
 import { manpowerHourlyCost, projectBudgetItemPlannedCost } from "@/lib/project-budget-cost";
 
@@ -11,14 +11,15 @@ const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const user = getUserFromRequest(req);
-  if (!user) return unauthorized();
+  const user = await getAuthenticatedUser(req);
+  if (!user) return unauthorizedFromRequest(req);
+  if (!await userHasPermission(user, "earned-value:view")) return forbidden();
   const project = await prisma.project.findUnique({ where: { id }, select: { id: true, amountWan: true } });
   if (!project) return notFound("项目");
 
   const requestedDate = req.nextUrl.searchParams.get("statusDate")?.trim() ?? "";
   const statusDate = datePattern.test(requestedDate) ? requestedDate : new Date().toISOString().slice(0, 10);
-  const tasks = (await getOrderedGanttTasks(id)).map(serializeGanttTask);
+  const tasks = serializeGanttTaskList(await getOrderedGanttTasks(id));
   const budgetItems = await prisma.projectBudgetItem.findMany({
     where: { projectId: id },
     orderBy: [{ category: { sortOrder: "asc" } }, { sortOrder: "asc" }],
@@ -108,23 +109,22 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
 export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const user = getUserFromRequest(req);
-  if (!user) return unauthorized();
+  const user = await getAuthenticatedUser(req);
+  if (!user) return unauthorizedFromRequest(req);
+  if (!await userHasPermission(user, "earned-value:edit")) return forbidden();
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
 
-  const body = await req.json() as { entries?: Array<{ taskId?: unknown; budgetAtCompletion?: unknown; actualCost?: unknown; budgetItemId?: unknown; estimatedWorkHours?: unknown; actualWorkHours?: unknown }> };
+  const body = await req.json() as { entries?: Array<{ taskId?: unknown; budgetAtCompletion?: unknown; actualCost?: unknown; budgetItemId?: unknown }> };
   if (!Array.isArray(body.entries)) return err("挣值任务成本数据格式不正确");
   const entries = body.entries.map((entry) => ({
     taskId: String(entry.taskId ?? "").trim(),
     budgetAtCompletion: Number(entry.budgetAtCompletion ?? 0),
     actualCost: Number(entry.actualCost ?? 0),
     budgetItemId: entry.budgetItemId ? String(entry.budgetItemId) : null,
-    estimatedWorkHours: Number(entry.estimatedWorkHours ?? 0),
-    actualWorkHours: Number(entry.actualWorkHours ?? 0),
   }));
-  if (entries.some((entry) => !entry.taskId || !Number.isFinite(entry.budgetAtCompletion) || entry.budgetAtCompletion < 0 || !Number.isFinite(entry.actualCost) || entry.actualCost < 0 || !Number.isFinite(entry.estimatedWorkHours) || entry.estimatedWorkHours < 0 || !Number.isFinite(entry.actualWorkHours) || entry.actualWorkHours < 0)) {
-    return err("成本与工时必须为大于或等于 0 的数字");
+  if (entries.some((entry) => !entry.taskId || !Number.isFinite(entry.budgetAtCompletion) || entry.budgetAtCompletion < 0 || !Number.isFinite(entry.actualCost) || entry.actualCost < 0)) {
+    return err("成本必须为大于或等于 0 的数字");
   }
 
   const validTaskCount = await prisma.projectGanttTask.count({
@@ -144,8 +144,6 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
         budgetAtCompletion: entry.budgetAtCompletion,
         actualCost: entry.actualCost,
         budgetItemId: entry.budgetItemId,
-        estimatedWorkHours: entry.estimatedWorkHours,
-        actualWorkHours: entry.actualWorkHours,
       },
     })),
     prisma.operationHistory.create({
@@ -155,7 +153,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
         entityId: id,
         actionType: "UPDATE",
         operator: user.displayName,
-        detail: `更新 ${entries.length} 个任务的挣值预算关联、成本与工时数据`,
+        detail: `更新 ${entries.length} 个任务的挣值预算关联与成本数据`,
       },
     }),
   ]);

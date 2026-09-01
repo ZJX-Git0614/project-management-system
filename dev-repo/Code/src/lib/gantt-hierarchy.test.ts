@@ -3,9 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   changeGanttTaskHierarchy,
   synchronizeGanttTaskCategories,
+  synchronizeGanttTaskCategoriesAfterNameChange,
   type GanttHierarchyTask,
 } from "@/lib/gantt-hierarchy";
-import { renumberGanttTaskCodes } from "@/lib/gantt-task-codes";
+import { orderGanttTasksByHierarchy, renumberGanttTaskCodes } from "@/lib/gantt-task-codes";
 
 const task = (
   id: string,
@@ -55,6 +56,25 @@ describe("changeGanttTaskHierarchy", () => {
     expect(numbered.find((item) => item.id === "last")).toMatchObject({ parentId: null, taskCode: "Task3" });
   });
 
+  it("keeps the visible preorder unchanged when the first child is outdented", () => {
+    const source = [
+      task("root", null, 1),
+      task("first-child", "root", 1),
+      task("second-child", "root", 2),
+      task("last", null, 2),
+    ];
+
+    const before = orderGanttTasksByHierarchy(source).map((item) => item.id);
+    const result = changeGanttTaskHierarchy(source, ["first-child"], "OUTDENT");
+    const after = orderGanttTasksByHierarchy(result.tasks).map((item) => item.id);
+    const numbered = renumberGanttTaskCodes(result.tasks);
+
+    expect(after).toEqual(before);
+    expect(numbered.find((item) => item.id === "first-child")).toMatchObject({ parentId: null, taskCode: "Task2" });
+    expect(numbered.find((item) => item.id === "second-child")).toMatchObject({ parentId: "first-child", taskCode: "Task2.1" });
+    expect(numbered.find((item) => item.id === "last")).toMatchObject({ parentId: null, taskCode: "Task3" });
+  });
+
   it("outdents multiple sibling roots in their existing order", () => {
     const source = [
       task("root", null, 1),
@@ -83,6 +103,24 @@ describe("changeGanttTaskHierarchy", () => {
     expect(result.movedTaskIds).toEqual([]);
   });
 
+  it("keeps visible preorder unchanged when indenting a branch", () => {
+    const source = [
+      task("first", null, 1),
+      task("first-child", "first", 1),
+      task("second", null, 2),
+      task("second-child", "second", 1),
+      task("third", null, 3),
+    ];
+
+    const before = orderGanttTasksByHierarchy(source).map((item) => item.id);
+    const result = changeGanttTaskHierarchy(source, ["second"], "INDENT");
+    const after = orderGanttTasksByHierarchy(result.tasks).map((item) => item.id);
+
+    expect(after).toEqual(before);
+    expect(result.tasks.find((item) => item.id === "second")).toMatchObject({ parentId: "first" });
+    expect(result.tasks.find((item) => item.id === "second-child")).toMatchObject({ parentId: "second" });
+  });
+
   it("rebuilds only the moved branch's category path", () => {
     const source = [
       { ...task("root", null, 1), taskCategory: "设计", taskName: "设计阶段" },
@@ -96,5 +134,26 @@ describe("changeGanttTaskHierarchy", () => {
     expect(categorized.find((item) => item.id === "feature")).toMatchObject({ taskCategory: "设计 / 开发" });
     expect(categorized.find((item) => item.id === "child")).toMatchObject({ taskCategory: "设计 / 开发 / 接口" });
     expect(categorized.find((item) => item.id === "root")).toMatchObject({ taskCategory: "设计" });
+  });
+
+  it("updates the renamed task category segment throughout its subtree", () => {
+    const source = [
+      { ...task("root", null, 1), taskCategory: "研发", taskName: "研发" },
+      { ...task("feature", "root", 1), taskCategory: "研发 / 前端", taskName: "前端" },
+      { ...task("child", "feature", 1), taskCategory: "研发 / 前端 / 接口", taskName: "登录接口" },
+      { ...task("other", null, 2), taskCategory: "采购", taskName: "采购" },
+    ];
+
+    const categorized = synchronizeGanttTaskCategoriesAfterNameChange(source, "feature", "前端", "客户端");
+
+    expect(categorized.find((item) => item.id === "feature")).toMatchObject({ taskCategory: "研发 / 客户端" });
+    expect(categorized.find((item) => item.id === "child")).toMatchObject({ taskCategory: "研发 / 客户端 / 接口" });
+    expect(categorized.find((item) => item.id === "other")).toMatchObject({ taskCategory: "采购" });
+  });
+
+  it("initializes a blank root category from its first task name", () => {
+    const source = [{ ...task("root", null, 1), taskCategory: "", taskName: "新任务" }];
+    const categorized = synchronizeGanttTaskCategoriesAfterNameChange(source, "root", "", "新任务");
+    expect(categorized[0]).toMatchObject({ taskCategory: "新任务" });
   });
 });

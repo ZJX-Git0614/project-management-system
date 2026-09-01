@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "drawio": {
+      "command": "/bin/bash",
+      "args": [
+        "-c",
+        "exec \"$HOME/Library/Application Support/Ceastar-PMS/drawio-mcp.sh\""
+      ]
+    }
+  }
+}

@@ -81,6 +81,7 @@ export const callAssistantProviderModel = async (params: {
   maxTokens: number;
   signal?: AbortSignal;
   timeoutMs?: number;
+  onDelta?: (delta: string) => void;
 }) => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Math.max(1_000, params.timeoutMs ?? 60_000));
@@ -97,12 +98,64 @@ export const callAssistantProviderModel = async (params: {
         temperature: params.temperature,
         max_tokens: params.maxTokens,
         messages: params.messages,
+        stream: Boolean(params.onDelta),
       }),
     });
     if (!response.ok) throw new Error(`模型调用失败（HTTP ${response.status}）`);
-    return extractModelText(await response.json());
+    return params.onDelta
+      ? consumeAssistantProviderStream(response, params.onDelta)
+      : extractModelText(await response.json());
   } finally {
     clearTimeout(timeout);
     params.signal?.removeEventListener("abort", abortFromCaller);
   }
+};
+
+export const consumeAssistantProviderStream = async (
+  response: Response,
+  onDelta: (delta: string) => void,
+) => {
+  if (!response.body) throw new Error("模型未返回可读取的流");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+  const consumeLine = (line: string) => {
+    const normalized = line.trim();
+    if (!normalized || normalized.startsWith(":")) return false;
+    const data = normalized.startsWith("data:") ? normalized.slice(5).trim() : normalized;
+    if (data === "[DONE]") return true;
+    try {
+      const parsed = JSON.parse(data) as {
+        choices?: Array<{ delta?: { content?: unknown } }>;
+      };
+      const delta = parsed.choices?.[0]?.delta?.content;
+      if (typeof delta === "string" && delta) {
+        content += delta;
+        onDelta(delta);
+      }
+    } catch {
+      // Ignore keepalive and provider-specific event records.
+    }
+    return false;
+  };
+
+  let done = false;
+  while (!done) {
+    const chunk = await reader.read();
+    buffer += decoder.decode(chunk.value, { stream: !chunk.done });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (consumeLine(line)) {
+        done = true;
+        break;
+      }
+    }
+    if (chunk.done) {
+      if (buffer) consumeLine(buffer);
+      break;
+    }
+  }
+  return content.trim();
 };

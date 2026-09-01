@@ -49,6 +49,7 @@ export const PERMISSION_TREE = [
           { key: "project-info:view", label: "查看项目信息页", type: "section" },
           { key: "project-info:core-view", label: "查看项目核心信息卡", type: "section" },
           { key: "project-info:edit", label: "保存项目信息", type: "action" },
+          { key: "project-info:status-request", label: "申请项目状态变更", type: "action" },
           { key: "project-info:start", label: "启动项目", type: "action" },
           { key: "project-info:complete", label: "完成项目", type: "action" },
           { key: "project-info:void", label: "作废项目", type: "action" },
@@ -62,17 +63,6 @@ export const PERMISSION_TREE = [
               { key: "project-members:export", label: "导出项目组成员", type: "action" },
               { key: "project-members:create", label: "添加成员", type: "action" },
               { key: "project-members:delete", label: "删除成员", type: "action" },
-            ],
-          },
-          {
-            key: "project-gantt",
-            label: "项目进度管理",
-            type: "section",
-            children: [
-              { key: "project-gantt:view", label: "查看项目进度管理", type: "section" },
-              { key: "project-gantt:create", label: "新增甘特任务", type: "action" },
-              { key: "project-gantt:edit", label: "编辑甘特任务", type: "action" },
-              { key: "project-gantt:delete", label: "删除甘特任务", type: "action" },
             ],
           },
           {
@@ -114,11 +104,18 @@ export const PERMISSION_TREE = [
     type: "group",
     children: [
       {
-        key: "overview",
-        label: "项目进度总揽",
+        key: "project-wbs",
+        label: "项目WBS管理",
         type: "page",
         children: [
-          { key: "overview:view", label: "查看项目进度总揽", type: "section" },
+          { key: "project-gantt:view", label: "查看项目WBS管理", type: "section" },
+          { key: "project-gantt:create", label: "新增甘特任务", type: "action" },
+          { key: "project-gantt:edit", label: "编辑甘特任务", type: "action" },
+          { key: "project-gantt:delete", label: "删除甘特任务", type: "action" },
+          { key: "project-gantt:baseline-draft", label: "维护 WBS 基线草案", type: "action" },
+          { key: "project-gantt:baseline-publish", label: "发布或变更 WBS 基线", type: "action" },
+          { key: "project-gantt:baseline-request", label: "申请发布 WBS 基线", type: "action" },
+          { key: "project-execution:gate-request", label: "申请执行阶段 Gate 放行", type: "action" },
         ],
       },
       {
@@ -171,6 +168,34 @@ export const PERMISSION_TREE = [
     ],
   },
   {
+    key: "project-collaboration",
+    label: "项目协同管理",
+    type: "group",
+    children: [
+      {
+        key: "approval-center",
+        label: "审批中心",
+        type: "page",
+        children: [
+          { key: "approval-center:view", label: "查看审批中心", type: "section" },
+          { key: "approval-center:process", label: "处理本人审批", type: "action" },
+          { key: "approval-center:cancel", label: "撤销本人发起的审批", type: "action" },
+          { key: "approval-center:retry", label: "重试失败的业务执行", type: "action" },
+        ],
+      },
+      {
+        key: "collaboration-center",
+        label: "协同沟通",
+        type: "page",
+        children: [
+          { key: "collaboration-center:view", label: "查看协同会话", type: "section" },
+          { key: "collaboration-center:create", label: "创建协同会话", type: "action" },
+          { key: "collaboration-center:message", label: "发送协同消息", type: "action" },
+        ],
+      },
+    ],
+  },
+  {
     key: "system-settings",
     label: "系统设置",
     type: "group",
@@ -200,6 +225,19 @@ export const PERMISSION_TREE = [
         children: [
           { key: "account-management:view", label: "查看后台账号管理", type: "section" },
           { key: "account-management:edit", label: "维护后台账号管理", type: "action" },
+        ],
+      },
+      {
+        key: "approval-workflow-config",
+        label: "审批流程配置",
+        type: "page",
+        children: [
+          { key: "approval-workflow-config:view", label: "查看审批流程配置", type: "section" },
+          { key: "approval-workflow-config:edit", label: "编辑审批流程草稿", type: "action" },
+          { key: "approval-workflow-config:publish", label: "发布审批流程版本", type: "action" },
+          { key: "approval-workflow-config:delegate", label: "配置审批委托", type: "action" },
+          { key: "approval-workflow-config:remind", label: "执行审批催办", type: "action" },
+          { key: "approval-workflow-config:analytics", label: "查看审批统计", type: "section" },
         ],
       },
     ],
@@ -264,6 +302,7 @@ export const NAV_GROUP_PERMISSION_KEYS = {
   projectProgress: "project-progress",
   projectScope: "project-scope",
   projectRisk: "project-risk",
+  projectCollaboration: "project-collaboration",
   systemSettings: "system-settings",
 } as const;
 
@@ -277,14 +316,34 @@ export const PERMISSION_ROUTE_RULES: PermissionRouteRule[] = [
   { pathname: "/role-config", permissionKey: "role-config:view" },
   { pathname: "/admin/permissions", permissionKey: "permission-config:view" },
   { pathname: "/admin/accounts", permissionKey: "account-management:view" },
-  { pathname: "/overview", permissionKey: "overview:view" },
+  { pathname: "/overview", permissionKey: "project-gantt:view" },
   { pathname: "/weekly-items", permissionKey: "weekly-items:view" },
   { pathname: "/risk-register", permissionKey: "risk-register:view" },
+  { pathname: "/approvals", permissionKey: "approval-center:view" },
+  { pathname: "/collaboration", permissionKey: "collaboration-center:view" },
+  { pathname: "/admin/approval-workflows", permissionKey: "approval-workflow-config:view" },
 ];
 
 const cloneKeys = (keys: readonly string[]) => [...keys];
 
 const allNodeKeysFor = (nodeKey: string): string[] => [nodeKey, ...PERMISSION_DESCENDANT_KEYS[nodeKey]];
+
+/**
+ * 旧版本将甘特页面拆成“项目进度总揽”和“项目进度管理”两套节点。
+ * 新版统一为项目 WBS 管理；保留映射避免已保存的角色配置失效。
+ */
+const LEGACY_PERMISSION_KEY_MIGRATIONS: Record<string, readonly string[]> = {
+  "project-gantt": ["project-wbs", "project-gantt:view"],
+  overview: ["project-wbs", "project-gantt:view"],
+  "overview:view": ["project-gantt:view"],
+};
+
+const normalizePermissionKeys = (keys: unknown[]): string[] => keys
+  .flatMap((key) => {
+    if (typeof key !== "string") return [];
+    return LEGACY_PERMISSION_KEY_MIGRATIONS[key] ?? [key];
+  })
+  .filter((key) => key in PERMISSION_NODE_BY_KEY);
 
 export const DEFAULT_PERMISSION_TREE: PermissionTreeState = {
   [ADMIN_ROLE_NAME]: cloneKeys(PERMISSION_NODE_KEYS),
@@ -295,6 +354,8 @@ export const DEFAULT_PERMISSION_TREE: PermissionTreeState = {
     ...allNodeKeysFor("project-progress"),
     ...allNodeKeysFor("project-scope"),
     ...allNodeKeysFor("project-risk"),
+    ...allNodeKeysFor("project-collaboration"),
+    ...allNodeKeysFor("approval-center"),
   ],
   "项目成员": [
     "project-list",
@@ -304,8 +365,6 @@ export const DEFAULT_PERMISSION_TREE: PermissionTreeState = {
     "project-info",
     "project-info:view",
     "project-info:core-view",
-    "project-gantt",
-    "project-gantt:view",
     "project-performance",
     "earned-value",
     "earned-value:view",
@@ -314,8 +373,7 @@ export const DEFAULT_PERMISSION_TREE: PermissionTreeState = {
     "project-members",
     "project-members:view",
     "project-progress",
-    "overview",
-    "overview:view",
+    "project-wbs",
     "weekly-items",
     "weekly-items:view",
     "project-scope",
@@ -324,6 +382,15 @@ export const DEFAULT_PERMISSION_TREE: PermissionTreeState = {
     "project-risk",
     "risk-register",
     "risk-register:view",
+    "project-collaboration",
+    "approval-center",
+    "approval-center:view",
+    "approval-center:process",
+    "approval-center:cancel",
+    "collaboration-center",
+    "collaboration-center:view",
+    "collaboration-center:create",
+    "collaboration-center:message",
   ],
 };
 
@@ -345,7 +412,7 @@ export const normalizePermissionTree = (tree: Partial<PermissionTreeState> | und
       continue;
     }
 
-    const validKeys = value.filter((key): key is string => typeof key === "string" && key in PERMISSION_NODE_BY_KEY);
+    const validKeys = normalizePermissionKeys(value);
     const expanded = new Set<string>();
 
     validKeys.forEach((key) => {

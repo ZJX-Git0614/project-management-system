@@ -5,17 +5,31 @@ import * as XLSX from "@e965/xlsx";
 import {
   parseGanttExcel,
   parseGanttImportFile,
+  type GanttImportBundle,
   type ImportedGanttTask,
 } from "@/lib/gantt-file-transfer";
 import { isValidGanttDurationDays, normalizeGanttDurationDays } from "@/lib/gantt-calendar";
 
-export const SCHEDULE_MERGE_EXTENSIONS = [".mpp", ".xml", ".xlsx", ".csv", ".md", ".txt"] as const;
-export const SCHEDULE_CONVERT_EXTENSIONS = [".mpp", ".xml", ".xlsx"] as const;
+export const SCHEDULE_MERGE_EXTENSIONS = [".mpp", ".xml", ".xls", ".xlsx", ".csv", ".md", ".txt"] as const;
+export const SCHEDULE_CONVERT_EXTENSIONS = [".mpp", ".xml", ".xls", ".xlsx"] as const;
+export const SCHEDULE_IMPORT_EXTENSIONS = [
+  ".mpp",
+  ".xml",
+  ".xls",
+  ".xlsx",
+  ".csv",
+  ".md",
+  ".txt",
+  ".docx",
+  ".pdf",
+] as const;
 
 export type ScheduleMergeSource = {
   fileName: string;
   buffer: Buffer;
 };
+
+export type ScheduleImportHierarchyMode = "AUTO" | "FLAT";
 
 export type ScheduleMergeWarning = {
   sourceFile: string;
@@ -48,6 +62,7 @@ const HEADER_ALIASES = {
   submodule: ["子模块", "二级模块"],
   taskName: ["任务名称", "任务名", "功能项", "工作项", "任务", "taskname", "name"],
   taskDescription: ["任务描述", "描述", "description", "notes"],
+  owner: ["负责人", "责任人", "资源名称", "资源", "owner", "resource", "resourcename"],
   remark: ["备注", "备注信息", "remark", "remarks", "note"],
   start: ["计划开始", "计划开始时间", "开始时间", "start", "startdate"],
   finish: ["计划完成", "计划完成时间", "结束时间", "finish", "finishdate", "enddate"],
@@ -68,7 +83,13 @@ const normalizeHeader = (value: unknown) => String(value ?? "")
 const cleanText = (value: unknown) => String(value ?? "").replace(/\u0000/g, "").trim();
 
 const asDate = (value: unknown) => {
-  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
+  // xlsx cellDates 解析出的 Date 是本地时区零点，按本地年月日取值，避免 UTC 偏移一天。
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, "0");
+    const day = String(value.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
   if (typeof value === "number" && Number.isFinite(value)) {
     const parsed = XLSX.SSF.parse_date_code(value);
     if (parsed) return `${String(parsed.y).padStart(4, "0")}-${String(parsed.m).padStart(2, "0")}-${String(parsed.d).padStart(2, "0")}`;
@@ -130,6 +151,7 @@ const createTask = (params: {
   taskCategory?: string;
   taskName: string;
   taskDescription?: string;
+  ownerName?: string;
   remark?: string;
   startDate: string;
   finishDate?: string;
@@ -153,6 +175,7 @@ const createTask = (params: {
     taskCategory: params.taskCategory || "",
     taskName: params.taskName,
     taskDescription: params.taskDescription || "",
+    ownerName: params.ownerName || "",
     startDate: params.startDate,
     finishDate: params.finishDate || addDaysInclusive(params.startDate, durationDays),
     durationDays,
@@ -228,6 +251,7 @@ const rowsToTasks = (params: {
         taskCategory: category,
         taskName,
         taskDescription: cleanText(readColumn(row, map, "taskDescription")),
+        ownerName: cleanText(readColumn(row, map, "owner")),
         remark: cleanText(readColumn(row, map, "remark")),
         startDate,
         finishDate,
@@ -299,6 +323,62 @@ const parseDelimitedText = (fileName: string, content: string, fallbackStartDate
   return rowsToTasks({ rows, sourceKey: "text", sourceFile: fileName, fallbackStartDate, warnings });
 };
 
+const parseDocumentTaskList = (fileName: string, content: string, fallbackStartDate: string, warnings: ScheduleMergeWarning[]) => {
+  let heading = "文档导入";
+  const tasks: Array<{ task: ImportedGanttTask; generatedExternalId: boolean }> = [];
+  content.replace(/\r/g, "").split("\n").forEach((rawLine, lineIndex) => {
+    const line = rawLine.trim();
+    if (!line) return;
+    const headingMatch = line.match(/^#{1,6}\s+(.+)$/u)
+      ?? line.match(/^(?:[一二三四五六七八九十]+|\d+)[、.]\s*(.{2,40})$/u);
+    if (headingMatch && !/[：:]|\d{4}[-/.年]/u.test(line)) {
+      heading = headingMatch[1].trim();
+      return;
+    }
+    const itemMatch = line.match(/^(?:[-*•]|\d+(?:\.\d+)*[.)、])\s*(.+)$/u);
+    if (!itemMatch) return;
+    const sourceText = itemMatch[1].trim();
+    if (!sourceText || /^(任务名称|工作项|功能项|序号)$/u.test(sourceText)) return;
+    const dates = [...sourceText.matchAll(/(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})/gu)]
+      .map((match) => `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`);
+    const durationMatch = sourceText.match(/(?:工期\s*[：:]?\s*)?(\d+(?:\.5)?)\s*(?:天|d\b)/iu);
+    const progressMatch = sourceText.match(/(?:进度\s*[：:]?\s*)?(\d{1,3})\s*%/u);
+    const ownerMatch = sourceText.match(/(?:负责人|责任人|owner)\s*[：:]\s*([^,，;；|]+?)(?=\s+(?:开始|结束|工期|进度|紧前任务|前置任务|依赖)\s*[：:]|$)/iu);
+    const predecessorMatch = sourceText.match(/(?:紧前任务|前置任务|依赖)\s*[：:]\s*([^;；|]+)/u);
+    const taskName = sourceText
+      .split(/\s+[|｜]\s+|\s+(?:开始|结束|工期|进度|负责人|责任人|紧前任务|前置任务|依赖)\s*[：:]/u)[0]
+      .replace(/[：:]$/u, "")
+      .trim();
+    if (!taskName) return;
+    const startDate = dates[0] || fallbackStartDate;
+    if (!startDate) throw new Error(`「${fileName}」中的任务“${taskName}”缺少计划开始日期，且当前项目未设置开始日期`);
+    if (dates.length === 0) warnings.push({ sourceFile: fileName, taskName, message: `缺少计划开始日期，使用项目开始日期 ${startDate}` });
+    const durationDays = durationMatch ? normalizeGanttDurationDays(Number(durationMatch[1])) : undefined;
+    if (!dates[1] && durationDays === undefined) {
+      warnings.push({ sourceFile: fileName, taskName, message: "缺少计划完成日期和工期，按未排期任务生成可导入记录" });
+    }
+    tasks.push({
+      generatedExternalId: true,
+      task: {
+        ...createTask({
+          externalId: `document-row-${lineIndex + 1}`,
+          taskCategory: heading,
+          taskName,
+          taskDescription: sourceText,
+          startDate,
+          finishDate: dates[1],
+          durationDays,
+          progress: progressMatch ? Number(progressMatch[1]) : 0,
+          predecessorExternalIds: predecessorMatch ? splitDependencies(predecessorMatch[1]) : [],
+          sortOrder: tasks.length + 1,
+        }),
+        ownerName: ownerMatch?.[1]?.trim() || "",
+      },
+    });
+  });
+  return tasks;
+};
+
 const parseSource = async (source: ScheduleMergeSource, sourceIndex: number, fallbackStartDate: string, warnings: ScheduleMergeWarning[]) => {
   const extension = path.extname(source.fileName).toLocaleLowerCase("en-US");
   if (!SCHEDULE_MERGE_EXTENSIONS.includes(extension as typeof SCHEDULE_MERGE_EXTENSIONS[number])) {
@@ -309,7 +389,7 @@ const parseSource = async (source: ScheduleMergeSource, sourceIndex: number, fal
   if (extension === ".mpp" || extension === ".xml") {
     const bundle = await parseGanttImportFile(source.fileName, source.buffer, { fallbackStartDate });
     parsed = bundle.tasks.map((task) => ({ task, generatedExternalId: false }));
-  } else if (extension === ".xlsx") {
+  } else if (extension === ".xlsx" || extension === ".xls") {
     try {
       const bundle = await parseGanttImportFile(source.fileName, source.buffer, { fallbackStartDate });
       parsed = bundle.tasks.map((task) => ({ task, generatedExternalId: /^row-\d+$/u.test(task.externalId) }));
@@ -317,7 +397,8 @@ const parseSource = async (source: ScheduleMergeSource, sourceIndex: number, fal
       parsed = parseGenericWorkbook(source.fileName, source.buffer, fallbackStartDate, warnings);
     }
   } else if (extension === ".csv") {
-    parsed = parseGenericWorkbook(source.fileName, source.buffer, fallbackStartDate, warnings);
+    parsed = parseDelimitedText(source.fileName, source.buffer.toString("utf8"), fallbackStartDate, warnings);
+    if (parsed.length === 0) parsed = parseGenericWorkbook(source.fileName, source.buffer, fallbackStartDate, warnings);
   } else {
     const content = source.buffer.toString("utf8");
     parsed = parseMarkdownTables(source.fileName, content, fallbackStartDate, warnings);
@@ -331,6 +412,109 @@ const parseSource = async (source: ScheduleMergeSource, sourceIndex: number, fal
     generatedExternalId,
     task,
   } satisfies ParsedSourceTask));
+};
+
+const expandCategoryHierarchy = (tasks: ImportedGanttTask[]) => {
+  const hasExplicitHierarchy = tasks.some((task) => task.parentExternalId || task.wbsCode || task.outlineNumber);
+  if (hasExplicitHierarchy || !tasks.some((task) => task.taskCategory.trim())) return tasks;
+  const result: ImportedGanttTask[] = [];
+  const groupByPath = new Map<string, ImportedGanttTask>();
+  const existingIds = new Set(tasks.map((task) => task.externalId));
+  tasks.forEach((task) => {
+    let segments = task.taskCategory.split(/\s*(?:\/|>|＞|\\)\s*/u).map((segment) => segment.trim()).filter(Boolean);
+    if (segments.at(-1) === task.taskName.trim()) segments = segments.slice(0, -1);
+    let parentExternalId: string | null = null;
+    const pathParts: string[] = [];
+    segments.forEach((segment) => {
+      pathParts.push(segment);
+      const categoryPath = pathParts.join(" / ");
+      let group = groupByPath.get(categoryPath);
+      if (!group) {
+        let externalId = `__category__${encodeURIComponent(categoryPath)}`;
+        let suffix = 1;
+        while (existingIds.has(externalId)) {
+          suffix += 1;
+          externalId = `__category__${encodeURIComponent(categoryPath)}-${suffix}`;
+        }
+        existingIds.add(externalId);
+        group = createTask({
+          externalId,
+          parentExternalId: parentExternalId ?? undefined,
+          taskCategory: pathParts.slice(0, -1).join(" / "),
+          taskName: segment,
+          taskDescription: "由导入文件分类字段生成的 WBS 层级节点",
+          startDate: task.startDate,
+          finishDate: task.finishDate,
+          durationDays: task.durationDays,
+          progress: 0,
+          sortOrder: result.length + 1,
+        });
+        groupByPath.set(categoryPath, group);
+        result.push(group);
+      } else {
+        const startDate = [group.startDate, task.startDate].filter(Boolean).sort()[0] || group.startDate;
+        const finishDate = [group.finishDate, task.finishDate].filter(Boolean).sort().at(-1) || group.finishDate;
+        group.startDate = startDate;
+        group.finishDate = finishDate;
+        group.durationDays = normalizeGanttDurationDays(durationBetween(startDate, finishDate));
+        group.durationMinutes = Math.round(group.durationDays * 450);
+      }
+      parentExternalId = group.externalId;
+    });
+    result.push({ ...task, parentExternalId: parentExternalId ?? task.parentExternalId, sortOrder: result.length + 1 });
+  });
+  return result.map((task, index) => ({ ...task, sortOrder: index + 1 }));
+};
+
+export const orderImportedScheduleTasksByHierarchy = <T extends {
+  externalId: string;
+  parentExternalId?: string | null;
+}>(tasks: T[]) => {
+  const byId = new Map(tasks.map((task) => [task.externalId, task]));
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const ordered: T[] = [];
+  const visit = (task: T) => {
+    if (visited.has(task.externalId)) return;
+    if (visiting.has(task.externalId)) return;
+    visiting.add(task.externalId);
+    const parent = task.parentExternalId ? byId.get(task.parentExternalId) : undefined;
+    if (parent) visit(parent);
+    visiting.delete(task.externalId);
+    visited.add(task.externalId);
+    ordered.push(task);
+  };
+  tasks.forEach(visit);
+  return ordered;
+};
+
+export const parseScheduleImportSource = async (
+  source: ScheduleMergeSource & { extractedText?: string },
+  fallbackStartDate: string,
+  options: { hierarchyMode?: ScheduleImportHierarchyMode } = {},
+): Promise<GanttImportBundle & { warnings: ScheduleMergeWarning[] }> => {
+  const extension = path.extname(source.fileName).toLocaleLowerCase("en-US");
+  if (!SCHEDULE_IMPORT_EXTENSIONS.includes(extension as typeof SCHEDULE_IMPORT_EXTENSIONS[number])) {
+    throw new Error(`不支持的排期导入格式：${extension || "无扩展名"}`);
+  }
+  const warnings: ScheduleMergeWarning[] = [];
+  if (extension === ".docx" || extension === ".pdf") {
+    const content = source.extractedText?.trim() || "";
+    if (!content) {
+      throw new Error(extension === ".pdf"
+        ? "PDF 未提取到可识别文本；扫描版 PDF 请先完成 OCR 后再导入"
+        : "DOCX 未提取到可识别文本");
+    }
+    let parsed = parseMarkdownTables(source.fileName, content, fallbackStartDate, warnings);
+    if (parsed.length === 0) parsed = parseDelimitedText(source.fileName, content, fallbackStartDate, warnings);
+    if (parsed.length === 0) parsed = parseDocumentTaskList(source.fileName, content, fallbackStartDate, warnings);
+    if (parsed.length === 0) throw new Error(`「${source.fileName}」中未识别到任务清单；请使用表格或编号列表明确任务名称`);
+    const tasks = parsed.map((entry) => entry.task);
+    return { tasks: options.hierarchyMode === "FLAT" ? tasks : expandCategoryHierarchy(tasks), metadata: null, warnings };
+  }
+  const parsed = await parseSource(source, 0, fallbackStartDate, warnings);
+  const tasks = parsed.map((entry) => entry.task);
+  return { tasks: options.hierarchyMode === "FLAT" ? tasks : expandCategoryHierarchy(tasks), metadata: null, warnings };
 };
 
 const normalizeIdentity = (value: string) => value.trim().toLocaleLowerCase("zh-CN");

@@ -2,8 +2,17 @@ import jwt from "jsonwebtoken"
 import bcrypt from "bcryptjs"
 import { NextRequest } from "next/server"
 
-const JWT_SECRET = process.env.JWT_SECRET || "pms-dev-jwt-secret-change-in-production"
+const DEV_JWT_SECRET = "pms-dev-jwt-secret-change-in-production"
+const JWT_SECRET = process.env.JWT_SECRET || (() => {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("生产环境必须配置 JWT_SECRET 环境变量（随机长字符串），禁止使用默认密钥")
+  }
+  console.warn("[auth] 未配置 JWT_SECRET，正在使用开发默认密钥，切勿用于生产环境")
+  return DEV_JWT_SECRET
+})()
 const JWT_EXPIRES_IN = "24h"
+// 允许刷新的 token 最早签发时间：密码修改后旧 token 不得续签。
+const REFRESH_GRACE_MS = 7 * 24 * 60 * 60 * 1000
 
 export type TokenErrorCode = "TOKEN_EXPIRED" | "TOKEN_INVALID" | "TOKEN_MISSING"
 
@@ -51,7 +60,13 @@ export function verifyTokenForRefresh(token: string): JwtPayload | null {
   if (result.error !== "TOKEN_EXPIRED") return null
 
   try {
-    return jwt.verify(token, JWT_SECRET, { ignoreExpiration: true }) as JwtPayload
+    const payload = jwt.verify(token, JWT_SECRET, { ignoreExpiration: true }) as JwtPayload & { iat?: number }
+    // 过期 token 只在签发后 7 天内允许续签，超出后必须重新登录，
+    // 限制泄露 token 的可续签窗口。
+    if (typeof payload.iat === "number" && payload.iat * 1000 < Date.now() - REFRESH_GRACE_MS) {
+      return null
+    }
+    return payload
   } catch {
     return null
   }

@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getUserFromRequest, hashPassword, verifyPassword } from "@/lib/auth"
+import { getUserFromRequest, hashPassword, signToken, verifyPassword } from "@/lib/auth"
 import { ok, err, unauthorized } from "@/lib/api-utils"
 
 export async function GET(req: NextRequest) {
@@ -29,6 +29,9 @@ export async function PUT(req: NextRequest) {
 
   // 修改密码（首次登录强制改密不需要旧密码验证）
   if (body.newPassword) {
+    if (typeof body.newPassword !== "string" || body.newPassword.length < 6) {
+      return err("密码至少 6 位")
+    }
     const dbUser = await prisma.userAccount.findUnique({
       where: { id: authUser.userId },
     })
@@ -42,15 +45,37 @@ export async function PUT(req: NextRequest) {
       }
     }
 
-    await prisma.userAccount.update({
+    const updated = await prisma.userAccount.update({
       where: { id: authUser.userId },
       data: {
         passwordHash: hashPassword(body.newPassword),
         passwordResetRequired: false,
         passwordUpdatedAt: new Date(),
       },
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+        assignedRoleNames: true,
+        passwordResetRequired: true,
+      },
     })
-    return ok({ message: "密码修改成功" })
+    const token = signToken({
+      userId: updated.id,
+      username: updated.username,
+      displayName: updated.displayName,
+    })
+    return ok({
+      message: "密码修改成功",
+      token,
+      user: {
+        id: updated.id,
+        username: updated.username,
+        displayName: updated.displayName,
+        assignedRoleNames: JSON.parse(updated.assignedRoleNames || "[]"),
+        passwordResetRequired: updated.passwordResetRequired,
+      },
+    })
   }
 
   // 修改显示名

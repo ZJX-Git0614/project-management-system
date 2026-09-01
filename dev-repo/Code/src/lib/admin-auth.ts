@@ -11,11 +11,17 @@ export const requireSuperAdmin = async (req: NextRequest) => {
 
   const account = await prisma.userAccount.findUnique({
     where: { id: user.userId },
-    select: { displayName: true, assignedRoleNames: true },
+    select: { enabled: true, displayName: true, assignedRoleNames: true },
   });
-  if (!account) return { response: unauthorized() } as const;
+  if (!account?.enabled) return { response: unauthorized() } as const;
 
-  const roleNames = JSON.parse(account.assignedRoleNames) as string[];
+  let roleNames: string[] = [];
+  try {
+    const parsed = JSON.parse(account.assignedRoleNames);
+    if (Array.isArray(parsed)) roleNames = parsed.filter((role): role is string => typeof role === "string");
+  } catch {
+    roleNames = [];
+  }
   if (!roleNames.includes(ADMIN_ROLE_NAME)) return { response: forbidden() } as const;
   return { user: { ...user, displayName: account.displayName } } as const;
 };

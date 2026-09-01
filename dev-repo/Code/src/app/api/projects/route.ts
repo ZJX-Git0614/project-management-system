@@ -1,11 +1,13 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getUserFromRequest } from "@/lib/auth"
-import { ok, err, unauthorized } from "@/lib/api-utils"
+import { ok, err, forbidden, unauthorizedFromRequest } from "@/lib/api-utils"
+import { resolveProjectMemberAccount } from "@/lib/project-member-accounts"
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth"
 
 export async function GET(req: NextRequest) {
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req)
+  if (!user) return unauthorizedFromRequest(req)
+  if (!await userHasPermission(user, "project-list:view")) return forbidden()
 
   const { searchParams } = new URL(req.url)
   const status = searchParams.get("status")
@@ -46,22 +48,35 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req)
+  if (!user) return unauthorizedFromRequest(req)
+  if (!await userHasPermission(user, "project-list:create")) return forbidden()
 
   const body = await req.json()
   if (!body.name) return err("项目名称不能为空")
-
-  let expectedEndDate = ""
-  if (body.startDate && body.repairCycleDays) {
-    const start = new Date(body.startDate)
-    start.setDate(start.getDate() + Number(body.repairCycleDays))
-    expectedEndDate = start.toISOString().split("T")[0]
-  }
+  const startDate = String(body.startDate ?? "").trim()
+  const expectedEndDate = String(body.expectedEndDate ?? "").trim()
+  if (startDate && !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return err("开始时间格式应为 YYYY-MM-DD，或留空使用相对 T0 排期")
+  if (expectedEndDate && !/^\d{4}-\d{2}-\d{2}$/.test(expectedEndDate)) return err("预计结项时间格式应为 YYYY-MM-DD，或留空")
+  if (startDate && expectedEndDate && expectedEndDate < startDate) return err("预计结项时间不能早于开始时间")
 
   const initialMember = body.initialMember
   if (initialMember?.roleName || initialMember?.personName) {
     if (!initialMember.roleName || !initialMember.personName) return err("项目组成员角色和人员不能为空")
+  }
+
+  const initialAccount = initialMember
+    ? await resolveProjectMemberAccount({
+        accountId: typeof initialMember.accountId === "string" ? initialMember.accountId : undefined,
+        personName: initialMember.personName,
+      })
+    : null
+  if (initialMember && !initialAccount) return err("请选择后台账号管理中的唯一启用账号")
+  if (initialMember && initialAccount) {
+    const assignedRoleNames = JSON.parse(initialAccount.assignedRoleNames || "[]") as string[]
+    if (!assignedRoleNames.includes(initialMember.roleName)) {
+      return err("所选人员未分配该项目角色，请先在后台账号管理中调整角色")
+    }
   }
 
   const project = await prisma.project.create({
@@ -72,14 +87,15 @@ export async function POST(req: NextRequest) {
       amountWan: body.amountWan || 0,
       deviceCount: body.deviceCount || 0,
       repairCycleDays: body.repairCycleDays || 0,
-      startDate: body.startDate || "",
+      startDate,
       expectedEndDate,
       status: body.status || "DRAFT",
       projectMembers: initialMember
         ? {
             create: {
+              accountId: initialAccount?.id,
               roleName: initialMember.roleName,
-              personName: initialMember.personName,
+              personName: initialAccount?.displayName ?? initialMember.personName,
             },
           }
         : undefined,

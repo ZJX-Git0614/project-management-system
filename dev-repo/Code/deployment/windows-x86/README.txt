@@ -50,6 +50,10 @@ Assistant configuration
 - For local Ollama on Windows, install Ollama and pull the configured model. In Assistant
   Settings, use http://host.docker.internal:11434 instead of http://127.0.0.1:11434 because
   Ceastar PMS runs inside Docker.
+- Double-click assistant-services.bat to start/stop Ollama or a configured RAGLite instance,
+  check health, and independently enable startup recovery. Both startup options are disabled
+  by default. Configuration, logs, and RAGLite data are stored under C:\ProgramData\Ceastar-PMS
+  so application updates and rollbacks do not overwrite them.
 
 Optional binary MPP export
 --------------------------
@@ -57,6 +61,17 @@ Optional binary MPP export
   installation or update, so a Project COM prompt can never block deployment.
 - After the system is running, right-click repair-mpp-export-service.bat and run it as
   Administrator only when MPP export is needed. Excel and Project XML export do not need it.
+
+Optional Draw.io network diagrams
+---------------------------------
+- Project WBS can export editable AON (activity-on-node) and AOA (activity-on-arrow)
+  network diagrams as .drawio files. The system derives them from the current leaf tasks
+  and dependency links; it does not fabricate missing tasks or dependencies.
+- The package installs a Draw.io MCP launcher and an MCP client configuration template under
+  C:\ProgramData\Ceastar-PMS. Install Node.js LTS first, then follow Draw.io-MCP-使用说明.txt
+  to validate @drawio/mcp and add the template to the MCP client that will open the diagram.
+- Draw.io MCP is optional. Exported .drawio files can also be opened directly with draw.io
+  Desktop or diagrams.net without any MCP client.
 
 Troubleshooting
 ---------------

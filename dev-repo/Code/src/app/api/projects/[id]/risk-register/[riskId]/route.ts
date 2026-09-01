@@ -1,7 +1,14 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getUserFromRequest } from "@/lib/auth"
-import { ok, err, unauthorized, notFound } from "@/lib/api-utils"
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
+import { ok, err, notFound, unauthorizedFromRequest, forbidden } from "@/lib/api-utils"
+import {
+  findProjectMatters,
+  relationIdsFromBody,
+  replaceRiskMatterLinks,
+  RISK_RELATION_INCLUDE,
+  serializeRisk,
+} from "@/lib/project-associations"
 import { renumberRiskCodes } from "@/lib/risk-register-codes"
 
 const PUTTABLE_FIELDS = [
@@ -15,8 +22,9 @@ export async function PUT(
   { params }: { params: Promise<{ id: string; riskId: string }> }
 ) {
   const { id, riskId } = await params
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req);
+  if (!user) return unauthorizedFromRequest(req);
+  if (!await userHasPermission(user, "risk-register:edit")) return forbidden();
 
   const existing = await prisma.riskRegisterItem.findFirst({ where: { id: riskId, projectId: id } })
   if (!existing) return notFound("风险条目")
@@ -27,33 +35,23 @@ export async function PUT(
     if (body[k] !== undefined) updateData[k] = body[k]
   }
 
-  if (body.weeklyItemId !== undefined) {
-    const requestedWeeklyItemId = typeof body.weeklyItemId === "string" ? body.weeklyItemId.trim() : ""
-    const linkedItem = requestedWeeklyItemId
-      ? await prisma.weeklyItem.findFirst({
-          where: { id: requestedWeeklyItemId, projectId: existing.projectId },
-          select: { id: true, matterCode: true, title: true },
-        })
-      : null
-    if (requestedWeeklyItemId && !linkedItem) return err("关联事项不存在或不属于当前项目")
-    updateData.weeklyItemId = linkedItem?.id ?? null
-    updateData.ganttTaskId = null
-    updateData.linkedItemName = ""
+  const weeklyItemIds = relationIdsFromBody(body, "weeklyItemIds", "weeklyItemId")
+  try {
+    const item = await prisma.$transaction(async (tx) => {
+      const matters = weeklyItemIds === undefined
+        ? undefined
+        : await findProjectMatters(tx, existing.projectId, weeklyItemIds)
+      await tx.riskRegisterItem.update({ where: { id: riskId }, data: updateData })
+      if (matters) await replaceRiskMatterLinks(tx, riskId, matters)
+      return tx.riskRegisterItem.findUniqueOrThrow({
+        where: { id: riskId },
+        include: RISK_RELATION_INCLUDE,
+      })
+    })
+    return ok(serializeRisk(item))
+  } catch (error) {
+    return err(error instanceof Error ? error.message : "更新风险失败")
   }
-
-  const item = await prisma.riskRegisterItem.update({
-    where: { id: riskId },
-    data: updateData,
-    include: { weeklyItem: { select: { id: true, matterCode: true, title: true } } },
-  })
-
-  const { weeklyItem, ...risk } = item
-  return ok({
-    ...risk,
-    weeklyItemId: item.weeklyItemId ?? null,
-    linkedItemCode: weeklyItem?.matterCode ?? "",
-    linkedItemName: weeklyItem?.title ?? "",
-  })
 }
 
 // DELETE /api/projects/[id]/risk-register/[riskId]
@@ -62,8 +60,9 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string; riskId: string }> }
 ) {
   const { id, riskId } = await params
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req);
+  if (!user) return unauthorizedFromRequest(req);
+  if (!await userHasPermission(user, "risk-register:delete")) return forbidden();
 
   const existing = await prisma.riskRegisterItem.findFirst({ where: { id: riskId, projectId: id } })
   if (!existing) return notFound("风险条目")

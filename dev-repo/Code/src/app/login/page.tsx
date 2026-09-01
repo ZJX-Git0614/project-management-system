@@ -65,6 +65,8 @@ function LoginPageInner() {
           <div>
             <label className="mb-1.5 block text-xs text-muted-foreground">账号</label>
             <input
+              name="username"
+              autoComplete="username"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               placeholder="登录账号"
@@ -77,6 +79,8 @@ function LoginPageInner() {
             <label className="mb-1.5 block text-xs text-muted-foreground">密码</label>
             <input
               type="password"
+              name="password"
+              autoComplete="current-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="登录密码"

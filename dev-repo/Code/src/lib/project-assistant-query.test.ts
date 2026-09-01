@@ -115,6 +115,20 @@ const context = {
       },
     },
   },
+  resourceOptimization: {
+    revision: 7,
+    snapshotHash: "snapshot-7",
+    expectedEndDate: "2026-08-20",
+    conflicts: [{ id: "conflict-1", taskIds: ["task-1", "task-2"], tasks: [] }],
+    candidates: [{
+      kind: "FORMAL",
+      title: "正式自动排期",
+      applicable: true,
+      changes: [{ taskId: "task-2", startDate: "2026-07-27", finishDate: "2026-07-28", task: null }],
+      remainingConflicts: [],
+      metrics: { movedTaskCount: 1, totalShiftDays: 2, completionDate: "2026-08-01", delayedDays: 0 },
+    }],
+  },
   weeklyItems: [{ id: "matter-1", code: "Matter001", title: "设计评审" }],
   budget: { contractAmount: 1_000_000, total: 300_000, remaining: 700_000, profitTargetRate: 20, categories: [] },
   risks: [{
@@ -128,6 +142,25 @@ const context = {
   }],
   documents: [{ id: "document-1", name: "项目计划.docx" }],
   todos: [{ id: "todo-1", title: "完成评审" }],
+  approvals: [{
+    id: "approval-1",
+    title: "示例项目：发布 WBS 基线",
+    summary: "固化当前计划",
+    status: "PENDING",
+    requesterName: "李四",
+    requestedAt: "2026-07-24T08:00:00.000Z",
+    pendingForMe: true,
+    currentNode: { name: "项目经理审批" },
+  }],
+  collaboration: [{
+    id: "thread-1",
+    title: "结构评审",
+    kind: "MANUAL",
+    closed: false,
+    lastMessageAt: "2026-07-24T09:00:00.000Z",
+    participants: [{ accountId: "user-1", displayName: "管理员" }, { accountId: "user-2", displayName: "李四" }],
+    latestMessage: { senderName: "李四", content: "请确认评审结论" },
+  }],
   recentOperations: [{ detail: "更新任务进度" }],
 } as unknown as ProjectAssistantContext
 
@@ -173,12 +206,28 @@ describe("project assistant query routing", () => {
     ])
   })
 
+  it("exposes approval and collaboration data only for their requested domains", () => {
+    const approvalIntent = detectProjectAssistantQueryIntent("查看我的待审批")
+    const approvalVisible = buildProjectAssistantVisibleContext(context, approvalIntent) as Record<string, unknown>
+    const collaborationIntent = detectProjectAssistantQueryIntent("查看结构评审协同会话")
+    const collaborationVisible = buildProjectAssistantVisibleContext(context, collaborationIntent) as Record<string, unknown>
+
+    expect(approvalIntent.domains).toEqual(["APPROVAL"])
+    expect(approvalVisible).toHaveProperty("approvals")
+    expect(approvalVisible).not.toHaveProperty("collaboration")
+    expect(collaborationIntent.domains).toEqual(["COLLABORATION"])
+    expect(collaborationVisible).toHaveProperty("collaboration")
+    expect(collaborationVisible).not.toHaveProperty("approvals")
+  })
+
   it("routes schedule analysis, earned value, resources, and comparison separately", () => {
     expect(detectProjectAssistantQueryIntent("分析基线偏差和关键路径").domains)
       .toEqual(["SCHEDULE_ANALYSIS"])
     expect(detectProjectAssistantQueryIntent("查看 SPI 和 EAC").domains)
       .toEqual(["EARNED_VALUE"])
     expect(detectProjectAssistantQueryIntent("查看资源负荷").domains)
+      .toEqual(["RESOURCE"])
+    expect(detectProjectAssistantQueryIntent("给我 WBS 优化建议").domains)
       .toEqual(["RESOURCE"])
     expect(detectProjectAssistantQueryIntent("对比当前计划与上传进度").domains)
       .toEqual(["SCHEDULE_COMPARE"])
@@ -198,8 +247,23 @@ describe("project assistant query routing", () => {
     expect(earnedValue).not.toHaveProperty("resources")
     expect(JSON.stringify(earnedValue)).not.toContain("baselines")
     expect(resources).toHaveProperty("resources")
+    expect(resources).toHaveProperty("resources.optimization")
     expect(resources).not.toHaveProperty("earnedValue")
     expect(JSON.stringify(resources)).not.toContain("actualCost")
+  })
+
+  it("returns actionable resource candidates even when the language model is unavailable", () => {
+    const intent = detectProjectAssistantQueryIntent("给我 WBS 优化建议")
+    const fallback = buildProjectAssistantFallbackAnswer({
+      message: "给我 WBS 优化建议",
+      intent,
+      context,
+      assistantName: "佳佳",
+    })
+
+    expect(fallback.answer).toContain("正式自动排期预览")
+    expect(fallback.answer).toContain("正式自动排期")
+    expect(fallback.answer).toContain("只有你确认后才写入 WBS")
   })
 
   it("keeps structured risk links to gantt tasks and project matters", () => {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { AlertTriangle, BellRing, CheckCircle2, ClipboardList, ListTodo } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +17,7 @@ interface TodoData {
     title: string;
     detail: string;
     type: string;
+    href: string;
     project: { id: string; name: string; code: string };
   }>;
   notifications: Array<{
@@ -24,7 +26,8 @@ interface TodoData {
     category: string;
     title: string;
     detail: string;
-    severity: "ERROR" | "WARNING";
+    severity: "ERROR" | "WARNING" | "INFO";
+    href: string;
   }>;
 }
 
@@ -76,7 +79,7 @@ export default function TodosPage() {
               </div>
               <div className="overflow-hidden rounded-md border border-border">
                 {data?.notifications.map((notification) => (
-                  <div key={notification.id} className="grid gap-2 border-b border-border px-3 py-3 text-xs last:border-b-0 sm:grid-cols-[145px_minmax(0,1fr)]">
+                  <Link key={notification.id} href={notification.href} className="grid gap-2 border-b border-border px-3 py-3 text-xs transition-colors last:border-b-0 hover:bg-muted/40 sm:grid-cols-[145px_minmax(0,1fr)]">
                     <div className={notification.severity === "ERROR" ? "flex items-center gap-2 text-destructive" : "flex items-center gap-2 text-amber-500"}>
                       <AlertTriangle className="size-4 shrink-0" />{formatDateTime(notification.createdAt)}
                     </div>
@@ -85,7 +88,7 @@ export default function TodosPage() {
                       <Badge variant="secondary" className="mt-1 w-fit text-[10px]">{notification.category}</Badge>
                     </div>
                     <div className="select-text break-words text-muted-foreground sm:col-span-2">{notification.detail}</div>
-                  </div>
+                  </Link>
                 ))}
                 {data && data.notifications.length === 0 && (
                   <div className="flex items-center justify-center gap-2 px-3 py-8 text-xs text-muted-foreground"><CheckCircle2 className="size-4 text-emerald-500" />暂无未读通知</div>
@@ -98,11 +101,11 @@ export default function TodosPage() {
               <h2 className="flex min-h-7 items-center gap-1.5 text-xs font-semibold"><ListTodo className="size-3.5 text-primary" />项目待办</h2>
               <div className="overflow-hidden rounded-md border border-border">
                 {data?.projectTodos.map((todo) => (
-                  <div key={todo.id} className="grid gap-1.5 border-b border-border px-3 py-3 text-xs last:border-b-0 sm:grid-cols-[minmax(0,1fr)_135px]">
+                  <Link key={todo.id} href={todo.href} className="grid gap-1.5 border-b border-border px-3 py-3 text-xs transition-colors last:border-b-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_135px]">
                     <div className="font-medium">{todo.title}</div>
                     <div className="text-muted-foreground sm:text-right">{todo.project.code} · {todo.project.name}</div>
                     <div className="break-words text-muted-foreground sm:col-span-2">{todo.detail || "-"}</div>
-                  </div>
+                  </Link>
                 ))}
                 {data && data.projectTodos.length === 0 && <div className="px-3 py-8 text-center text-xs text-muted-foreground">暂无项目待办</div>}
                 {!data && !error && <div className="px-3 py-8 text-center text-xs text-muted-foreground">正在加载...</div>}

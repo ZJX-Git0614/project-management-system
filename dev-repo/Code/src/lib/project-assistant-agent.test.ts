@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   resumeAssistantWorkflowPlan: vi.fn(),
   planProjectAssistantWorkflowWithModel: vi.fn(),
   shouldPlanProjectAssistantWorkflow: vi.fn(),
+  observeAssistantProjectExportData: vi.fn(),
 }));
 
 vi.mock("@/lib/assistant-actions", () => ({ proposeAssistantAction: mocks.proposeAssistantAction }));
@@ -22,6 +23,10 @@ vi.mock("@/lib/assistant-plans", () => ({
   createAssistantWorkflowPlan: mocks.createAssistantWorkflowPlan,
   createAssistantWorkflowPlanFromSteps: mocks.createAssistantWorkflowPlanFromSteps,
   resumeAssistantWorkflowPlan: mocks.resumeAssistantWorkflowPlan,
+}));
+vi.mock("@/lib/assistant-export-observation", () => ({
+  observeAssistantProjectExportData: mocks.observeAssistantProjectExportData,
+  formatAssistantExportDataObservation: (value: unknown) => JSON.stringify(value),
 }));
 
 import { resolveProjectAssistantAction } from "@/lib/project-assistant-agent";
@@ -51,6 +56,13 @@ describe("project assistant agent resolution", () => {
     mocks.resumeAssistantWorkflowPlan.mockResolvedValue(null);
     mocks.planProjectAssistantWorkflowWithModel.mockResolvedValue(null);
     mocks.shouldPlanProjectAssistantWorkflow.mockReturnValue(false);
+    mocks.observeAssistantProjectExportData.mockResolvedValue({
+      exportType: "gantt",
+      totalRows: 460,
+      matchedRows: 120,
+      appliedFilters: [],
+      taskCategories: [{ name: "前端开发", count: 120 }],
+    });
   });
 
   it("returns an explicit trace for a deterministic tool match", async () => {
@@ -95,6 +107,7 @@ describe("project assistant agent resolution", () => {
     expect(mocks.proposeAssistantAction).toHaveBeenNthCalledWith(2, expect.objectContaining({
       message: "将 Matter007 更新为进行中，当前进度 35%",
       expectedToolId: "weekly.status.update",
+      plannedArgs: undefined,
     }));
     expect(result.trace.steps).toEqual([
       { stage: "WORKFLOW_PLAN", outcome: "NO_MATCH", toolId: undefined },
@@ -102,6 +115,113 @@ describe("project assistant agent resolution", () => {
       { stage: "MODEL_PLAN", outcome: "MATCHED", toolId: "weekly.status.update" },
       { stage: "PLAN_VALIDATION", outcome: "MATCHED", toolId: "weekly.status.update" },
     ]);
+  });
+
+  it("plans filtered exports before execution and passes exact structured arguments", async () => {
+    mocks.planProjectAssistantActionWithModel.mockResolvedValue({
+      toolId: "project.export",
+      command: "只导出第 1、2、3 层任务",
+      args: { exportType: "gantt", taskDepths: [1, 2, 3] },
+    });
+    mocks.proposeAssistantAction.mockResolvedValue({ toolId: "project.export" });
+
+    const result = await resolveProjectAssistantAction({
+      message: "只导出1 2 3级任务",
+      projectId: "project-1",
+      user,
+      runtime: { ...runtime, agentEnabledToolIds: ["project.export"] },
+    });
+
+    expect(mocks.proposeAssistantAction).toHaveBeenCalledTimes(1);
+    expect(mocks.proposeAssistantAction).toHaveBeenCalledWith(expect.objectContaining({
+      message: "只导出1 2 3级任务",
+      expectedToolId: "project.export",
+      plannedArgs: { exportType: "gantt", taskDepths: [1, 2, 3] },
+    }));
+    expect(result.trace.steps).toEqual([
+      { stage: "WORKFLOW_PLAN", outcome: "NO_MATCH", toolId: undefined },
+      { stage: "DATA_OBSERVATION", outcome: "MATCHED", toolId: "project.export", detail: "读取 460 条真实记录，按当前条件命中 120 条" },
+      { stage: "MODEL_PLAN", outcome: "MATCHED", toolId: "project.export" },
+      { stage: "PLAN_VALIDATION", outcome: "MATCHED", toolId: "project.export" },
+    ]);
+  });
+
+  it("falls back to deterministic export parsing when the model drops requested filters", async () => {
+    mocks.planProjectAssistantActionWithModel.mockResolvedValue({
+      toolId: "project.export",
+      command: "导出任务",
+      args: { exportType: "gantt" },
+    });
+    mocks.proposeAssistantAction
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ toolId: "project.export" });
+
+    const result = await resolveProjectAssistantAction({
+      message: "只导出1 2 3级任务",
+      projectId: "project-1",
+      user,
+      runtime: { ...runtime, agentEnabledToolIds: ["project.export"] },
+    });
+
+    expect(mocks.proposeAssistantAction).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      plannedArgs: { exportType: "gantt" },
+    }));
+    expect(mocks.proposeAssistantAction).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      message: "只导出1 2 3级任务",
+    }));
+    expect(result.action).toMatchObject({ toolId: "project.export" });
+    expect(result.trace.steps).toEqual([
+      { stage: "WORKFLOW_PLAN", outcome: "NO_MATCH", toolId: undefined },
+      { stage: "DATA_OBSERVATION", outcome: "MATCHED", toolId: "project.export", detail: "读取 460 条真实记录，按当前条件命中 120 条" },
+      { stage: "MODEL_PLAN", outcome: "MATCHED", toolId: "project.export" },
+      { stage: "PLAN_VALIDATION", outcome: "REJECTED", toolId: "project.export" },
+      { stage: "MODEL_REPLAN", outcome: "MATCHED", toolId: "project.export" },
+      { stage: "PLAN_VALIDATION", outcome: "REJECTED", toolId: "project.export" },
+      { stage: "DETERMINISTIC_MATCH", outcome: "MATCHED", toolId: "project.export" },
+    ]);
+  });
+
+  it("keeps a frontend category filter and report request in the executable plan", async () => {
+    mocks.shouldPlanProjectAssistantWorkflow.mockReturnValue(true);
+    mocks.planProjectAssistantActionWithModel.mockResolvedValue({
+      toolId: "project.export",
+      command: "导出前端任务并生成进度报告",
+      args: {
+        exportType: "gantt",
+        taskCategoryKeywords: ["前端"],
+        includeProgressReport: true,
+      },
+      decisionSummary: "用户只要求前端任务，并要求基于命中任务生成进度报告",
+    });
+    mocks.proposeAssistantAction.mockResolvedValue({ toolId: "project.export" });
+
+    const result = await resolveProjectAssistantAction({
+      message: "帮我导出所有的前端任务，并且对当前前端任务进度总结出一份报告",
+      projectId: "project-1",
+      user,
+      runtime: { ...runtime, agentEnabledToolIds: ["project.export"] },
+    });
+
+    expect(mocks.proposeAssistantAction).toHaveBeenCalledWith(expect.objectContaining({
+      plannedArgs: {
+        exportType: "gantt",
+        taskCategoryKeywords: ["前端"],
+        includeProgressReport: true,
+      },
+    }));
+    expect(mocks.planProjectAssistantWorkflowWithModel).not.toHaveBeenCalled();
+    expect(result.trace).toMatchObject({
+      outcome: "ACTION_READY",
+      constraints: ["任务类别包含“前端”", "附带进度总结报告"],
+      decisionSummary: "用户只要求前端任务，并要求基于命中任务生成进度报告",
+      toolArgs: {
+        exportType: "gantt",
+        taskCategoryKeywords: ["前端"],
+        includeProgressReport: true,
+      },
+      observation: { totalRows: 460, matchedRows: 120 },
+    });
   });
 
   it("records a rejected model plan instead of treating it as an executable action", async () => {

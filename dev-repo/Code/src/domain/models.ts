@@ -17,20 +17,38 @@ export interface Project extends BaseEntity {
   expectedEndDate: string;
   status: ProjectStatus;
   ganttCalendarMode?: "CALENDAR_DAYS" | "WORKING_DAYS";
+  ganttHardFinishDate?: string;
   ganttRevision?: number;
+  ganttBaselineVersion?: number;
+  ganttBaselineState?: "DRAFT" | "PUBLISHED" | "CHANGE_DRAFT" | string;
+  ganttBaselinePublishedAt?: string | null;
+  ganttBaselinePublishedBy?: string;
 }
 
 export interface ProjectGanttTask extends BaseEntity {
   projectId: string;
   parentId?: string | null;
   ownerMemberId?: string | null;
-  ownerMember?: Pick<ProjectMember, "id" | "personName" | "roleName"> | null;
+  ownerMemberIds?: string[];
+  ownerMember?: Pick<ProjectMember, "id" | "accountId" | "personName" | "roleName"> | null;
+  ownerMembers?: Array<Pick<ProjectMember, "id" | "accountId" | "personName" | "roleName"> & { roleNames?: string[] }>;
+  ownerReadOnly?: boolean;
   taskCode: string;
   taskCategory: string;
   taskName: string;
   taskDescription: string;
   startDate: string;
   finishDate?: string;
+  relativeStartOffsetDays?: number | null;
+  relativeFinishOffsetDays?: number | null;
+  earlyStartDate?: string;
+  earlyFinishDate?: string;
+  lateStartDate?: string;
+  lateFinishDate?: string;
+  totalFloatMinutes?: number | null;
+  freeFloatMinutes?: number | null;
+  scheduleStatus?: string;
+  scheduleCalculatedAt?: string | null;
   durationDays: number;
   durationMinutes?: number;
   durationFormat?: number;
@@ -44,6 +62,16 @@ export interface ProjectGanttTask extends BaseEntity {
   predecessorTaskIds?: string[];
   predecessorDependencies?: ProjectGanttDependency[];
   taskMode?: string;
+  startSlot?: "AM" | "PM" | string;
+  finishSlot?: "AM" | "PM" | string;
+  actualStartSlot?: "AM" | "PM" | string;
+  actualFinishSlot?: "AM" | "PM" | string;
+  parentBoundaryMode?: "ROLLUP" | "TARGET" | "LOCKED" | string;
+  schedulePriority?: number;
+  userPriority?: "LOW" | "MEDIUM" | "HIGH" | string;
+  effectivePriority?: "LOW" | "MEDIUM" | "HIGH" | "HIGHEST" | string;
+  effortDriven?: boolean;
+  parallelizable?: boolean;
   isMilestone?: boolean;
   externalUid?: string;
   wbsCode?: string;
@@ -51,6 +79,7 @@ export interface ProjectGanttTask extends BaseEntity {
   calendarUid?: string;
   constraintType?: number | null;
   constraintDate?: string;
+  resourceNotBeforeDate?: string;
   baselineStartDate?: string;
   baselineFinishDate?: string;
   baselineCost?: number;
@@ -69,7 +98,83 @@ export interface ProjectGanttDependency extends BaseEntity {
   type: number;
   lag: number;
   lagFormat: number;
+  unsupportedReason?: string;
   predecessorTask?: Pick<ProjectGanttTask, "id" | "taskCode" | "taskName">;
+}
+
+export interface ProjectExecutionTaskLink {
+  executionId: string;
+  ganttTaskId: string;
+  relationType: "DIRECT" | "SUBTREE";
+  createdAt?: string;
+  task?: Pick<
+    ProjectGanttTask,
+    "id" | "taskCode" | "taskName" | "taskCategory" | "parentId" | "startDate" | "finishDate" | "progress"
+  >;
+}
+
+export interface ProjectExecutionScopeSummary {
+  directTaskIds: string[];
+  subtreeRootTaskIds: string[];
+  resolvedTaskIds: string[];
+  effectiveTaskIds: string[];
+  totalTaskCount: number;
+  completedTaskCount: number;
+  weightedProgress: number;
+  rangeHash: string;
+}
+
+export interface ProjectExecutionHealthEvidence {
+  code: string;
+  severity: "HIGH" | "MEDIUM";
+  message: string;
+  count: number;
+}
+
+export interface ProjectExecutionHealth {
+  status: "HEALTHY" | "AT_RISK" | "OFF_TRACK" | "UNKNOWN";
+  label: string;
+  evidence: ProjectExecutionHealthEvidence[];
+  summary?: {
+    taskCount: number;
+    completedTaskCount: number;
+    openMatterCount: number;
+    openHighRiskCount: number;
+  };
+}
+
+export interface ProjectExecutionGate {
+  id: string;
+  projectId: string;
+  executionId: string;
+  status: string;
+  ganttRevision: number;
+  rangeHash: string;
+  requestNote: string;
+  approvalInstanceId: string;
+  requestedAt?: string | null;
+  approvedAt?: string | null;
+  decisionSummary: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProjectExecution extends BaseEntity {
+  projectId: string;
+  name: string;
+  type: string;
+  ownerMemberId?: string | null;
+  status: string;
+  description: string;
+  sortOrder: number;
+  ownerMember?: Pick<ProjectMember, "id" | "personName" | "roleName"> | null;
+  taskLinks: ProjectExecutionTaskLink[];
+  planStart?: string;
+  planFinish?: string;
+  progress?: number;
+  scope?: ProjectExecutionScopeSummary;
+  health?: ProjectExecutionHealth;
+  latestGate?: ProjectExecutionGate | null;
 }
 
 export interface ProjectGanttDeletionPreview {
@@ -83,6 +188,9 @@ export interface ProjectGanttDeletionPreview {
   externalDependencyCount: number;
   detachedWeeklyItemCount: number;
   detachedRiskCount: number;
+  affectedRiskCount?: number;
+  affectedExecutionCount?: number;
+  affectedExecutionNames?: string[];
   clearedPredecessorCount: number;
   ganttRevision: number;
 }
@@ -135,6 +243,7 @@ export interface ProjectBudgetItem extends BaseEntity {
   remark: string;
   category?: ProjectBudgetCategory;
   project?: Pick<Project, "id" | "name" | "code" | "status">;
+  linkedTasks?: Array<{ id: string; taskCode: string; taskName: string }>;
 }
 
 export interface ProjectBudgetSetting extends BaseEntity {
@@ -168,8 +277,13 @@ export interface SystemPerson extends BaseEntity {
 
 export interface ProjectMember extends BaseEntity {
   projectId: string;
+  accountId?: string | null;
   roleName: string;
+  roleNames?: string[];
   personName: string;
+  capacityHoursPerDay?: number;
+  productivityRate?: number;
+  maxConcurrentAssignments?: number;
 }
 
 export interface ProjectDocumentFile extends BaseEntity {

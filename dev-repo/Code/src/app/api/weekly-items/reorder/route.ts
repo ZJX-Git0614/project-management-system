@@ -1,12 +1,13 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { getUserFromRequest } from "@/lib/auth"
-import { ok, err, unauthorized } from "@/lib/api-utils"
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
+import { ok, err, unauthorizedFromRequest, forbidden } from "@/lib/api-utils"
 import { renumberWeeklyMatterCodes } from "@/lib/weekly-matter-codes"
 
 export async function POST(req: NextRequest) {
-  const user = getUserFromRequest(req)
-  if (!user) return unauthorized()
+  const user = await getAuthenticatedUser(req);
+  if (!user) return unauthorizedFromRequest(req);
+  if (!await userHasPermission(user, "weekly-items:edit")) return forbidden();
 
   const body = await req.json()
   const itemIds: string[] = Array.isArray(body.itemIds)

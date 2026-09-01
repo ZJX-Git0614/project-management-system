@@ -3,7 +3,6 @@
 import { FormEvent, Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/contexts/auth-context";
-import { api } from "@/lib/api-client";
 
 export default function ForceChangePasswordPage() {
   return (
@@ -14,7 +13,7 @@ export default function ForceChangePasswordPage() {
 }
 
 function ForceChangePasswordPageInner() {
-  const { user, loading: authLoading, logout } = useAuth();
+  const { user, loading: authLoading, changePassword } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
   const returnTo = searchParams.get("return") || "";
@@ -45,12 +44,8 @@ function ForceChangePasswordPageInner() {
 
     setSubmitting(true);
     try {
-      await api.put("/api/auth/me", {
-        newPassword,
-        passwordResetRequired: true,
-      });
-      alert("密码修改成功，请重新登录");
-      logout();
+      await changePassword(newPassword);
+      router.replace(returnTo || "/projects");
     } catch (e) {
       setError(e instanceof Error ? e.message : "密码修改失败");
     } finally {
