@@ -73,19 +73,43 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN
   ALTER TABLE "ProjectDeliverableStatus" ADD CONSTRAINT "ProjectDeliverableStatus_deliverableId_fkey" FOREIGN KEY ("deliverableId") REFERENCES "ProjectDeliverable"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
   ALTER TABLE "ProjectMaterialRevision" ADD CONSTRAINT "ProjectMaterialRevision_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
   ALTER TABLE "ProjectMaterialRevision" ADD CONSTRAINT "ProjectMaterialRevision_deliverableId_fkey" FOREIGN KEY ("deliverableId") REFERENCES "ProjectDeliverable"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
   ALTER TABLE "ProjectMaterialRevision" ADD CONSTRAINT "ProjectMaterialRevision_sourceDocumentFileId_fkey" FOREIGN KEY ("sourceDocumentFileId") REFERENCES "ProjectDocumentFile"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
   ALTER TABLE "ProjectMaterialRevision" ADD CONSTRAINT "ProjectMaterialRevision_supersedesRevisionId_fkey" FOREIGN KEY ("supersedesRevisionId") REFERENCES "ProjectMaterialRevision"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN
   ALTER TABLE "ProjectMaterialItem" ADD CONSTRAINT "ProjectMaterialItem_revisionId_fkey" FOREIGN KEY ("revisionId") REFERENCES "ProjectMaterialRevision"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
   ALTER TABLE "ProjectProcurementItem" ADD CONSTRAINT "ProjectProcurementItem_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
   ALTER TABLE "ProjectProcurementItem" ADD CONSTRAINT "ProjectProcurementItem_sourceRevisionId_fkey" FOREIGN KEY ("sourceRevisionId") REFERENCES "ProjectMaterialRevision"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
   ALTER TABLE "ProjectProcurementItem" ADD CONSTRAINT "ProjectProcurementItem_sourceMaterialItemId_fkey" FOREIGN KEY ("sourceMaterialItemId") REFERENCES "ProjectMaterialItem"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
   ALTER TABLE "ProjectProcurementItem" ADD CONSTRAINT "ProjectProcurementItem_deliverableId_fkey" FOREIGN KEY ("deliverableId") REFERENCES "ProjectDeliverable"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
   ALTER TABLE "ProjectProcurementItem" ADD CONSTRAINT "ProjectProcurementItem_buyerMemberId_fkey" FOREIGN KEY ("buyerMemberId") REFERENCES "ProjectMember"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
   ALTER TABLE "ProjectProcurementItem" ADD CONSTRAINT "ProjectProcurementItem_budgetItemId_fkey" FOREIGN KEY ("budgetItemId") REFERENCES "ProjectBudgetItem"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
   ALTER TABLE "ProjectProcurementItem" ADD CONSTRAINT "ProjectProcurementItem_ganttTaskId_fkey" FOREIGN KEY ("ganttTaskId") REFERENCES "ProjectGanttTask"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
   ALTER TABLE "ProjectProcurementStatusLog" ADD CONSTRAINT "ProjectProcurementStatusLog_procurementItemId_fkey" FOREIGN KEY ("procurementItemId") REFERENCES "ProjectProcurementItem"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
