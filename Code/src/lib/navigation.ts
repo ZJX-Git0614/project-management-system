@@ -73,5 +73,8 @@ export const PROJECT_DETAIL_GROUP_PERMISSION_KEYS: Record<DetailNavGroupKey, str
   gantt: "project-gantt:view",
   execution: "project-gantt:view",
   documents: "project-documents:view",
+  deliverables: "project-deliverables:view",
+  "delivery-status": "project-delivery-status:view",
+  procurement: "project-procurement:view",
   budget: "project-budget:view",
 };
