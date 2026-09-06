@@ -146,6 +146,29 @@ export const PERMISSION_TREE = [
           { key: "project-documents:delete", label: "删除项目文档", type: "action" },
         ],
       },
+      {
+        key: "project-deliverables",
+        label: "项目交付管理",
+        type: "page",
+        children: [
+          { key: "project-deliverables:view", label: "查看交付物清单", type: "section" },
+          { key: "project-deliverables:create", label: "新增交付物", type: "action" },
+          { key: "project-deliverables:edit", label: "编辑交付物", type: "action" },
+          { key: "project-deliverables:delete", label: "删除交付物", type: "action" },
+          { key: "project-delivery-status:view", label: "查看交付物状态", type: "section" },
+          { key: "project-delivery-status:edit", label: "更新交付物状态", type: "action" },
+        ],
+      },
+      {
+        key: "project-procurement",
+        label: "项目采购管理",
+        type: "page",
+        children: [
+          { key: "project-procurement:view", label: "查看项目采购", type: "section" },
+          { key: "project-procurement:create", label: "新增采购条目", type: "action" },
+          { key: "project-procurement:edit", label: "编辑采购条目", type: "action" },
+        ],
+      },
     ],
   },
   {
@@ -291,6 +314,9 @@ export const PROJECT_DETAIL_GROUP_PERMISSION_KEYS = {
   performance: "earned-value:view",
   gantt: "project-gantt:view",
   documents: "project-documents:view",
+  deliverables: "project-deliverables:view",
+  "delivery-status": "project-delivery-status:view",
+  procurement: "project-procurement:view",
   budget: "project-budget:view",
 } as const;
 
@@ -311,6 +337,9 @@ export const PERMISSION_ROUTE_RULES: PermissionRouteRule[] = [
   { pathname: "/projects/[projectId]", queryParam: "nav", queryValue: "performance", permissionKey: "earned-value:view" },
   { pathname: "/projects/[projectId]", queryParam: "nav", queryValue: "gantt", permissionKey: "project-gantt:view" },
   { pathname: "/projects/[projectId]", queryParam: "nav", queryValue: "documents", permissionKey: "project-documents:view" },
+  { pathname: "/projects/[projectId]", queryParam: "nav", queryValue: "deliverables", permissionKey: "project-deliverables:view" },
+  { pathname: "/projects/[projectId]", queryParam: "nav", queryValue: "delivery-status", permissionKey: "project-delivery-status:view" },
+  { pathname: "/projects/[projectId]", queryParam: "nav", queryValue: "procurement", permissionKey: "project-procurement:view" },
   { pathname: "/projects/[projectId]", queryParam: "nav", queryValue: "budget", permissionKey: "project-budget:view" },
   { pathname: "/role-config", permissionKey: "role-config:view" },
   { pathname: "/admin/permissions", permissionKey: "permission-config:view" },
