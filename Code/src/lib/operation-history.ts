@@ -8,10 +8,13 @@ const ENTITY_TYPE_LABELS: Record<string, string> = {
   Project: "项目",
   ProjectMember: "项目组成员",
   DELIVERY_ITEM: "交付物",
+  DELIVERABLE: "交付物",
   DELIVERY_STATUS: "交付物状态",
   DELIVERY_BOM: "交付物 BOM/线缆清单",
+  MATERIAL_REVISION: "材料版本",
   PROCUREMENT_ITEM: "采购条目",
   PROCUREMENT_STATUS: "采购状态",
+  PROCUREMENT_STATUS_LOG: "采购状态日志",
   PROCUREMENT_BOM_SYNC: "采购 BOM 同步",
 };
 
