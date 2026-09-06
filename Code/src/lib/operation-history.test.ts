@@ -5,10 +5,13 @@ import { formatActionType, formatEntityType } from "@/lib/operation-history";
 describe("delivery and procurement operation history labels", () => {
   it("keeps the new module entities readable in the shared audit view", () => {
     expect(formatEntityType("DELIVERY_ITEM")).toBe("交付物");
+    expect(formatEntityType("DELIVERABLE")).toBe("交付物");
     expect(formatEntityType("DELIVERY_STATUS")).toBe("交付物状态");
     expect(formatEntityType("DELIVERY_BOM")).toBe("交付物 BOM/线缆清单");
+    expect(formatEntityType("MATERIAL_REVISION")).toBe("材料版本");
     expect(formatEntityType("PROCUREMENT_ITEM")).toBe("采购条目");
     expect(formatEntityType("PROCUREMENT_STATUS")).toBe("采购状态");
+    expect(formatEntityType("PROCUREMENT_STATUS_LOG")).toBe("采购状态日志");
     expect(formatEntityType("PROCUREMENT_BOM_SYNC")).toBe("采购 BOM 同步");
   });
 
