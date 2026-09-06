@@ -7,6 +7,12 @@ const ENTITY_TYPE_LABELS: Record<string, string> = {
   WEEKLY_ITEM: "项目事项",
   Project: "项目",
   ProjectMember: "项目组成员",
+  DELIVERY_ITEM: "交付物",
+  DELIVERY_STATUS: "交付物状态",
+  DELIVERY_BOM: "交付物 BOM/线缆清单",
+  PROCUREMENT_ITEM: "采购条目",
+  PROCUREMENT_STATUS: "采购状态",
+  PROCUREMENT_BOM_SYNC: "采购 BOM 同步",
 };
 
 const ACTION_TYPE_LABELS: Record<string, string> = {
@@ -14,6 +20,9 @@ const ACTION_TYPE_LABELS: Record<string, string> = {
   UPDATE: "修改",
   DELETE: "删除",
   STATUS_CHANGED: "状态变更",
+  PUBLISH: "发布",
+  SYNC: "同步",
+  RESTORE: "恢复",
 };
 
 export function formatEntityType(type: string): string {
