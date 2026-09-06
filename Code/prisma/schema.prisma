@@ -7,6 +7,16 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum DeliverableType { SOFTWARE HARDWARE }
+enum OutsourceMode { NO YES PARTIAL }
+enum DeliverableLifecycleStatus { DRAFT IN_PROGRESS READY_FOR_REVIEW ACCEPTED DELIVERED REJECTED CANCELLED }
+enum DeliveryStage { PROTOTYPE MASS_PRODUCTION }
+enum MaterialListType { BOM CABLE_LIST }
+enum MaterialRevisionStatus { DRAFT RELEASED SUPERSEDED }
+enum ProcurementSourceType { BOM CABLE_LIST MANUAL }
+enum ProcurementStatus { DRAFT PENDING_PURCHASE SOURCING ORDERED PARTIALLY_RECEIVED RECEIVED INSPECTING ACCEPTED REJECTED CLOSED ON_HOLD CANCELLED }
+
+
 model UserAccount {
   id                    String    @id @default(cuid())
   createdAt             DateTime  @default(now())
@@ -64,6 +74,8 @@ model Project {
   operationHistories     OperationHistory[]
   riskRegisterItems      RiskRegisterItem[]
   documentFiles          ProjectDocumentFile[]
+  deliverables            ProjectDeliverable[]
+  procurementItems        ProjectProcurementItem[]
   assistantAttachments   AssistantAttachment[]
   assistantArtifacts     AssistantArtifact[]
   assistantPlans         AssistantPlanRun[]
@@ -395,6 +407,7 @@ model ProjectBudgetItem {
   category   ProjectBudgetCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   project    Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
   ganttTasks ProjectGanttTask[]
+  procurementItems ProjectProcurementItem[]
 }
 
 // 项目预算设置（合同 + 利润率目标，每项目一条；公摊/审价/风险已迁入 RATE 分类）
@@ -444,6 +457,7 @@ model ProjectMember {
   ganttTasks     ProjectGanttTask[]
   ganttTaskLinks ProjectGanttTaskOwner[]
   executionOwners ProjectExecution[]      @relation("ExecutionOwner")
+  procurementItems ProjectProcurementItem[] @relation("ProcurementBuyer")
 
   @@unique([projectId, accountId])
 }
@@ -1077,6 +1091,7 @@ model ProjectDocumentFile {
   cloudPath       String   @default("") @db.Text
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  materialRevisions ProjectMaterialRevision[]
 
   @@index([projectId, directoryKey, createdAt])
 }
@@ -1328,4 +1343,159 @@ model AssistantPlanStep {
 model PermissionTree {
   id   String @id
   data String // JSON
+}
+
+
+model ProjectDeliverable {
+  id                String         @id @default(cuid())
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+  projectId         String
+  name              String
+  quantity          Float
+  unit              String
+  type              DeliverableType
+  outsourceMode     OutsourceMode
+  sortOrder         Int            @default(0)
+  linkedGanttTaskId String?
+  remark            String         @default("") @db.Text
+  archivedAt        DateTime?
+
+  project     Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  linkedTask  ProjectGanttTask?       @relation(fields: [linkedGanttTaskId], references: [id], onDelete: SetNull)
+  status      ProjectDeliverableStatus?
+  revisions   ProjectMaterialRevision[]
+  procurementItems ProjectProcurementItem[]
+
+  @@index([projectId, sortOrder])
+  @@index([projectId, type])
+}
+
+model ProjectDeliverableStatus {
+  id                    String                    @id @default(cuid())
+  createdAt             DateTime                  @default(now())
+  updatedAt             DateTime                  @updatedAt
+  deliverableId         String                    @unique
+  lifecycleStatus       DeliverableLifecycleStatus @default(DRAFT)
+  gitUrl                String                    @default("")
+  gitRef                String                    @default("")
+  buildNotes            String                    @default("") @db.Text
+  hasPrototype          Boolean                   @default(false)
+  prototypeQuantity     Float                     @default(0)
+  massProductionQuantity Float                    @default(0)
+  reviewNote            String                    @default("") @db.Text
+  acceptedAt            DateTime?
+  deliveredAt           DateTime?
+  cancelledReason       String                    @default("") @db.Text
+
+  deliverable ProjectDeliverable @relation(fields: [deliverableId], references: [id], onDelete: Cascade)
+}
+
+model ProjectMaterialRevision {
+  id                    String                 @id @default(cuid())
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  projectId             String
+  deliverableId         String
+  stage                 DeliveryStage
+  listType              MaterialListType
+  version               Int                    @default(1)
+  status                MaterialRevisionStatus @default(DRAFT)
+  sourceDocumentFileId  String?
+  releasedAt            DateTime?
+  supersedesRevisionId  String?
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  deliverable ProjectDeliverable @relation(fields: [deliverableId], references: [id], onDelete: Cascade)
+  sourceDocumentFile ProjectDocumentFile? @relation(fields: [sourceDocumentFileId], references: [id], onDelete: SetNull)
+  supersedes ProjectMaterialRevision? @relation("MaterialRevisionSupersedes", fields: [supersedesRevisionId], references: [id], onDelete: SetNull)
+  supersededBy ProjectMaterialRevision[] @relation("MaterialRevisionSupersedes")
+  items ProjectMaterialItem[]
+  procurementItems ProjectProcurementItem[]
+
+  @@unique([deliverableId, stage, listType, version])
+  @@index([projectId, deliverableId, stage, listType, status])
+}
+
+model ProjectMaterialItem {
+  id                String   @id @default(cuid())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  revisionId        String
+  materialCode      String   @default("")
+  name              String
+  specification     String   @default("")
+  unit              String
+  quantityPerUnit   Float
+  manufacturer      String   @default("")
+  preferredSupplier String   @default("")
+  remark            String   @default("") @db.Text
+  sortOrder         Int      @default(0)
+
+  revision ProjectMaterialRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+  procurementItems ProjectProcurementItem[]
+
+  @@index([revisionId, sortOrder])
+  @@index([revisionId, materialCode])
+}
+
+model ProjectProcurementItem {
+  id                  String                 @id @default(cuid())
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+  projectId           String
+  sourceType          ProcurementSourceType
+  sourceRevisionId    String?
+  sourceMaterialItemId String?
+  deliverableId       String?
+  stage               DeliveryStage?
+  name                String
+  specification       String                 @default("")
+  plannedQuantity     Float
+  orderedQuantity     Float                  @default(0)
+  receivedQuantity    Float                  @default(0)
+  acceptedQuantity    Float                  @default(0)
+  unit                String
+  unitPrice           Float                  @default(0)
+  plannedAmount       Float                  @default(0)
+  orderAmount         Float                  @default(0)
+  actualAmount        Float                  @default(0)
+  currency            String                 @default("CNY")
+  status              ProcurementStatus      @default(DRAFT)
+  buyerMemberId       String?
+  supplierName        String                 @default("")
+  purchaseRequestNo   String                 @default("")
+  orderNo             String                 @default("")
+  expectedArrivalDate DateTime?
+  actualArrivalDate   DateTime?
+  note                String                 @default("") @db.Text
+  budgetItemId        String?
+  ganttTaskId         String?
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceRevision ProjectMaterialRevision? @relation(fields: [sourceRevisionId], references: [id], onDelete: SetNull)
+  sourceMaterialItem ProjectMaterialItem? @relation(fields: [sourceMaterialItemId], references: [id], onDelete: SetNull)
+  deliverable ProjectDeliverable? @relation(fields: [deliverableId], references: [id], onDelete: SetNull)
+  buyerMember ProjectMember? @relation("ProcurementBuyer", fields: [buyerMemberId], references: [id], onDelete: SetNull)
+  budgetItem ProjectBudgetItem? @relation(fields: [budgetItemId], references: [id], onDelete: SetNull)
+  ganttTask ProjectGanttTask? @relation(fields: [ganttTaskId], references: [id], onDelete: SetNull)
+  statusLogs ProjectProcurementStatusLog[]
+
+  @@index([projectId, status, createdAt])
+  @@index([projectId, deliverableId])
+  @@index([sourceRevisionId, sourceMaterialItemId])
+}
+
+model ProjectProcurementStatusLog {
+  id                String            @id @default(cuid())
+  createdAt         DateTime          @default(now())
+  procurementItemId String
+  fromStatus        ProcurementStatus?
+  toStatus          ProcurementStatus
+  note              String            @default("") @db.Text
+  operatorUserId    String            @default("")
+  operatorName      String            @default("")
+
+  procurementItem ProjectProcurementItem @relation(fields: [procurementItemId], references: [id], onDelete: Cascade)
+  @@index([procurementItemId, createdAt])
 }
