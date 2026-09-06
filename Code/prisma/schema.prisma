@@ -7,15 +7,56 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum DeliverableType { SOFTWARE HARDWARE }
-enum OutsourceMode { NO YES PARTIAL }
-enum DeliverableLifecycleStatus { DRAFT IN_PROGRESS READY_FOR_REVIEW ACCEPTED DELIVERED REJECTED CANCELLED }
-enum DeliveryStage { PROTOTYPE MASS_PRODUCTION }
-enum MaterialListType { BOM CABLE_LIST }
-enum MaterialRevisionStatus { DRAFT RELEASED SUPERSEDED }
-enum ProcurementSourceType { BOM CABLE_LIST MANUAL }
-enum ProcurementStatus { DRAFT PENDING_PURCHASE SOURCING ORDERED PARTIALLY_RECEIVED RECEIVED INSPECTING ACCEPTED REJECTED CLOSED ON_HOLD CANCELLED }
-
+enum DeliverableType {
+  SOFTWARE
+  HARDWARE
+}
+enum OutsourceMode {
+  NO
+  YES
+  PARTIAL
+}
+enum DeliverableLifecycleStatus {
+  DRAFT
+  IN_PROGRESS
+  READY_FOR_REVIEW
+  ACCEPTED
+  DELIVERED
+  REJECTED
+  CANCELLED
+}
+enum DeliveryStage {
+  PROTOTYPE
+  MASS_PRODUCTION
+}
+enum MaterialListType {
+  BOM
+  CABLE_LIST
+}
+enum MaterialRevisionStatus {
+  DRAFT
+  RELEASED
+  SUPERSEDED
+}
+enum ProcurementSourceType {
+  BOM
+  CABLE_LIST
+  MANUAL
+}
+enum ProcurementStatus {
+  DRAFT
+  PENDING_PURCHASE
+  SOURCING
+  ORDERED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  INSPECTING
+  ACCEPTED
+  REJECTED
+  CLOSED
+  ON_HOLD
+  CANCELLED
+}
 
 model UserAccount {
   id                    String    @id @default(cuid())
@@ -1414,7 +1455,7 @@ model ProjectMaterialRevision {
   procurementItems ProjectProcurementItem[]
 
   @@unique([deliverableId, stage, listType, version])
-  @@index([projectId, deliverableId, stage, listType, status])
+  @@index([projectId, deliverableId, status])
 }
 
 model ProjectMaterialItem {
