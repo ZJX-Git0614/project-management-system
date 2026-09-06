@@ -62,6 +62,13 @@ const directProjectTables = [
   "ProjectScheduleImportMetadata",
   "ProjectScheduleSnapshot",
   "ProjectModuleHistorySnapshot",
+  // Delivery/procurement records are intentionally listed here (rather than
+  // discovered from Prisma) so older databases remain compatible: absent
+  // tables produce an empty snapshot until their migration is installed.
+  "ProjectDeliverable",
+  "ProjectDeliverableStatus",
+  "ProjectMaterialRevision",
+  "ProjectProcurementItem",
   "ScheduleAnalysisRun",
   "WeeklyItem",
   "MonthlyItem",
@@ -79,6 +86,8 @@ const directProjectTables = [
 
 const childTableQueries: Record<string, string> = {
   ProjectGanttTaskOwner: `SELECT owner_link.* FROM "ProjectGanttTaskOwner" owner_link JOIN "ProjectGanttTask" task ON task.id = owner_link."taskId" WHERE task."projectId" = $1`,
+  ProjectMaterialItem: `SELECT item.* FROM "ProjectMaterialItem" item JOIN "ProjectMaterialRevision" revision ON revision.id = item."revisionId" WHERE revision."projectId" = $1`,
+  ProjectProcurementStatusLog: `SELECT log.* FROM "ProjectProcurementStatusLog" log JOIN "ProjectProcurementItem" item ON item.id = log."procurementItemId" WHERE item."projectId" = $1`,
   WeeklyItemGanttTask: `SELECT link.* FROM "WeeklyItemGanttTask" link JOIN "WeeklyItem" item ON item.id = link."weeklyItemId" WHERE item."projectId" = $1`,
   RiskRegisterItemWeeklyItem: `SELECT link.* FROM "RiskRegisterItemWeeklyItem" link JOIN "RiskRegisterItem" risk ON risk.id = link."riskItemId" WHERE risk."projectId" = $1`,
   DocumentExtraction: `SELECT extraction.* FROM "DocumentExtraction" extraction JOIN "AssistantAttachment" attachment ON attachment.id = extraction."attachmentId" WHERE attachment."projectId" = $1`,
@@ -98,6 +107,8 @@ const insertOrder = [
   "ProjectScheduleImportMetadata",
   "ProjectScheduleSnapshot",
   "ProjectModuleHistorySnapshot",
+  "ProjectDeliverable",
+  "ProjectDeliverableStatus",
   "ScheduleAnalysisRun",
   "WeeklyItem",
   "WeeklyItemGanttTask",
@@ -107,6 +118,10 @@ const insertOrder = [
   "RiskRegisterItem",
   "RiskRegisterItemWeeklyItem",
   "ProjectDocumentFile",
+  "ProjectMaterialRevision",
+  "ProjectMaterialItem",
+  "ProjectProcurementItem",
+  "ProjectProcurementStatusLog",
   "AssistantAttachment",
   "DocumentExtraction",
   "DocumentRevision",
