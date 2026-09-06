@@ -29,6 +29,7 @@ import { ProjectBudgetPanel } from "@/components/project-budget-panel";
 import { ProjectDocumentListPanel } from "@/components/project-document-list-panel";
 import { ProjectEarnedValuePanel } from "@/components/project-earned-value-panel";
 import { ProjectExecutionPanel } from "@/components/project-execution-panel";
+import { ProjectDeliverableListPanel, ProjectDeliveryStatusPanel, ProjectProcurementPanel } from "@/components/project-delivery-procurement-panels";
 
 interface Project {
   id: string;
@@ -164,6 +165,9 @@ const ProjectDetailContent = () => {
       {activeGroup === "documents" && (
         <ProjectDocumentListPanel projectId={projectId} projectStatus={project.status} />
       )}
+      {activeGroup === "deliverables" && <ProjectDeliverableListPanel projectId={projectId} />}
+      {activeGroup === "delivery-status" && <ProjectDeliveryStatusPanel projectId={projectId} />}
+      {activeGroup === "procurement" && <ProjectProcurementPanel projectId={projectId} />}
       {activeGroup === "budget" && <ProjectBudgetPanel projectId={projectId} projectStatus={project.status} projectAmountWan={project.amountWan} />}
     </div>
   );

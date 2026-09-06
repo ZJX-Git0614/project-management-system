@@ -6,6 +6,9 @@ export const DETAIL_NAV_GROUPS = [
   { key: "gantt", label: "项目WBS管理" },
   { key: "execution", label: "项目执行阶段" },
   { key: "documents", label: "文档清单管理" },
+  { key: "deliverables", label: "交付物清单" },
+  { key: "delivery-status", label: "交付物状态管理" },
+  { key: "procurement", label: "项目采购管理" },
   { key: "budget", label: "项目预算管理" },
 ] as const;
 

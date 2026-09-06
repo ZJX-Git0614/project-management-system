@@ -26,6 +26,7 @@ import {
   User,
   Wallet,
   Workflow,
+  Truck,
   X,
 } from "lucide-react";
 import { useAuth } from "@/contexts/auth-context";
@@ -426,6 +427,19 @@ export const AppShell = ({ children }: { children: React.ReactNode }) => {
           icon: <MessagesSquare className="size-4" />,
         },
       ],
+    },
+    {
+      title: "项目交付管理",
+      items: hasSelectedProject ? [
+        { href: currentProjectId ? `/projects/${currentProjectId}?nav=deliverables` : "/projects", label: "交付物清单", active: isDetailGroupActive(fullPath, "deliverables"), permissionKey: "project-deliverables:view", icon: <ClipboardList className="size-4" /> },
+        { href: currentProjectId ? `/projects/${currentProjectId}?nav=delivery-status` : "/projects", label: "交付物状态管理", active: isDetailGroupActive(fullPath, "delivery-status"), permissionKey: "project-delivery-status:view", icon: <Truck className="size-4" /> },
+      ] : [],
+    },
+    {
+      title: "项目采购管理",
+      items: hasSelectedProject ? [
+        { href: currentProjectId ? `/projects/${currentProjectId}?nav=procurement` : "/projects", label: "项目采购管理", active: isDetailGroupActive(fullPath, "procurement"), permissionKey: "project-procurement:view", icon: <Boxes className="size-4" /> },
+      ] : [],
     },
     {
       title: "系统设置",
