@@ -11,11 +11,13 @@ enum DeliverableType {
   SOFTWARE
   HARDWARE
 }
+
 enum OutsourceMode {
   NO
   YES
   PARTIAL
 }
+
 enum DeliverableLifecycleStatus {
   DRAFT
   IN_PROGRESS
@@ -25,24 +27,29 @@ enum DeliverableLifecycleStatus {
   REJECTED
   CANCELLED
 }
+
 enum DeliveryStage {
   PROTOTYPE
   MASS_PRODUCTION
 }
+
 enum MaterialListType {
   BOM
   CABLE_LIST
 }
+
 enum MaterialRevisionStatus {
   DRAFT
   RELEASED
   SUPERSEDED
 }
+
 enum ProcurementSourceType {
   BOM
   CABLE_LIST
   MANUAL
 }
+
 enum ProcurementStatus {
   DRAFT
   PENDING_PURCHASE
@@ -115,8 +122,9 @@ model Project {
   operationHistories     OperationHistory[]
   riskRegisterItems      RiskRegisterItem[]
   documentFiles          ProjectDocumentFile[]
-  deliverables            ProjectDeliverable[]
-  procurementItems        ProjectProcurementItem[]
+  deliverables           ProjectDeliverable[]
+  procurementItems       ProjectProcurementItem[]
+  materialRevisions      ProjectMaterialRevision[]
   assistantAttachments   AssistantAttachment[]
   assistantArtifacts     AssistantArtifact[]
   assistantPlans         AssistantPlanRun[]
@@ -127,65 +135,65 @@ model Project {
 }
 
 model ProjectGanttTask {
-  id                    String    @id @default(cuid())
-  createdAt             DateTime  @default(now())
-  updatedAt             DateTime  @updatedAt
-  projectId             String
-  parentId              String?
-  ownerMemberId         String?
-  taskCode              String    @default("")
-  taskCategory          String
-  taskName              String
-  taskDescription       String    @default("无")
-  startDate             String
-  finishDate            String    @default("")
+  id                       String    @id @default(cuid())
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+  projectId                String
+  parentId                 String?
+  ownerMemberId            String?
+  taskCode                 String    @default("")
+  taskCategory             String
+  taskName                 String
+  taskDescription          String    @default("无")
+  startDate                String
+  finishDate               String    @default("")
   relativeStartOffsetDays  Float?
   relativeFinishOffsetDays Float?
-  earlyStartDate        String    @default("")
-  earlyFinishDate       String    @default("")
-  lateStartDate         String    @default("")
-  lateFinishDate        String    @default("")
-  totalFloatMinutes     Int?
-  freeFloatMinutes      Int?
-  scheduleStatus        String    @default("UNSCHEDULED")
-  scheduleCalculatedAt  DateTime?
-  durationDays          Float
-  durationMinutes       Int       @default(0)
-  durationFormat        Int       @default(7)
-  actualStartDate       String    @default("")
-  actualEndDate         String    @default("")
-  estimatedWorkHours    Float     @default(0)
-  actualWorkHours       Float     @default(0)
-  progress              Int       @default(0)
-  predecessorTask       String    @default("")
-  taskMode              String    @default("AUTO")
-  startSlot             String    @default("AM")
-  finishSlot            String    @default("PM")
-  actualStartSlot       String    @default("AM")
-  actualFinishSlot      String    @default("PM")
-  parentBoundaryMode    String    @default("ROLLUP")
-  schedulePriority      Int       @default(500)
-  userPriority          String    @default("MEDIUM")
-  effectivePriority     String    @default("MEDIUM")
-  effortDriven          Boolean   @default(false)
-  parallelizable        Boolean   @default(false)
-  isMilestone           Boolean   @default(false)
-  externalUid           String    @default("")
-  wbsCode               String    @default("")
-  outlineNumber         String    @default("")
-  calendarUid           String    @default("")
-  constraintType        Int?
-  constraintDate        String    @default("")
-  resourceNotBeforeDate String    @default("")
-  baselineStartDate     String    @default("")
-  baselineFinishDate    String    @default("")
-  baselineCost          Float     @default(0)
-  budgetAtCompletion    Float     @default(0)
-  actualCost            Float     @default(0)
-  budgetItemId          String?
-  baselines             Json      @default("[]")
-  remark                String    @default("")
-  sortOrder             Int       @default(0)
+  earlyStartDate           String    @default("")
+  earlyFinishDate          String    @default("")
+  lateStartDate            String    @default("")
+  lateFinishDate           String    @default("")
+  totalFloatMinutes        Int?
+  freeFloatMinutes         Int?
+  scheduleStatus           String    @default("UNSCHEDULED")
+  scheduleCalculatedAt     DateTime?
+  durationDays             Float
+  durationMinutes          Int       @default(0)
+  durationFormat           Int       @default(7)
+  actualStartDate          String    @default("")
+  actualEndDate            String    @default("")
+  estimatedWorkHours       Float     @default(0)
+  actualWorkHours          Float     @default(0)
+  progress                 Int       @default(0)
+  predecessorTask          String    @default("")
+  taskMode                 String    @default("AUTO")
+  startSlot                String    @default("AM")
+  finishSlot               String    @default("PM")
+  actualStartSlot          String    @default("AM")
+  actualFinishSlot         String    @default("PM")
+  parentBoundaryMode       String    @default("ROLLUP")
+  schedulePriority         Int       @default(500)
+  userPriority             String    @default("MEDIUM")
+  effectivePriority        String    @default("MEDIUM")
+  effortDriven             Boolean   @default(false)
+  parallelizable           Boolean   @default(false)
+  isMilestone              Boolean   @default(false)
+  externalUid              String    @default("")
+  wbsCode                  String    @default("")
+  outlineNumber            String    @default("")
+  calendarUid              String    @default("")
+  constraintType           Int?
+  constraintDate           String    @default("")
+  resourceNotBeforeDate    String    @default("")
+  baselineStartDate        String    @default("")
+  baselineFinishDate       String    @default("")
+  baselineCost             Float     @default(0)
+  budgetAtCompletion       Float     @default(0)
+  actualCost               Float     @default(0)
+  budgetItemId             String?
+  baselines                Json      @default("[]")
+  remark                   String    @default("")
+  sortOrder                Int       @default(0)
 
   project                 Project                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   ownerMember             ProjectMember?           @relation(fields: [ownerMemberId], references: [id], onDelete: SetNull)
@@ -199,6 +207,8 @@ model ProjectGanttTask {
   executionLinks          ProjectExecutionTask[]
   predecessorDependencies ProjectGanttDependency[] @relation("GanttDependencySuccessor")
   successorDependencies   ProjectGanttDependency[] @relation("GanttDependencyPredecessor")
+  deliverables            ProjectDeliverable[]     @relation("DeliverableLinkedTask")
+  procurementItems        ProjectProcurementItem[] @relation("ProcurementGanttTask")
 
   @@index([projectId, externalUid])
   @@index([projectId, budgetItemId])
@@ -445,9 +455,9 @@ model ProjectBudgetItem {
   // 备注
   remark               String   @default("")
 
-  category   ProjectBudgetCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
-  project    Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  ganttTasks ProjectGanttTask[]
+  category         ProjectBudgetCategory    @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  project          Project                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  ganttTasks       ProjectGanttTask[]
   procurementItems ProjectProcurementItem[]
 }
 
@@ -493,11 +503,11 @@ model ProjectMember {
   productivityRate         Float    @default(1)
   maxConcurrentAssignments Int      @default(0)
 
-  project        Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  account        UserAccount?            @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  ganttTasks     ProjectGanttTask[]
-  ganttTaskLinks ProjectGanttTaskOwner[]
-  executionOwners ProjectExecution[]      @relation("ExecutionOwner")
+  project          Project                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  account          UserAccount?             @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  ganttTasks       ProjectGanttTask[]
+  ganttTaskLinks   ProjectGanttTaskOwner[]
+  executionOwners  ProjectExecution[]       @relation("ExecutionOwner")
   procurementItems ProjectProcurementItem[] @relation("ProcurementBuyer")
 
   @@unique([projectId, accountId])
@@ -1131,7 +1141,7 @@ model ProjectDocumentFile {
   storageProvider String   @default("LOCAL")
   cloudPath       String   @default("") @db.Text
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project           Project                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   materialRevisions ProjectMaterialRevision[]
 
   @@index([projectId, directoryKey, createdAt])
@@ -1386,26 +1396,25 @@ model PermissionTree {
   data String // JSON
 }
 
-
 model ProjectDeliverable {
-  id                String         @id @default(cuid())
-  createdAt         DateTime       @default(now())
-  updatedAt         DateTime       @updatedAt
+  id                String          @id @default(cuid())
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
   projectId         String
   name              String
   quantity          Float
   unit              String
   type              DeliverableType
   outsourceMode     OutsourceMode
-  sortOrder         Int            @default(0)
+  sortOrder         Int             @default(0)
   linkedGanttTaskId String?
-  remark            String         @default("") @db.Text
+  remark            String          @default("") @db.Text
   archivedAt        DateTime?
 
-  project     Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  linkedTask  ProjectGanttTask?       @relation(fields: [linkedGanttTaskId], references: [id], onDelete: SetNull)
-  status      ProjectDeliverableStatus?
-  revisions   ProjectMaterialRevision[]
+  project          Project                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  linkedTask       ProjectGanttTask?         @relation("DeliverableLinkedTask", fields: [linkedGanttTaskId], references: [id], onDelete: SetNull)
+  status           ProjectDeliverableStatus?
+  revisions        ProjectMaterialRevision[]
   procurementItems ProjectProcurementItem[]
 
   @@index([projectId, sortOrder])
@@ -1413,46 +1422,46 @@ model ProjectDeliverable {
 }
 
 model ProjectDeliverableStatus {
-  id                    String                    @id @default(cuid())
-  createdAt             DateTime                  @default(now())
-  updatedAt             DateTime                  @updatedAt
-  deliverableId         String                    @unique
-  lifecycleStatus       DeliverableLifecycleStatus @default(DRAFT)
-  gitUrl                String                    @default("")
-  gitRef                String                    @default("")
-  buildNotes            String                    @default("") @db.Text
-  hasPrototype          Boolean                   @default(false)
-  prototypeQuantity     Float                     @default(0)
-  massProductionQuantity Float                    @default(0)
-  reviewNote            String                    @default("") @db.Text
-  acceptedAt            DateTime?
-  deliveredAt           DateTime?
-  cancelledReason       String                    @default("") @db.Text
+  id                     String                     @id @default(cuid())
+  createdAt              DateTime                   @default(now())
+  updatedAt              DateTime                   @updatedAt
+  deliverableId          String                     @unique
+  lifecycleStatus        DeliverableLifecycleStatus @default(DRAFT)
+  gitUrl                 String                     @default("")
+  gitRef                 String                     @default("")
+  buildNotes             String                     @default("") @db.Text
+  hasPrototype           Boolean                    @default(false)
+  prototypeQuantity      Float                      @default(0)
+  massProductionQuantity Float                      @default(0)
+  reviewNote             String                     @default("") @db.Text
+  acceptedAt             DateTime?
+  deliveredAt            DateTime?
+  cancelledReason        String                     @default("") @db.Text
 
   deliverable ProjectDeliverable @relation(fields: [deliverableId], references: [id], onDelete: Cascade)
 }
 
 model ProjectMaterialRevision {
-  id                    String                 @id @default(cuid())
-  createdAt             DateTime               @default(now())
-  updatedAt             DateTime               @updatedAt
-  projectId             String
-  deliverableId         String
-  stage                 DeliveryStage
-  listType              MaterialListType
-  version               Int                    @default(1)
-  status                MaterialRevisionStatus @default(DRAFT)
-  sourceDocumentFileId  String?
-  releasedAt            DateTime?
-  supersedesRevisionId  String?
+  id                   String                 @id @default(cuid())
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+  projectId            String
+  deliverableId        String
+  stage                DeliveryStage
+  listType             MaterialListType
+  version              Int                    @default(1)
+  status               MaterialRevisionStatus @default(DRAFT)
+  sourceDocumentFileId String?
+  releasedAt           DateTime?
+  supersedesRevisionId String?
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  deliverable ProjectDeliverable @relation(fields: [deliverableId], references: [id], onDelete: Cascade)
-  sourceDocumentFile ProjectDocumentFile? @relation(fields: [sourceDocumentFileId], references: [id], onDelete: SetNull)
-  supersedes ProjectMaterialRevision? @relation("MaterialRevisionSupersedes", fields: [supersedesRevisionId], references: [id], onDelete: SetNull)
-  supersededBy ProjectMaterialRevision[] @relation("MaterialRevisionSupersedes")
-  items ProjectMaterialItem[]
-  procurementItems ProjectProcurementItem[]
+  project            Project                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  deliverable        ProjectDeliverable        @relation(fields: [deliverableId], references: [id], onDelete: Cascade)
+  sourceDocumentFile ProjectDocumentFile?      @relation(fields: [sourceDocumentFileId], references: [id], onDelete: SetNull)
+  supersedes         ProjectMaterialRevision?  @relation("MaterialRevisionSupersedes", fields: [supersedesRevisionId], references: [id], onDelete: SetNull)
+  supersededBy       ProjectMaterialRevision[] @relation("MaterialRevisionSupersedes")
+  items              ProjectMaterialItem[]
+  procurementItems   ProjectProcurementItem[]
 
   @@unique([deliverableId, stage, listType, version])
   @@index([projectId, deliverableId, status])
@@ -1473,7 +1482,7 @@ model ProjectMaterialItem {
   remark            String   @default("") @db.Text
   sortOrder         Int      @default(0)
 
-  revision ProjectMaterialRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+  revision         ProjectMaterialRevision  @relation(fields: [revisionId], references: [id], onDelete: Cascade)
   procurementItems ProjectProcurementItem[]
 
   @@index([revisionId, sortOrder])
@@ -1481,46 +1490,46 @@ model ProjectMaterialItem {
 }
 
 model ProjectProcurementItem {
-  id                  String                 @id @default(cuid())
-  createdAt           DateTime               @default(now())
-  updatedAt           DateTime               @updatedAt
-  projectId           String
-  sourceType          ProcurementSourceType
-  sourceRevisionId    String?
+  id                   String                @id @default(cuid())
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  projectId            String
+  sourceType           ProcurementSourceType
+  sourceRevisionId     String?
   sourceMaterialItemId String?
-  deliverableId       String?
-  stage               DeliveryStage?
-  name                String
-  specification       String                 @default("")
-  plannedQuantity     Float
-  orderedQuantity     Float                  @default(0)
-  receivedQuantity    Float                  @default(0)
-  acceptedQuantity    Float                  @default(0)
-  unit                String
-  unitPrice           Float                  @default(0)
-  plannedAmount       Float                  @default(0)
-  orderAmount         Float                  @default(0)
-  actualAmount        Float                  @default(0)
-  currency            String                 @default("CNY")
-  status              ProcurementStatus      @default(DRAFT)
-  buyerMemberId       String?
-  supplierName        String                 @default("")
-  purchaseRequestNo   String                 @default("")
-  orderNo             String                 @default("")
-  expectedArrivalDate DateTime?
-  actualArrivalDate   DateTime?
-  note                String                 @default("") @db.Text
-  budgetItemId        String?
-  ganttTaskId         String?
+  deliverableId        String?
+  stage                DeliveryStage?
+  name                 String
+  specification        String                @default("")
+  plannedQuantity      Float
+  orderedQuantity      Float                 @default(0)
+  receivedQuantity     Float                 @default(0)
+  acceptedQuantity     Float                 @default(0)
+  unit                 String
+  unitPrice            Float                 @default(0)
+  plannedAmount        Float                 @default(0)
+  orderAmount          Float                 @default(0)
+  actualAmount         Float                 @default(0)
+  currency             String                @default("CNY")
+  status               ProcurementStatus     @default(DRAFT)
+  buyerMemberId        String?
+  supplierName         String                @default("")
+  purchaseRequestNo    String                @default("")
+  orderNo              String                @default("")
+  expectedArrivalDate  DateTime?
+  actualArrivalDate    DateTime?
+  note                 String                @default("") @db.Text
+  budgetItemId         String?
+  ganttTaskId          String?
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  sourceRevision ProjectMaterialRevision? @relation(fields: [sourceRevisionId], references: [id], onDelete: SetNull)
-  sourceMaterialItem ProjectMaterialItem? @relation(fields: [sourceMaterialItemId], references: [id], onDelete: SetNull)
-  deliverable ProjectDeliverable? @relation(fields: [deliverableId], references: [id], onDelete: SetNull)
-  buyerMember ProjectMember? @relation("ProcurementBuyer", fields: [buyerMemberId], references: [id], onDelete: SetNull)
-  budgetItem ProjectBudgetItem? @relation(fields: [budgetItemId], references: [id], onDelete: SetNull)
-  ganttTask ProjectGanttTask? @relation(fields: [ganttTaskId], references: [id], onDelete: SetNull)
-  statusLogs ProjectProcurementStatusLog[]
+  project            Project                       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceRevision     ProjectMaterialRevision?      @relation(fields: [sourceRevisionId], references: [id], onDelete: SetNull)
+  sourceMaterialItem ProjectMaterialItem?          @relation(fields: [sourceMaterialItemId], references: [id], onDelete: SetNull)
+  deliverable        ProjectDeliverable?           @relation(fields: [deliverableId], references: [id], onDelete: SetNull)
+  buyerMember        ProjectMember?                @relation("ProcurementBuyer", fields: [buyerMemberId], references: [id], onDelete: SetNull)
+  budgetItem         ProjectBudgetItem?            @relation(fields: [budgetItemId], references: [id], onDelete: SetNull)
+  ganttTask          ProjectGanttTask?             @relation("ProcurementGanttTask", fields: [ganttTaskId], references: [id], onDelete: SetNull)
+  statusLogs         ProjectProcurementStatusLog[]
 
   @@index([projectId, status, createdAt])
   @@index([projectId, deliverableId])
@@ -1528,15 +1537,16 @@ model ProjectProcurementItem {
 }
 
 model ProjectProcurementStatusLog {
-  id                String            @id @default(cuid())
-  createdAt         DateTime          @default(now())
+  id                String             @id @default(cuid())
+  createdAt         DateTime           @default(now())
   procurementItemId String
   fromStatus        ProcurementStatus?
   toStatus          ProcurementStatus
-  note              String            @default("") @db.Text
-  operatorUserId    String            @default("")
-  operatorName      String            @default("")
+  note              String             @default("") @db.Text
+  operatorUserId    String             @default("")
+  operatorName      String             @default("")
 
   procurementItem ProjectProcurementItem @relation(fields: [procurementItemId], references: [id], onDelete: Cascade)
+
   @@index([procurementItemId, createdAt])
 }
