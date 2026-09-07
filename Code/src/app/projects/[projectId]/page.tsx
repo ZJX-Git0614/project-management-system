@@ -29,7 +29,7 @@ import { ProjectBudgetPanel } from "@/components/project-budget-panel";
 import { ProjectDocumentListPanel } from "@/components/project-document-list-panel";
 import { ProjectEarnedValuePanel } from "@/components/project-earned-value-panel";
 import { ProjectExecutionPanel } from "@/components/project-execution-panel";
-import { ProjectDeliverableListPanel, ProjectDeliveryStatusPanel, ProjectHardwareMaterialsPanel, ProjectProcurementPanel } from "@/components/project-delivery-procurement-panels";
+import { ProjectDeliverableListPanel, ProjectDeliveryStatusPanel, ProjectHardwareMaterialsPanel } from "@/components/project-delivery-procurement-panels";
 import { ProjectProcurementProcessPanel } from "@/components/project-procurement-process-panel";
 
 interface Project {
@@ -102,7 +102,7 @@ const ProjectDetailContent = () => {
       setProjectLoading(true);
       setProjectError(null);
       const data = await api.get<Project & { projectMembers: ProjectMember[] }>(
-        `/api/projects/${projectId}`
+        `/api/projects/${projectId}?summary=true`
       );
       setProject(data);
     } catch (error) {
@@ -168,7 +168,7 @@ const ProjectDetailContent = () => {
       )}
       {activeGroup === "deliverables" && <ProjectDeliverableListPanel projectId={projectId} />}
       {activeGroup === "delivery-status" && <div className="space-y-4"><ProjectDeliveryStatusPanel projectId={projectId} /><ProjectHardwareMaterialsPanel projectId={projectId} /></div>}
-      {activeGroup === "procurement" && <div className="space-y-4"><ProjectProcurementPanel projectId={projectId} /><ProjectProcurementProcessPanel projectId={projectId} /></div>}
+      {activeGroup === "procurement" && <ProjectProcurementProcessPanel projectId={projectId} />}
       {activeGroup === "budget" && <ProjectBudgetPanel projectId={projectId} projectStatus={project.status} projectAmountWan={project.amountWan} />}
     </div>
   );

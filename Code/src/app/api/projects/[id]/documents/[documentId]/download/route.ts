@@ -1,9 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getUserFromRequest } from "@/lib/auth";
-import { err, notFound, unauthorized } from "@/lib/api-utils";
+import { err, forbidden, notFound, unauthorizedFromRequest } from "@/lib/api-utils";
 import { getProjectDocumentPath } from "@/lib/project-document-storage";
+import { hasProjectAccess } from "@/lib/project-access";
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import { getDocumentWebDavConfig, getSystemBackupSettings } from "@/lib/system-backup";
 import { downloadFileFromWebDav } from "@/lib/webdav-backup";
 
@@ -14,8 +15,10 @@ export async function GET(
   { params }: { params: Promise<{ id: string; documentId: string }> },
 ) {
   const { id, documentId } = await params;
-  const user = getUserFromRequest(req);
-  if (!user) return unauthorized();
+  const user = await getAuthenticatedUser(req);
+  if (!user) return unauthorizedFromRequest(req);
+  if (!await userHasPermission(user, "project-documents:view")) return forbidden();
+  if (!await hasProjectAccess(user, id)) return forbidden();
 
   const document = await prisma.projectDocumentFile.findFirst({
     where: { id: documentId, projectId: id },

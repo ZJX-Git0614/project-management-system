@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 
 import { ensureMutableProject, err, forbidden, notFound, ok, unauthorizedFromRequest } from "@/lib/api-utils";
 import { prisma } from "@/lib/prisma";
+import { hasProjectAccess } from "@/lib/project-access";
 import { parseProcurementSourceType, procurementStatusLabel } from "@/lib/project-delivery-procurement";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 
@@ -63,6 +64,7 @@ export async function GET(req: NextRequest, { params }: RouteContext) {
   if (!await userHasPermission(user, "project-procurement:view")) return forbidden();
 
   const { id: projectId } = await params;
+  if (!await hasProjectAccess(user, projectId)) return forbidden();
   const project = await prisma.project.findUnique({ where: { id: projectId }, select: { id: true } });
   if (!project) return notFound("项目");
 
@@ -80,6 +82,7 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
   if (!await userHasPermission(user, "project-procurement:create")) return forbidden();
 
   const { id: projectId } = await params;
+  if (!await hasProjectAccess(user, projectId)) return forbidden();
   const readOnly = await ensureMutableProject(projectId);
   if (readOnly) return readOnly;
 
@@ -88,24 +91,23 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
   const unit = typeof body.unit === "string" ? body.unit.trim() : "";
   const plannedQuantity = Number(body.plannedQuantity ?? body.quantity ?? 0);
   const unitPrice = Number(body.unitPrice ?? 0);
-  const sourceType = parseProcurementSourceType(body.sourceType) ?? ProcurementSourceType.MANUAL;
+  const sourceType = body.sourceType === undefined
+    ? ProcurementSourceType.MANUAL
+    : parseProcurementSourceType(body.sourceType);
   if (!name) return err("采购物料名称不能为空");
   if (!unit) return err("采购单位不能为空");
   if (!Number.isFinite(plannedQuantity) || plannedQuantity <= 0) return err("计划采购数量必须大于 0");
   if (!Number.isFinite(unitPrice) || unitPrice < 0) return err("采购单价必须为非负数");
+  if (!sourceType) return err("采购来源类型无效");
+  if (sourceType !== ProcurementSourceType.MANUAL) return err("BOM 或线缆清单来源必须通过物料版本同步接口创建");
 
   const deliverableId = typeof body.deliverableId === "string" && body.deliverableId.trim() ? body.deliverableId.trim() : null;
   const sourceRevisionId = typeof body.sourceRevisionId === "string" && body.sourceRevisionId.trim() ? body.sourceRevisionId.trim() : null;
   const sourceMaterialItemId = typeof body.sourceMaterialItemId === "string" && body.sourceMaterialItemId.trim() ? body.sourceMaterialItemId.trim() : null;
   const buyerMemberId = typeof body.buyerMemberId === "string" && body.buyerMemberId.trim() ? body.buyerMemberId.trim() : null;
+  if (sourceRevisionId || sourceMaterialItemId) return err("手工采购条目不能伪造 BOM 或线缆清单来源");
   if (deliverableId && !await prisma.projectDeliverable.findFirst({ where: { id: deliverableId, projectId }, select: { id: true } })) {
     return err("关联交付物不属于当前项目");
-  }
-  if (sourceRevisionId && !await prisma.projectMaterialRevision.findFirst({ where: { id: sourceRevisionId, projectId }, select: { id: true } })) {
-    return err("来源物料版本不属于当前项目");
-  }
-  if (sourceMaterialItemId && !await prisma.projectMaterialItem.findFirst({ where: { id: sourceMaterialItemId, revision: { projectId } }, select: { id: true } })) {
-    return err("来源物料不属于当前项目");
   }
   if (buyerMemberId && !await prisma.projectMember.findFirst({ where: { id: buyerMemberId, projectId }, select: { id: true } })) {
     return err("采购负责人不属于当前项目");

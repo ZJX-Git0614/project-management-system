@@ -11,6 +11,8 @@ import {
   serializeGanttTaskList,
 } from "@/lib/gantt-task-service"
 import { getProjectDocumentDirectory } from "@/lib/project-document-storage"
+import { PROJECT_DETAIL_GROUP_PERMISSION_KEYS } from "@/lib/permissions"
+import { hasProjectAccess } from "@/lib/project-access"
 import { assertProjectStatusTransition, projectStatusActionPermission } from "@/lib/project-lifecycle"
 import { getValidProjectRoleNames, serializeProjectMember } from "@/lib/project-member-view"
 import { getAuthenticatedUser, requireSystemAdmin, userHasPermission } from "@/lib/server-auth"
@@ -22,6 +24,38 @@ export async function GET(
   const { id } = await params
   const user = await getAuthenticatedUser(req)
   if (!user) return unauthorizedFromRequest(req)
+  if (!await hasProjectAccess(user, id)) return forbidden()
+
+  const summaryOnly = req.nextUrl.searchParams.get("summary") === "true"
+  if (summaryOnly) {
+    const detailPermissions = [...new Set(Object.values(PROJECT_DETAIL_GROUP_PERMISSION_KEYS))]
+    const permissionChecks = await Promise.all(detailPermissions.map((permission) => userHasPermission(user, permission)))
+    if (!permissionChecks.some(Boolean)) return forbidden()
+    const project = await prisma.project.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        name: true,
+        code: true,
+        clientName: true,
+        amountWan: true,
+        deviceCount: true,
+        repairCycleDays: true,
+        startDate: true,
+        expectedEndDate: true,
+        status: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    })
+    if (!project) return notFound("项目")
+    return ok({
+      ...project,
+      createdAt: project.createdAt.toISOString(),
+      updatedAt: project.updatedAt.toISOString(),
+    })
+  }
+
   if (!await userHasPermission(user, "project-info:view")) return forbidden()
 
   const project = await prisma.project.findUnique({
@@ -71,6 +105,7 @@ export async function PUT(
   const { id } = await params
   const user = await getAuthenticatedUser(req)
   if (!user) return unauthorizedFromRequest(req)
+  if (!await hasProjectAccess(user, id)) return forbidden()
 
   const existing = await prisma.project.findUnique({ where: { id } })
   if (!existing) return notFound("项目")
@@ -163,7 +198,12 @@ export async function DELETE(
   const existing = await prisma.project.findUnique({ where: { id } })
   if (!existing) return notFound("项目")
 
-  await prisma.project.delete({ where: { id } })
+  await prisma.$transaction(async (tx) => {
+    // Material source documents are immutable during normal operation. Remove
+    // their revisions first only for this administrator-level whole-project delete.
+    await tx.projectMaterialRevision.deleteMany({ where: { projectId: id } })
+    await tx.project.delete({ where: { id } })
+  })
   await rm(getProjectDocumentDirectory(id), { recursive: true, force: true }).catch(() => undefined)
   return ok({ message: "项目已删除" })
 }

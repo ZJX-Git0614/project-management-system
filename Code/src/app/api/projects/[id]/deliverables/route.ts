@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 
 import { ensureMutableProject, err, forbidden, notFound, ok, unauthorizedFromRequest } from "@/lib/api-utils";
 import { prisma } from "@/lib/prisma";
+import { hasProjectAccess } from "@/lib/project-access";
 import {
   parseDeliverableType,
   parseOutsourceMode,
@@ -16,18 +17,15 @@ const deliveryInclude = {
   revisions: { select: { stage: true, listType: true, status: true } },
 } as const;
 
-const canAccess = async (req: NextRequest, permission: string) => {
-  const user = await getAuthenticatedUser(req);
-  if (!user) return { user: null, response: unauthorizedFromRequest(req) };
-  if (!await userHasPermission(user, permission)) return { user: null, response: forbidden() };
-  return { user, response: null };
-};
-
 export async function GET(req: NextRequest, { params }: RouteContext) {
-  const auth = await canAccess(req, "project-deliverables:view");
-  if (auth.response) return auth.response;
+  const user = await getAuthenticatedUser(req);
+  if (!user) return unauthorizedFromRequest(req);
+  const canViewList = await userHasPermission(user, "project-deliverables:view");
+  const canViewStatus = await userHasPermission(user, "project-delivery-status:view");
+  if (!canViewList && !canViewStatus) return forbidden();
 
   const { id: projectId } = await params;
+  if (!await hasProjectAccess(user, projectId)) return forbidden();
   const project = await prisma.project.findUnique({ where: { id: projectId }, select: { id: true } });
   if (!project) return notFound("项目");
 
@@ -40,10 +38,12 @@ export async function GET(req: NextRequest, { params }: RouteContext) {
 }
 
 export async function POST(req: NextRequest, { params }: RouteContext) {
-  const auth = await canAccess(req, "project-deliverables:create");
-  if (auth.response || !auth.user) return auth.response!;
+  const user = await getAuthenticatedUser(req);
+  if (!user) return unauthorizedFromRequest(req);
+  if (!await userHasPermission(user, "project-deliverables:create")) return forbidden();
 
   const { id: projectId } = await params;
+  if (!await hasProjectAccess(user, projectId)) return forbidden();
   const readOnly = await ensureMutableProject(projectId);
   if (readOnly) return readOnly;
 
@@ -98,7 +98,7 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
         entityType: "DELIVERABLE",
         entityId: created.id,
         actionType: "CREATE",
-        operator: auth.user.displayName,
+        operator: user.displayName,
         detail: `新增交付物：${created.name}（${type === "SOFTWARE" ? "软件" : "硬件"}，${quantity}${unit}）`,
       },
     });

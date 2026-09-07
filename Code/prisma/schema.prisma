@@ -1457,7 +1457,7 @@ model ProjectMaterialRevision {
 
   project            Project                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   deliverable        ProjectDeliverable        @relation(fields: [deliverableId], references: [id], onDelete: Cascade)
-  sourceDocumentFile ProjectDocumentFile?      @relation(fields: [sourceDocumentFileId], references: [id], onDelete: SetNull)
+  sourceDocumentFile ProjectDocumentFile?      @relation(fields: [sourceDocumentFileId], references: [id], onDelete: Restrict)
   supersedes         ProjectMaterialRevision?  @relation("MaterialRevisionSupersedes", fields: [supersedesRevisionId], references: [id], onDelete: SetNull)
   supersededBy       ProjectMaterialRevision[] @relation("MaterialRevisionSupersedes")
   items              ProjectMaterialItem[]
@@ -1534,6 +1534,7 @@ model ProjectProcurementItem {
   @@index([projectId, status, createdAt])
   @@index([projectId, deliverableId])
   @@index([sourceRevisionId, sourceMaterialItemId])
+  @@unique([projectId, sourceMaterialItemId])
 }
 
 model ProjectProcurementStatusLog {

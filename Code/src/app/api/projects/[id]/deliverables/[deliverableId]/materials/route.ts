@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 
 import { ensureMutableProject, err, forbidden, notFound, ok, unauthorizedFromRequest } from "@/lib/api-utils";
 import { prisma } from "@/lib/prisma";
+import { hasProjectAccess } from "@/lib/project-access";
 import { parseDeliveryStage, parseMaterialListType } from "@/lib/project-delivery-procurement";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 
@@ -34,9 +35,12 @@ const serializeRevision = (revision: MaterialRevisionWithRelations) => ({
 export async function GET(req: NextRequest, { params }: RouteContext) {
   const user = await getAuthenticatedUser(req);
   if (!user) return unauthorizedFromRequest(req);
-  if (!await userHasPermission(user, "project-deliverables:view")) return forbidden();
+  const canViewList = await userHasPermission(user, "project-deliverables:view");
+  const canViewStatus = await userHasPermission(user, "project-delivery-status:view");
+  if (!canViewList && !canViewStatus) return forbidden();
 
   const { id: projectId, deliverableId } = await params;
+  if (!await hasProjectAccess(user, projectId)) return forbidden();
   const deliverable = await prisma.projectDeliverable.findFirst({ where: { id: deliverableId, projectId, archivedAt: null }, select: { id: true } });
   if (!deliverable) return notFound("交付物");
 
@@ -54,9 +58,10 @@ export async function GET(req: NextRequest, { params }: RouteContext) {
 export async function POST(req: NextRequest, { params }: RouteContext) {
   const user = await getAuthenticatedUser(req);
   if (!user) return unauthorizedFromRequest(req);
-  if (!await userHasPermission(user, "project-deliverables:edit")) return forbidden();
+  if (!await userHasPermission(user, "project-delivery-status:upload-material-list")) return forbidden();
 
   const { id: projectId, deliverableId } = await params;
+  if (!await hasProjectAccess(user, projectId)) return forbidden();
   const readOnly = await ensureMutableProject(projectId);
   if (readOnly) return readOnly;
 
@@ -102,11 +107,16 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
     };
   });
   if (items.some((item) => !item)) return err("每条物料必须填写名称、单位和大于 0 的单台用量");
+  const validItems = items as NonNullable<typeof items[number]>[];
+  const identities = validItems.map((item) => item.materialCode
+    ? `CODE:${item.materialCode.toUpperCase()}`
+    : `NAME:${item.name}|SPEC:${item.specification}|UNIT:${item.unit}`);
+  if (new Set(identities).size !== identities.length) return err("同一物料版本中不能存在重复的物料编码或名称、规格、单位组合");
 
   const latest = await prisma.projectMaterialRevision.findFirst({
     where: { deliverableId, stage, listType },
     orderBy: { version: "desc" },
-    select: { version: true, id: true },
+    select: { version: true },
   });
   const requestedVersion = body.version === undefined ? null : Number(body.version);
   const version = requestedVersion === null ? (latest?.version ?? 0) + 1 : requestedVersion;
@@ -116,6 +126,17 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
   }
 
   const revision = await prisma.$transaction(async (tx) => {
+    const releasedHead = await tx.projectMaterialRevision.findFirst({
+      where: { deliverableId, stage, listType, status: MaterialRevisionStatus.RELEASED },
+      orderBy: { version: "desc" },
+      select: { id: true },
+    });
+    if (status === MaterialRevisionStatus.RELEASED) {
+      await tx.projectMaterialRevision.updateMany({
+        where: { deliverableId, stage, listType, status: MaterialRevisionStatus.RELEASED },
+        data: { status: MaterialRevisionStatus.SUPERSEDED },
+      });
+    }
     const created = await tx.projectMaterialRevision.create({
       data: {
         projectId,
@@ -126,26 +147,14 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
         status,
         sourceDocumentFileId,
         releasedAt: status === MaterialRevisionStatus.RELEASED ? new Date() : null,
-        supersedesRevisionId: latest?.id ?? null,
-        items: { create: items as NonNullable<typeof items[number]>[] },
+        supersedesRevisionId: releasedHead?.id ?? null,
+        items: { create: validItems },
       },
       include: {
         sourceDocumentFile: { select: { id: true, storedName: true, originalName: true } },
         items: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] },
       },
     });
-    if (status === MaterialRevisionStatus.RELEASED) {
-      await tx.projectMaterialRevision.updateMany({
-        where: {
-          deliverableId,
-          stage,
-          listType,
-          status: MaterialRevisionStatus.RELEASED,
-          id: { not: created.id },
-        },
-        data: { status: MaterialRevisionStatus.SUPERSEDED },
-      });
-    }
     await tx.operationHistory.create({
       data: {
         projectId,
@@ -157,7 +166,12 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
       },
     });
     return created;
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }).catch((error: unknown) => {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && ["P2002", "P2034"].includes(error.code)) return null;
+    throw error;
   });
+
+  if (!revision) return err("物料版本已被其他操作更新，请刷新后重试", 409);
 
   return ok(serializeRevision(revision), 201);
 }

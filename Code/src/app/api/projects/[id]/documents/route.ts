@@ -3,14 +3,15 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getUserFromRequest } from "@/lib/auth";
-import { ensureMutableProject, err, notFound, ok, unauthorized } from "@/lib/api-utils";
+import { ensureMutableProject, err, forbidden, notFound, ok, unauthorizedFromRequest } from "@/lib/api-utils";
 import { isProjectDocumentFolderName } from "@/lib/project-document-directories";
 import {
   buildStoredDocumentName,
   getProjectDocumentPath,
   MAX_PROJECT_DOCUMENT_SIZE_BYTES,
 } from "@/lib/project-document-storage";
+import { hasProjectAccess } from "@/lib/project-access";
+import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import { getDocumentWebDavConfig, getSystemBackupSettings } from "@/lib/system-backup";
 import { deleteFileFromWebDav, uploadBufferToWebDav } from "@/lib/webdav-backup";
 
@@ -41,8 +42,10 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const user = getUserFromRequest(req);
-  if (!user) return unauthorized();
+  const user = await getAuthenticatedUser(req);
+  if (!user) return unauthorizedFromRequest(req);
+  if (!await userHasPermission(user, "project-documents:view")) return forbidden();
+  if (!await hasProjectAccess(user, id)) return forbidden();
 
   const project = await prisma.project.findUnique({ where: { id }, select: { id: true } });
   if (!project) return notFound("项目");
@@ -60,8 +63,10 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const user = getUserFromRequest(req);
-  if (!user) return unauthorized();
+  const user = await getAuthenticatedUser(req);
+  if (!user) return unauthorizedFromRequest(req);
+  if (!await userHasPermission(user, "project-documents:create")) return forbidden();
+  if (!await hasProjectAccess(user, id)) return forbidden();
 
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;

@@ -7,6 +7,26 @@ import {
 } from "@/lib/project-restore";
 
 describe("project restore multi-owner data", () => {
+  it("exports deliverable status through its parent deliverable project", async () => {
+    const executedQueries: string[] = [];
+    const queryRawUnsafe = async (query: string, tableOrProjectId: string) => {
+      executedQueries.push(query);
+      if (query.includes("information_schema.columns")) {
+        if (tableOrProjectId === "Project") return [{ column_name: "id", data_type: "text", udt_name: "text" }];
+        if (tableOrProjectId === "ProjectDeliverableStatus") return [{ column_name: "id", data_type: "text", udt_name: "text" }];
+        return [];
+      }
+      if (query.includes('FROM "ProjectDeliverableStatus"')) return [{ id: "status-1" }];
+      if (query.includes('FROM "Project"')) return [{ id: "project-1", name: "项目一" }];
+      return [];
+    };
+
+    const snapshots = await extractProjectSnapshots({ $queryRawUnsafe: queryRawUnsafe } as never, ["project-1"]);
+    expect(snapshots[0].tables.find((table) => table.table === "ProjectDeliverableStatus")?.rows).toEqual([{ id: "status-1" }]);
+    expect(executedQueries.some((query) => query.includes('JOIN "ProjectDeliverable" deliverable'))).toBe(true);
+    expect(executedQueries.some((query) => query.includes('FROM "ProjectDeliverableStatus" WHERE "projectId"'))).toBe(false);
+  });
+
   it("exports the task owner join table as part of a project snapshot", async () => {
     const queryRawUnsafe = async (query: string, tableOrProjectId: string) => {
       if (query.includes("information_schema.columns")) {
@@ -58,6 +78,11 @@ describe("project restore multi-owner data", () => {
             { taskId: "task-1", projectMemberId: "member-b" },
           ],
         },
+        {
+          table: "ProjectProcurementItem",
+          columns: [],
+          rows: [{ id: "purchase-1", buyerMemberId: "member-b" }],
+        },
       ],
     };
 
@@ -73,5 +98,6 @@ describe("project restore multi-owner data", () => {
     expect(transformed.tables.find((table) => table.table === "ProjectGanttTaskOwner")?.rows).toEqual([
       { taskId: "task-1", projectMemberId: "member-a" },
     ]);
+    expect(transformed.tables.find((table) => table.table === "ProjectProcurementItem")?.rows[0].buyerMemberId).toBe("member-a");
   });
 });

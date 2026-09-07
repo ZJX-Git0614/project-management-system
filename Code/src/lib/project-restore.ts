@@ -66,7 +66,6 @@ const directProjectTables = [
   // discovered from Prisma) so older databases remain compatible: absent
   // tables produce an empty snapshot until their migration is installed.
   "ProjectDeliverable",
-  "ProjectDeliverableStatus",
   "ProjectMaterialRevision",
   "ProjectProcurementItem",
   "ScheduleAnalysisRun",
@@ -86,6 +85,7 @@ const directProjectTables = [
 
 const childTableQueries: Record<string, string> = {
   ProjectGanttTaskOwner: `SELECT owner_link.* FROM "ProjectGanttTaskOwner" owner_link JOIN "ProjectGanttTask" task ON task.id = owner_link."taskId" WHERE task."projectId" = $1`,
+  ProjectDeliverableStatus: `SELECT status.* FROM "ProjectDeliverableStatus" status JOIN "ProjectDeliverable" deliverable ON deliverable.id = status."deliverableId" WHERE deliverable."projectId" = $1`,
   ProjectMaterialItem: `SELECT item.* FROM "ProjectMaterialItem" item JOIN "ProjectMaterialRevision" revision ON revision.id = item."revisionId" WHERE revision."projectId" = $1`,
   ProjectProcurementStatusLog: `SELECT log.* FROM "ProjectProcurementStatusLog" log JOIN "ProjectProcurementItem" item ON item.id = log."procurementItemId" WHERE item."projectId" = $1`,
   WeeklyItemGanttTask: `SELECT link.* FROM "WeeklyItemGanttTask" link JOIN "WeeklyItem" item ON item.id = link."weeklyItemId" WHERE item."projectId" = $1`,
@@ -369,6 +369,7 @@ export const transformProjectSnapshotAccounts = (
   const memberTable = copy.tables.find((table) => table.table === "ProjectMember");
   const taskTable = copy.tables.find((table) => table.table === "ProjectGanttTask");
   const ownerLinkTable = copy.tables.find((table) => table.table === "ProjectGanttTaskOwner");
+  const procurementTable = copy.tables.find((table) => table.table === "ProjectProcurementItem");
   if (!memberTable) return copy;
   const canonicalMemberByAccount = new Map<string, string>();
   const removedMemberToCanonical = new Map<string, string>();
@@ -389,6 +390,11 @@ export const transformProjectSnapshotAccounts = (
   taskTable?.rows.forEach((task) => {
     if (typeof task.ownerMemberId === "string" && removedMemberToCanonical.has(task.ownerMemberId)) {
       task.ownerMemberId = removedMemberToCanonical.get(task.ownerMemberId)!;
+    }
+  });
+  procurementTable?.rows.forEach((item) => {
+    if (typeof item.buyerMemberId === "string" && removedMemberToCanonical.has(item.buyerMemberId)) {
+      item.buyerMemberId = removedMemberToCanonical.get(item.buyerMemberId)!;
     }
   });
   if (ownerLinkTable) {

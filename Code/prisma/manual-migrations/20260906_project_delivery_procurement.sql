@@ -62,8 +62,13 @@ CREATE TABLE IF NOT EXISTS "ProjectProcurementStatusLog" (
 CREATE INDEX IF NOT EXISTS "ProjectDeliverable_projectId_sortOrder_idx" ON "ProjectDeliverable"("projectId","sortOrder");
 CREATE INDEX IF NOT EXISTS "ProjectDeliverable_projectId_type_idx" ON "ProjectDeliverable"("projectId","type");
 CREATE INDEX IF NOT EXISTS "ProjectMaterialRevision_projectId_deliverableId_status_idx" ON "ProjectMaterialRevision"("projectId","deliverableId","status");
+CREATE UNIQUE INDEX IF NOT EXISTS "ProjectMaterialRevision_one_released_head_key" ON "ProjectMaterialRevision"("deliverableId","stage","listType") WHERE "status" = 'RELEASED';
 CREATE INDEX IF NOT EXISTS "ProjectMaterialItem_revisionId_sortOrder_idx" ON "ProjectMaterialItem"("revisionId","sortOrder");
+CREATE INDEX IF NOT EXISTS "ProjectMaterialItem_revisionId_materialCode_idx" ON "ProjectMaterialItem"("revisionId","materialCode");
 CREATE INDEX IF NOT EXISTS "ProjectProcurementItem_projectId_status_createdAt_idx" ON "ProjectProcurementItem"("projectId","status","createdAt");
+CREATE INDEX IF NOT EXISTS "ProjectProcurementItem_projectId_deliverableId_idx" ON "ProjectProcurementItem"("projectId","deliverableId");
+CREATE INDEX IF NOT EXISTS "ProjectProcurementItem_sourceRevisionId_sourceMaterialItemId_idx" ON "ProjectProcurementItem"("sourceRevisionId","sourceMaterialItemId");
+CREATE UNIQUE INDEX IF NOT EXISTS "ProjectProcurementItem_projectId_sourceMaterialItemId_key" ON "ProjectProcurementItem"("projectId","sourceMaterialItemId");
 CREATE INDEX IF NOT EXISTS "ProjectProcurementStatusLog_procurementItemId_createdAt_idx" ON "ProjectProcurementStatusLog"("procurementItemId","createdAt");
 DO $$ BEGIN
   ALTER TABLE "ProjectDeliverable" ADD CONSTRAINT "ProjectDeliverable_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -81,8 +86,14 @@ DO $$ BEGIN
   ALTER TABLE "ProjectMaterialRevision" ADD CONSTRAINT "ProjectMaterialRevision_deliverableId_fkey" FOREIGN KEY ("deliverableId") REFERENCES "ProjectDeliverable"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN
-  ALTER TABLE "ProjectMaterialRevision" ADD CONSTRAINT "ProjectMaterialRevision_sourceDocumentFileId_fkey" FOREIGN KEY ("sourceDocumentFileId") REFERENCES "ProjectDocumentFile"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'ProjectMaterialRevision_sourceDocumentFileId_fkey' AND confdeltype = 'r'
+  ) THEN
+    ALTER TABLE "ProjectMaterialRevision" DROP CONSTRAINT IF EXISTS "ProjectMaterialRevision_sourceDocumentFileId_fkey";
+    ALTER TABLE "ProjectMaterialRevision" ADD CONSTRAINT "ProjectMaterialRevision_sourceDocumentFileId_fkey" FOREIGN KEY ("sourceDocumentFileId") REFERENCES "ProjectDocumentFile"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+  END IF;
+END $$;
 DO $$ BEGIN
   ALTER TABLE "ProjectMaterialRevision" ADD CONSTRAINT "ProjectMaterialRevision_supersedesRevisionId_fkey" FOREIGN KEY ("supersedesRevisionId") REFERENCES "ProjectMaterialRevision"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;

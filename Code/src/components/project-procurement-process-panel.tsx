@@ -27,6 +27,7 @@ type ProcurementItem = {
   statusCode: string;
   supplierName: string;
   orderNo: string;
+  expectedArrivalDate: string | null;
 };
 
 type ManualDraft = {
@@ -54,7 +55,7 @@ const badgeVariant = (status: string): "success" | "warning" | "secondary" | "de
 export function ProjectProcurementProcessPanel({ projectId }: { projectId: string }) {
   const { can } = usePermission();
   const canCreate = can("project-procurement:create");
-  const canEdit = can("project-procurement:edit");
+  const canEdit = can("project-procurement:status-change");
   const [items, setItems] = useState<ProcurementItem[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [manualDraft, setManualDraft] = useState<ManualDraft | null>(null);
@@ -65,6 +66,8 @@ export function ProjectProcurementProcessPanel({ projectId }: { projectId: strin
   const [receivedQuantity, setReceivedQuantity] = useState(0);
   const [acceptedQuantity, setAcceptedQuantity] = useState(0);
   const [unitPrice, setUnitPrice] = useState(0);
+  const [expectedArrivalDate, setExpectedArrivalDate] = useState("");
+  const [note, setNote] = useState("");
   const selected = items.find((item) => item.id === selectedId) ?? null;
 
   const reload = useCallback(async () => {
@@ -89,6 +92,8 @@ export function ProjectProcurementProcessPanel({ projectId }: { projectId: strin
     setReceivedQuantity(item.receivedQuantity);
     setAcceptedQuantity(item.acceptedQuantity);
     setUnitPrice(item.unitPrice);
+    setExpectedArrivalDate(item.expectedArrivalDate ?? "");
+    setNote("");
   };
 
   const createManual = async () => {
@@ -118,6 +123,8 @@ export function ProjectProcurementProcessPanel({ projectId }: { projectId: strin
         receivedQuantity,
         acceptedQuantity,
         unitPrice,
+        expectedArrivalDate,
+        note,
       });
       setItems((current) => current.map((item) => item.id === saved.id ? saved : item));
       choose(saved);
@@ -135,8 +142,8 @@ export function ProjectProcurementProcessPanel({ projectId }: { projectId: strin
       <CardContent className="space-y-4">
         {canCreate && <div className="flex justify-end"><Button size="sm" onClick={() => setManualDraft({ name: "", specification: "", plannedQuantity: 1, unit: "件", unitPrice: 0 })}><Plus className="mr-1 size-3.5" />新增手工采购</Button></div>}
         {manualDraft && <div className="grid gap-2 rounded-md bg-muted/40 p-3 md:grid-cols-3"><Input placeholder="物料名称" value={manualDraft.name} onChange={(event) => setManualDraft({ ...manualDraft, name: event.target.value })} /><Input placeholder="规格" value={manualDraft.specification} onChange={(event) => setManualDraft({ ...manualDraft, specification: event.target.value })} /><Input placeholder="单位" value={manualDraft.unit} onChange={(event) => setManualDraft({ ...manualDraft, unit: event.target.value })} /><Input type="number" min={0.0001} placeholder="计划数量" value={manualDraft.plannedQuantity} onChange={(event) => setManualDraft({ ...manualDraft, plannedQuantity: Number(event.target.value) })} /><Input type="number" min={0} placeholder="单价（CNY）" value={manualDraft.unitPrice} onChange={(event) => setManualDraft({ ...manualDraft, unitPrice: Number(event.target.value) })} /><div className="flex gap-2"><Button size="sm" onClick={() => void createManual()}><Save className="mr-1 size-3.5" />保存</Button><Button size="sm" variant="ghost" onClick={() => setManualDraft(null)}>取消</Button></div></div>}
-        <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>物料</TableHead><TableHead>计划</TableHead><TableHead>下单</TableHead><TableHead>到货</TableHead><TableHead>验收</TableHead><TableHead>状态</TableHead><TableHead>订单号</TableHead><TableHead>操作</TableHead></TableRow></TableHeader><TableBody>{items.length === 0 ? <TableEmptyState colSpan={8}>暂无采购条目；可从已发布物料版本同步，或新增手工采购。</TableEmptyState> : items.map((item) => <TableRow key={item.id}><TableCell>{item.name}<span className="ml-1 text-xs text-muted-foreground">{item.specification}</span></TableCell><TableCell>{item.plannedQuantity}{item.unit}</TableCell><TableCell>{item.orderedQuantity}</TableCell><TableCell>{item.receivedQuantity}</TableCell><TableCell>{item.acceptedQuantity}</TableCell><TableCell><Badge variant={badgeVariant(item.status)}>{item.status}</Badge></TableCell><TableCell>{item.orderNo || "-"}</TableCell><TableCell>{canEdit && <Button size="sm" variant="ghost" onClick={() => choose(item)}>更新</Button>}</TableCell></TableRow>)}</TableBody></Table></div>
-        {selected && canEdit && <div className="grid gap-2 rounded-md border border-border/70 p-3 md:grid-cols-3"><div className="text-sm font-semibold md:col-span-3">更新采购过程：{selected.name}</div><Select value={statusCode} onChange={(event) => setStatusCode(event.target.value)}>{statusOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</Select><Input placeholder="订单号（下单必填）" value={orderNo} onChange={(event) => setOrderNo(event.target.value)} /><Input placeholder="供应商" value={supplierName} onChange={(event) => setSupplierName(event.target.value)} /><Input type="number" min={0} placeholder="已下单数量" value={orderedQuantity} onChange={(event) => setOrderedQuantity(Number(event.target.value))} /><Input type="number" min={0} placeholder="已到货数量" value={receivedQuantity} onChange={(event) => setReceivedQuantity(Number(event.target.value))} /><Input type="number" min={0} placeholder="验收数量" value={acceptedQuantity} onChange={(event) => setAcceptedQuantity(Number(event.target.value))} /><Input type="number" min={0} placeholder="实际单价" value={unitPrice} onChange={(event) => setUnitPrice(Number(event.target.value))} /><div className="md:col-span-2"><Button size="sm" onClick={() => void saveProgress()}><Save className="mr-1 size-3.5" />保存状态变更</Button></div></div>}
+        <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>物料</TableHead><TableHead>计划</TableHead><TableHead>含税单价</TableHead><TableHead>计划金额</TableHead><TableHead>下单</TableHead><TableHead>到货</TableHead><TableHead>验收</TableHead><TableHead>状态</TableHead><TableHead>供应商 / 订单号</TableHead><TableHead>操作</TableHead></TableRow></TableHeader><TableBody>{items.length === 0 ? <TableEmptyState colSpan={10}>暂无采购条目；可从已发布物料版本同步，或新增手工采购。</TableEmptyState> : items.map((item) => <TableRow key={item.id}><TableCell>{item.name}<span className="ml-1 text-xs text-muted-foreground">{item.specification}</span></TableCell><TableCell>{item.plannedQuantity}{item.unit}</TableCell><TableCell>¥{item.unitPrice.toFixed(2)}</TableCell><TableCell>¥{item.plannedAmount.toFixed(2)}</TableCell><TableCell>{item.orderedQuantity}</TableCell><TableCell>{item.receivedQuantity}</TableCell><TableCell>{item.acceptedQuantity}</TableCell><TableCell><Badge variant={badgeVariant(item.status)}>{item.status}</Badge></TableCell><TableCell>{item.supplierName || "-"} / {item.orderNo || "-"}</TableCell><TableCell>{canEdit && <Button size="sm" variant="ghost" onClick={() => choose(item)}>更新</Button>}</TableCell></TableRow>)}</TableBody></Table></div>
+        {selected && canEdit && <div className="grid gap-2 rounded-md border border-border/70 p-3 md:grid-cols-3"><div className="text-sm font-semibold md:col-span-3">更新采购过程：{selected.name}</div><Select value={statusCode} onChange={(event) => setStatusCode(event.target.value)}>{statusOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</Select><Input placeholder="订单号（下单必填）" value={orderNo} onChange={(event) => setOrderNo(event.target.value)} /><Input placeholder="供应商（下单必填）" value={supplierName} onChange={(event) => setSupplierName(event.target.value)} /><Input type="number" min={0} placeholder="已下单数量" value={orderedQuantity} onChange={(event) => setOrderedQuantity(Number(event.target.value))} /><Input type="number" min={0} placeholder="已到货数量" value={receivedQuantity} onChange={(event) => setReceivedQuantity(Number(event.target.value))} /><Input type="number" min={0} placeholder="验收数量" value={acceptedQuantity} onChange={(event) => setAcceptedQuantity(Number(event.target.value))} /><Input type="number" min={0} placeholder="含税单价" value={unitPrice} onChange={(event) => setUnitPrice(Number(event.target.value))} /><label className="grid gap-1 text-xs text-muted-foreground"><span>预计到货日期（下单必填）</span><Input type="date" value={expectedArrivalDate} onChange={(event) => setExpectedArrivalDate(event.target.value)} /></label><Input className="md:col-span-2" placeholder="变更说明；退回、挂起或取消时必填" value={note} onChange={(event) => setNote(event.target.value)} /><div className="md:col-span-3"><Button size="sm" onClick={() => void saveProgress()}><Save className="mr-1 size-3.5" />保存状态变更</Button></div></div>}
       </CardContent>
     </Card>
   );
