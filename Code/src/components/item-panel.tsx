@@ -212,13 +212,13 @@ const INLINE_TEXTAREA_CLASS = "min-h-14 min-w-[160px] resize-y rounded border-bo
 const ITEM_LONG_TEXT_HEADER_CLASS = "w-[200px] min-w-[200px] max-w-[200px] !whitespace-normal";
 const ITEM_LONG_TEXT_CELL_CLASS = "w-[200px] min-w-[200px] max-w-[200px] overflow-hidden !whitespace-normal align-top !text-[10px] !leading-4";
 const ITEM_LONG_TEXT_EDITOR_CLASS = "!h-[52px] !min-h-[52px] !max-h-[52px] !w-full !min-w-0 !max-w-full resize-none overflow-y-auto rounded border-border bg-background px-2 py-1 !text-[10px] !leading-4";
-const FROZEN_HEADER_CLASS = "sticky z-40 !bg-muted";
+const FROZEN_HEADER_CLASS = "sticky top-0 z-40 !bg-muted";
 const FROZEN_CELL_CLASS = "sticky z-20";
 const FROZEN_EDGE_HEADER_CLASS = `${FROZEN_HEADER_CLASS} border-r border-border shadow-[5px_0_10px_-9px_hsl(var(--foreground))]`;
 const FROZEN_EDGE_CELL_CLASS = `${FROZEN_CELL_CLASS} border-r border-border shadow-[5px_0_10px_-9px_hsl(var(--foreground))]`;
-const FROZEN_ACTIVE_ROW_BACKGROUND = "!bg-transparent";
-const FROZEN_TRANSPARENT_ROW_BACKGROUND = "!bg-transparent group-hover:!bg-transparent";
-const frozenDataRowBackground = () => "!bg-transparent group-hover:!bg-transparent";
+const FROZEN_ACTIVE_ROW_BACKGROUND = "!bg-primary/5";
+const frozenDataRowBackground = (selected: boolean) =>
+  selected ? "!bg-primary/10 group-hover:!bg-primary/10" : "!bg-card group-hover:!bg-card";
 const CURRENT_VIEW_ID = "__current__";
 type DropPosition = "before" | "after";
 type ItemClipboard = {
@@ -1269,8 +1269,12 @@ export const ItemPanel = ({
 
       <Card>
         <CardContent className="p-0">
-          <div className="overflow-x-auto">
-            <Table onContextMenu={(event) => openContextMenu(event, itemContextActions())}>
+          <div className="relative">
+            <Table
+              wrapperClassName="isolate"
+              className="min-w-max border-separate border-spacing-0"
+              onContextMenu={(event) => openContextMenu(event, itemContextActions())}
+            >
               <TableHeader>
                 <TableRow>
                   <TableHead
@@ -1329,7 +1333,7 @@ export const ItemPanel = ({
                       </TableCell>
                     )}
                     <TableCell
-                      className={`${FROZEN_EDGE_CELL_CLASS} ${FROZEN_TRANSPARENT_ROW_BACKGROUND} w-[320px] min-w-[320px] max-w-[320px]`}
+                      className={`${FROZEN_EDGE_CELL_CLASS} ${FROZEN_ACTIVE_ROW_BACKGROUND} w-[320px] min-w-[320px] max-w-[320px]`}
                       style={{ left: titleColumnLeft }}
                     >
                       <div className="flex min-w-0 flex-col gap-1">
@@ -1494,7 +1498,9 @@ export const ItemPanel = ({
                   const devText = (n: number | null) =>
                     n === null ? null : n === 0 ? "0" : n > 0 ? `+${n}天` : `${n}天`;
                   const isEditingField = (field: EditableField) => editing && editingField === field;
-                  const frozenRowBackground = editing ? FROZEN_ACTIVE_ROW_BACKGROUND : frozenDataRowBackground();
+                  const frozenRowBackground = editing
+                    ? FROZEN_ACTIVE_ROW_BACKGROUND
+                    : frozenDataRowBackground(selectedIds.includes(item.id));
                   return (
                     <TableRow
                       key={item.id}
@@ -1572,7 +1578,7 @@ export const ItemPanel = ({
                         </TableCell>
                       )}
                       <TableCell
-                        className={`${FROZEN_EDGE_CELL_CLASS} ${FROZEN_TRANSPARENT_ROW_BACKGROUND} w-[320px] min-w-[320px] max-w-[320px]`}
+                        className={`${FROZEN_EDGE_CELL_CLASS} ${frozenRowBackground} w-[320px] min-w-[320px] max-w-[320px]`}
                         style={{ left: titleColumnLeft }}
                       >
                         {isEditingField("title") ? (
