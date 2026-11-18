@@ -10,6 +10,7 @@ import {
 const mocks = vi.hoisted(() => ({
   getAuthenticatedUser: vi.fn(),
   userHasPermission: vi.fn(),
+  hasProjectAccess: vi.fn(),
   startApprovalWorkflow: vi.fn(),
   serializeApprovalInstance: vi.fn(),
   getProjectGanttCalendarMode: vi.fn(),
@@ -21,6 +22,7 @@ vi.mock("@/lib/server-auth", () => ({
   getAuthenticatedUser: mocks.getAuthenticatedUser,
   userHasPermission: mocks.userHasPermission,
 }));
+vi.mock("@/lib/project-access", () => ({ hasProjectAccess: mocks.hasProjectAccess }));
 
 vi.mock("@/lib/approval-workflow-server", () => ({
   startApprovalWorkflow: mocks.startApprovalWorkflow,
@@ -45,6 +47,7 @@ describe("POST /api/projects/:id/gantt-tasks/:taskId/progress-submissions", () =
     vi.clearAllMocks();
     mocks.getAuthenticatedUser.mockResolvedValue(user);
     mocks.userHasPermission.mockResolvedValue(true);
+    mocks.hasProjectAccess.mockResolvedValue(true);
     mocks.startApprovalWorkflow.mockResolvedValue({
       id: "approval-1",
       createdAt: new Date("2026-08-17T00:00:00.000Z"),

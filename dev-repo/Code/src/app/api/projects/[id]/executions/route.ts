@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 
 import { ensureMutableProject, err, forbidden, notFound, ok, unauthorizedFromRequest } from "@/lib/api-utils";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import { prisma } from "@/lib/prisma";
 import {
@@ -32,6 +33,8 @@ export async function GET(req: NextRequest, { params }: RouteContext) {
   if (!await userHasPermission(user, "project-gantt:view")) return forbidden();
 
   const { id: projectId } = await params;
+  const accessError = await authorizeProjectAccess(user, projectId);
+  if (accessError) return accessError;
   const project = await prisma.project.findUnique({ where: { id: projectId }, select: { id: true } });
   if (!project) return notFound("项目");
 
@@ -49,6 +52,8 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
   if (!await userHasPermission(user, "project-gantt:create")) return forbidden();
 
   const { id: projectId } = await params;
+  const accessError = await authorizeProjectAccess(user, projectId);
+  if (accessError) return accessError;
   const readOnly = await ensureMutableProject(projectId);
   if (readOnly) return readOnly;
 

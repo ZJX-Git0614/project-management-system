@@ -85,6 +85,7 @@ export interface ProjectGanttTask extends BaseEntity {
   baselineCost?: number;
   budgetAtCompletion?: number;
   actualCost?: number;
+  actualCostMode?: "LEGACY_AUTO_TASK_RATE" | "LEGACY_MANUAL_TOTAL" | "AUTO_LABOR" | "AUTO_PLUS_ADJUSTMENT" | string;
   budgetItemId?: string | null;
   baselines?: unknown;
   sortOrder: number;

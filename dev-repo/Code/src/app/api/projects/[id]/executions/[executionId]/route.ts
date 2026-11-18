@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 
 import { ensureMutableProject, err, forbidden, notFound, ok, unauthorizedFromRequest } from "@/lib/api-utils";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import { prisma } from "@/lib/prisma";
 import {
@@ -35,6 +36,8 @@ export async function GET(req: NextRequest, { params }: RouteContext) {
   if (!await userHasPermission(user, "project-gantt:view")) return forbidden();
 
   const { id: projectId, executionId } = await params;
+  const accessError = await authorizeProjectAccess(user, projectId);
+  if (accessError) return accessError;
   const execution = await loadExecution(projectId, executionId);
   return execution ? ok(serializeProjectExecution(execution)) : notFound("执行阶段");
 }
@@ -45,6 +48,8 @@ export async function PUT(req: NextRequest, { params }: RouteContext) {
   if (!await userHasPermission(user, "project-gantt:edit")) return forbidden();
 
   const { id: projectId, executionId } = await params;
+  const accessError = await authorizeProjectAccess(user, projectId);
+  if (accessError) return accessError;
   const readOnly = await ensureMutableProject(projectId);
   if (readOnly) return readOnly;
   const current = await loadExecution(projectId, executionId);
@@ -118,6 +123,8 @@ export async function DELETE(req: NextRequest, { params }: RouteContext) {
   if (!await userHasPermission(user, "project-gantt:delete")) return forbidden();
 
   const { id: projectId, executionId } = await params;
+  const accessError = await authorizeProjectAccess(user, projectId);
+  if (accessError) return accessError;
   const readOnly = await ensureMutableProject(projectId);
   if (readOnly) return readOnly;
   const current = await loadExecution(projectId, executionId);

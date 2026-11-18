@@ -58,7 +58,9 @@ model Project {
   ganttDeletionBatches   ProjectGanttDeletionBatch[]
   budgetCategories       ProjectBudgetCategory[]
   budgetItems            ProjectBudgetItem[]
+  budgetLaborAllocations ProjectBudgetLaborAllocation[]
   budgetSetting          ProjectBudgetSetting?
+  taskWorklogs           ProjectTaskWorklog[]
   weeklyItems            WeeklyItem[]
   monthlyItems           MonthlyItem[]
   todos                  TodoItem[]
@@ -75,78 +77,81 @@ model Project {
 }
 
 model ProjectGanttTask {
-  id                    String    @id @default(cuid())
-  createdAt             DateTime  @default(now())
-  updatedAt             DateTime  @updatedAt
-  projectId             String
-  parentId              String?
-  ownerMemberId         String?
-  taskCode              String    @default("")
-  taskCategory          String
-  taskName              String
-  taskDescription       String    @default("无")
-  startDate             String
-  finishDate            String    @default("")
+  id                       String    @id @default(cuid())
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+  projectId                String
+  parentId                 String?
+  ownerMemberId            String?
+  taskCode                 String    @default("")
+  taskCategory             String
+  taskName                 String
+  taskDescription          String    @default("无")
+  startDate                String
+  finishDate               String    @default("")
   relativeStartOffsetDays  Float?
   relativeFinishOffsetDays Float?
-  earlyStartDate        String    @default("")
-  earlyFinishDate       String    @default("")
-  lateStartDate         String    @default("")
-  lateFinishDate        String    @default("")
-  totalFloatMinutes     Int?
-  freeFloatMinutes      Int?
-  scheduleStatus        String    @default("UNSCHEDULED")
-  scheduleCalculatedAt  DateTime?
-  durationDays          Float
-  durationMinutes       Int       @default(0)
-  durationFormat        Int       @default(7)
-  actualStartDate       String    @default("")
-  actualEndDate         String    @default("")
-  estimatedWorkHours    Float     @default(0)
-  actualWorkHours       Float     @default(0)
-  progress              Int       @default(0)
-  predecessorTask       String    @default("")
-  taskMode              String    @default("AUTO")
-  startSlot             String    @default("AM")
-  finishSlot            String    @default("PM")
-  actualStartSlot       String    @default("AM")
-  actualFinishSlot      String    @default("PM")
-  parentBoundaryMode    String    @default("ROLLUP")
-  schedulePriority      Int       @default(500)
-  userPriority          String    @default("MEDIUM")
-  effectivePriority     String    @default("MEDIUM")
-  effortDriven          Boolean   @default(false)
-  parallelizable        Boolean   @default(false)
-  isMilestone           Boolean   @default(false)
-  externalUid           String    @default("")
-  wbsCode               String    @default("")
-  outlineNumber         String    @default("")
-  calendarUid           String    @default("")
-  constraintType        Int?
-  constraintDate        String    @default("")
-  resourceNotBeforeDate String    @default("")
-  baselineStartDate     String    @default("")
-  baselineFinishDate    String    @default("")
-  baselineCost          Float     @default(0)
-  budgetAtCompletion    Float     @default(0)
-  actualCost            Float     @default(0)
-  budgetItemId          String?
-  baselines             Json      @default("[]")
-  remark                String    @default("")
-  sortOrder             Int       @default(0)
+  earlyStartDate           String    @default("")
+  earlyFinishDate          String    @default("")
+  lateStartDate            String    @default("")
+  lateFinishDate           String    @default("")
+  totalFloatMinutes        Int?
+  freeFloatMinutes         Int?
+  scheduleStatus           String    @default("UNSCHEDULED")
+  scheduleCalculatedAt     DateTime?
+  durationDays             Float
+  durationMinutes          Int       @default(0)
+  durationFormat           Int       @default(7)
+  actualStartDate          String    @default("")
+  actualEndDate            String    @default("")
+  estimatedWorkHours       Float     @default(0)
+  actualWorkHours          Float     @default(0)
+  progress                 Int       @default(0)
+  predecessorTask          String    @default("")
+  taskMode                 String    @default("AUTO")
+  startSlot                String    @default("AM")
+  finishSlot               String    @default("PM")
+  actualStartSlot          String    @default("AM")
+  actualFinishSlot         String    @default("PM")
+  parentBoundaryMode       String    @default("ROLLUP")
+  schedulePriority         Int       @default(500)
+  userPriority             String    @default("MEDIUM")
+  effectivePriority        String    @default("MEDIUM")
+  effortDriven             Boolean   @default(false)
+  parallelizable           Boolean   @default(false)
+  isMilestone              Boolean   @default(false)
+  externalUid              String    @default("")
+  wbsCode                  String    @default("")
+  outlineNumber            String    @default("")
+  calendarUid              String    @default("")
+  constraintType           Int?
+  constraintDate           String    @default("")
+  resourceNotBeforeDate    String    @default("")
+  baselineStartDate        String    @default("")
+  baselineFinishDate       String    @default("")
+  baselineCost             Float     @default(0)
+  budgetAtCompletion       Float     @default(0)
+  actualCost               Float     @default(0)
+  actualCostMode           String    @default("AUTO_LABOR")
+  budgetItemId             String?
+  baselines                Json      @default("[]")
+  remark                   String    @default("")
+  sortOrder                Int       @default(0)
 
-  project                 Project                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  ownerMember             ProjectMember?           @relation(fields: [ownerMemberId], references: [id], onDelete: SetNull)
+  project                 Project                           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  ownerMember             ProjectMember?                    @relation(fields: [ownerMemberId], references: [id], onDelete: SetNull)
   ownerLinks              ProjectGanttTaskOwner[]
-  budgetItem              ProjectBudgetItem?       @relation(fields: [budgetItemId], references: [id], onDelete: SetNull)
-  parent                  ProjectGanttTask?        @relation("GanttTaskChildren", fields: [parentId], references: [id], onDelete: Cascade)
-  children                ProjectGanttTask[]       @relation("GanttTaskChildren")
+  laborAssignments        ProjectGanttTaskLaborAssignment[]
+  worklogs                ProjectTaskWorklog[]
+  budgetItem              ProjectBudgetItem?                @relation(fields: [budgetItemId], references: [id], onDelete: SetNull)
+  parent                  ProjectGanttTask?                 @relation("GanttTaskChildren", fields: [parentId], references: [id], onDelete: Cascade)
+  children                ProjectGanttTask[]                @relation("GanttTaskChildren")
   weeklyItems             WeeklyItem[]
   weeklyItemLinks         WeeklyItemGanttTask[]
   riskItems               RiskRegisterItem[]
   executionLinks          ProjectExecutionTask[]
-  predecessorDependencies ProjectGanttDependency[] @relation("GanttDependencySuccessor")
-  successorDependencies   ProjectGanttDependency[] @relation("GanttDependencyPredecessor")
+  predecessorDependencies ProjectGanttDependency[]          @relation("GanttDependencySuccessor")
+  successorDependencies   ProjectGanttDependency[]          @relation("GanttDependencyPredecessor")
 
   @@index([projectId, externalUid])
   @@index([projectId, budgetItemId])
@@ -160,6 +165,22 @@ model ProjectGanttTaskOwner {
   unitsPercent     Int      @default(100)
   plannedWorkHours Float    @default(0)
   assignmentRole   String   @default("EXECUTOR")
+
+  task          ProjectGanttTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  projectMember ProjectMember    @relation(fields: [projectMemberId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, projectMemberId])
+  @@index([projectMemberId])
+}
+
+// WBS 的实际投入人员。与负责人分离，以免多人分工改变排期责任人语义。
+model ProjectGanttTaskLaborAssignment {
+  taskId           String
+  projectMemberId  String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  plannedWorkHours Float    @default(0)
+  remark           String   @default("")
 
   task          ProjectGanttTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
   projectMember ProjectMember    @relation(fields: [projectMemberId], references: [id], onDelete: Cascade)
@@ -203,20 +224,20 @@ model ProjectExecutionTask {
 }
 
 model ProjectExecutionGate {
-  id                 String   @id @default(cuid())
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  id                 String    @id @default(cuid())
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
   projectId          String
   executionId        String
-  status             String   @default("DRAFT")
-  ganttRevision      Int      @default(0)
-  rangeHash          String   @default("")
-  snapshotJson       String   @default("{}") @db.Text
-  requestNote        String   @default("") @db.Text
-  approvalInstanceId String   @default("")
+  status             String    @default("DRAFT")
+  ganttRevision      Int       @default(0)
+  rangeHash          String    @default("")
+  snapshotJson       String    @default("{}") @db.Text
+  requestNote        String    @default("") @db.Text
+  approvalInstanceId String    @default("")
   requestedAt        DateTime?
   approvedAt         DateTime?
-  decisionSummary    String   @default("") @db.Text
+  decisionSummary    String    @default("") @db.Text
 
   project   Project                         @relation(fields: [projectId], references: [id], onDelete: Cascade)
   execution ProjectExecution                @relation(fields: [executionId], references: [id], onDelete: Cascade)
@@ -439,9 +460,32 @@ model ProjectBudgetItem {
   // 备注
   remark               String   @default("")
 
-  category   ProjectBudgetCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
-  project    Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  ganttTasks ProjectGanttTask[]
+  category         ProjectBudgetCategory          @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  project          Project                        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  ganttTasks       ProjectGanttTask[]
+  laborAllocations ProjectBudgetLaborAllocation[]
+}
+
+// 人力预算按项目成员拆分；单价冻结在预算分摊上，后续工时据此生成实际成本快照。
+model ProjectBudgetLaborAllocation {
+  id                String   @id @default(cuid())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  projectId         String
+  budgetItemId      String
+  projectMemberId   String
+  plannedHours      Float    @default(0)
+  plannedHourlyCost Float    @default(0)
+  remark            String   @default("")
+
+  project       Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  budgetItem    ProjectBudgetItem    @relation(fields: [budgetItemId], references: [id], onDelete: Cascade)
+  projectMember ProjectMember        @relation(fields: [projectMemberId], references: [id], onDelete: Cascade)
+  worklogs      ProjectTaskWorklog[]
+
+  @@unique([budgetItemId, projectMemberId])
+  @@index([projectId, projectMemberId])
+  @@index([projectId, budgetItemId])
 }
 
 // 项目预算设置（合同 + 利润率目标，每项目一条；公摊/审价/风险已迁入 RATE 分类）
@@ -486,13 +530,44 @@ model ProjectMember {
   productivityRate         Float    @default(1)
   maxConcurrentAssignments Int      @default(0)
 
-  project        Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  account        UserAccount?            @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  ganttTasks     ProjectGanttTask[]
-  ganttTaskLinks ProjectGanttTaskOwner[]
-  executionOwners ProjectExecution[]      @relation("ExecutionOwner")
+  project                Project                           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  account                UserAccount?                      @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  ganttTasks             ProjectGanttTask[]
+  ganttTaskLinks         ProjectGanttTaskOwner[]
+  laborAssignments       ProjectGanttTaskLaborAssignment[]
+  budgetLaborAllocations ProjectBudgetLaborAllocation[]
+  taskWorklogs           ProjectTaskWorklog[]
+  executionOwners        ProjectExecution[]                @relation("ExecutionOwner")
 
   @@unique([projectId, accountId])
+}
+
+// 不可覆盖的人员工时流水，费率与成本在登记时冻结，保证历史挣值可追溯。
+model ProjectTaskWorklog {
+  id                      String   @id @default(cuid())
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+  projectId               String
+  taskId                  String
+  projectMemberId         String
+  budgetLaborAllocationId String?
+  workDate                String
+  actualHours             Float
+  hourlyCostSnapshot      Float    @default(0)
+  actualCostSnapshot      Float    @default(0)
+  source                  String   @default("MANUAL")
+  note                    String   @default("")
+  createdBy               String   @default("")
+
+  project               Project                       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task                  ProjectGanttTask              @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  projectMember         ProjectMember                 @relation(fields: [projectMemberId], references: [id], onDelete: Cascade)
+  budgetLaborAllocation ProjectBudgetLaborAllocation? @relation(fields: [budgetLaborAllocationId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, workDate])
+  @@index([taskId, projectMemberId])
+  @@index([projectMemberId, workDate])
+  @@index([budgetLaborAllocationId])
 }
 
 model PmsDataMigration {

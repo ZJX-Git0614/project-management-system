@@ -54,9 +54,11 @@ const directProjectTables = [
   "Project",
   "ProjectBudgetCategory",
   "ProjectBudgetItem",
+  "ProjectBudgetLaborAllocation",
   "ProjectBudgetSetting",
   "ProjectMember",
   "ProjectGanttTask",
+  "ProjectTaskWorklog",
   "ProjectGanttDependency",
   "ProjectExecution",
   "ProjectExecutionGate",
@@ -83,6 +85,7 @@ const childTableQueries: Record<string, string> = {
   ProjectExecutionTask: `SELECT link.* FROM "ProjectExecutionTask" link JOIN "ProjectExecution" execution ON execution.id = link."executionId" WHERE execution."projectId" = $1`,
   ProjectExecutionGateCriterion: `SELECT criterion.* FROM "ProjectExecutionGateCriterion" criterion JOIN "ProjectExecutionGate" gate ON gate.id = criterion."gateId" WHERE gate."projectId" = $1`,
   ProjectGanttTaskOwner: `SELECT owner_link.* FROM "ProjectGanttTaskOwner" owner_link JOIN "ProjectGanttTask" task ON task.id = owner_link."taskId" WHERE task."projectId" = $1`,
+  ProjectGanttTaskLaborAssignment: `SELECT assignment.* FROM "ProjectGanttTaskLaborAssignment" assignment JOIN "ProjectGanttTask" task ON task.id = assignment."taskId" WHERE task."projectId" = $1`,
   WeeklyItemGanttTask: `SELECT link.* FROM "WeeklyItemGanttTask" link JOIN "WeeklyItem" item ON item.id = link."weeklyItemId" WHERE item."projectId" = $1`,
   RiskRegisterItemWeeklyItem: `SELECT link.* FROM "RiskRegisterItemWeeklyItem" link JOIN "RiskRegisterItem" risk ON risk.id = link."riskItemId" WHERE risk."projectId" = $1`,
   DocumentExtraction: `SELECT extraction.* FROM "DocumentExtraction" extraction JOIN "AssistantAttachment" attachment ON attachment.id = extraction."attachmentId" WHERE attachment."projectId" = $1`,
@@ -95,8 +98,11 @@ const insertOrder = [
   "ProjectBudgetItem",
   "ProjectBudgetSetting",
   "ProjectMember",
+  "ProjectBudgetLaborAllocation",
   "ProjectExecution",
   "ProjectGanttTask",
+  "ProjectGanttTaskLaborAssignment",
+  "ProjectTaskWorklog",
   "ProjectExecutionTask",
   "ProjectExecutionGate",
   "ProjectExecutionGateCriterion",
@@ -362,6 +368,9 @@ export const transformProjectSnapshotAccounts = (
   const memberTable = copy.tables.find((table) => table.table === "ProjectMember");
   const taskTable = copy.tables.find((table) => table.table === "ProjectGanttTask");
   const ownerLinkTable = copy.tables.find((table) => table.table === "ProjectGanttTaskOwner");
+  const laborAssignmentTable = copy.tables.find((table) => table.table === "ProjectGanttTaskLaborAssignment");
+  const budgetLaborAllocationTable = copy.tables.find((table) => table.table === "ProjectBudgetLaborAllocation");
+  const worklogTable = copy.tables.find((table) => table.table === "ProjectTaskWorklog");
   if (!memberTable) return copy;
   const canonicalMemberByAccount = new Map<string, string>();
   const removedMemberToCanonical = new Map<string, string>();
@@ -396,6 +405,32 @@ export const transformProjectSnapshotAccounts = (
       return true;
     });
   }
+  const remapProjectMemberId = (row: Record<string, Scalar>) => {
+    if (typeof row.projectMemberId === "string" && removedMemberToCanonical.has(row.projectMemberId)) {
+      row.projectMemberId = removedMemberToCanonical.get(row.projectMemberId)!;
+    }
+  };
+  if (laborAssignmentTable) {
+    const uniqueAssignments = new Set<string>();
+    laborAssignmentTable.rows = laborAssignmentTable.rows.filter((assignment) => {
+      remapProjectMemberId(assignment);
+      const key = `${String(assignment.taskId ?? "")}:${String(assignment.projectMemberId ?? "")}`;
+      if (!assignment.taskId || !assignment.projectMemberId || uniqueAssignments.has(key)) return false;
+      uniqueAssignments.add(key);
+      return true;
+    });
+  }
+  if (budgetLaborAllocationTable) {
+    const uniqueAllocations = new Set<string>();
+    budgetLaborAllocationTable.rows = budgetLaborAllocationTable.rows.filter((allocation) => {
+      remapProjectMemberId(allocation);
+      const key = `${String(allocation.budgetItemId ?? "")}:${String(allocation.projectMemberId ?? "")}`;
+      if (!allocation.budgetItemId || !allocation.projectMemberId || uniqueAllocations.has(key)) return false;
+      uniqueAllocations.add(key);
+      return true;
+    });
+  }
+  worklogTable?.rows.forEach(remapProjectMemberId);
   return copy;
 };
 

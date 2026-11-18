@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { ensureMutableProject, err, notFound, ok } from "@/lib/api-utils";
 import { getGanttPlanMutationBlockReasonForActor } from "@/lib/gantt-baseline-service";
 import { renumberProjectGanttTaskCodes } from "@/lib/gantt-task-service";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { requireUser, userHasPermission } from "@/lib/server-auth";
 
 export async function PUT(
@@ -14,6 +15,8 @@ export async function PUT(
   const user = await requireUser(req);
   if ("status" in user) return user;
   if (!(await userHasPermission(user, "project-gantt:edit"))) return err("权限不足", 403);
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
 
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;

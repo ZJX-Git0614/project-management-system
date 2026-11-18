@@ -13,6 +13,17 @@ const eslintConfig = defineConfig([
       "react-hooks/set-state-in-effect": "off",
     },
   },
+  {
+    files: ["src/app/**/*.{ts,tsx}", "src/components/**/*.{ts,tsx}", "src/lib/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": ["error", {
+        patterns: [{
+          group: ["@/modules/*/application", "@/modules/*/application/*", "@/modules/*/domain", "@/modules/*/domain/*", "@/modules/*/infrastructure", "@/modules/*/infrastructure/*"],
+          message: "跨模块只能从模块根 index.ts 导入公开契约",
+        }],
+      }],
+    },
+  },
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:

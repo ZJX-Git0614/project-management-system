@@ -909,6 +909,7 @@ const ManpowerTable = ({
   const [newRow, setNewRow] = useState<ManpowerDraft | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editRow, setEditRow] = useState<ManpowerDraft | null>(null);
+  const [allocationItem, setAllocationItem] = useState<ProjectBudgetItem | null>(null);
   const submittingRef = useRef(false);
   const [invalidFields, setInvalidFields] = useState<string[]>([]);
   const { menu, openContextMenu, closeContextMenu } = useTableContextMenu();
@@ -1015,7 +1016,10 @@ const ManpowerTable = ({
   const contextActions = (it?: ProjectBudgetItem): TableContextMenuAction[] => [
     ...(it ? structureActionsFor(it) : []),
     ...(it && canEdit
-      ? [{ label: "编辑预算条目", icon: <Pencil className="size-3.5" />, separatorBefore: true, onSelect: () => startEdit(it) }]
+      ? [
+        { label: "编辑预算条目", icon: <Pencil className="size-3.5" />, separatorBefore: true, onSelect: () => startEdit(it) },
+        { label: "人员预算分摊", icon: <Pencil className="size-3.5" />, onSelect: () => setAllocationItem(it) },
+      ]
       : []),
     ...(it && canDelete
       ? [{ label: "删除预算条目", icon: <Trash2 className="size-3.5" />, destructive: true, separatorBefore: true, onSelect: () => handleDelete(it) }]
@@ -1037,6 +1041,7 @@ const ManpowerTable = ({
           <TableHead className="w-[140px]">人均月成本</TableHead>
           <TableHead className="w-[140px] text-right">小计</TableHead>
           <TableHead>备注</TableHead>
+          <TableHead className="w-[104px]">人员分摊</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -1099,6 +1104,7 @@ const ManpowerTable = ({
                 placeholder="可选"
               />
             </TableCell>
+            <TableCell className="p-2 text-[11px] text-muted-foreground">保存后配置</TableCell>
           </TableRow>
         )}
         {category.items.map((it, idx) => {
@@ -1188,12 +1194,27 @@ const ManpowerTable = ({
                   it.remark
                 )}
               </TableCell>
+              <TableCell className="p-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2 text-[11px]"
+                  disabled={!canEdit}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setAllocationItem(it);
+                  }}
+                >
+                  人员分摊
+                </Button>
+              </TableCell>
             </TableRow>
           );
         })}
         {category.items.length === 0 && !newRow && (
           <TableRow>
-            <TableCell colSpan={7} className="h-24 text-center text-xs text-muted-foreground">
+            <TableCell colSpan={8} className="h-24 text-center text-xs text-muted-foreground">
               暂无条目，在表格中右击即可新增
             </TableCell>
           </TableRow>
@@ -1206,7 +1227,7 @@ const ManpowerTable = ({
             <TableCell className="p-2 text-right text-xs font-semibold tabular-nums">
               {formatAmount(category.items.reduce((a, it) => a + it.personMonths * it.monthlyCostPerPerson, 0))}
             </TableCell>
-            <TableCell className="p-2 text-right">
+            <TableCell colSpan={2} className="p-2 text-right">
               {newRow && (
                 <TableActionButton onClick={cancelCreate}>
                   取消新增
@@ -1218,7 +1239,178 @@ const ManpowerTable = ({
       </TableBody>
     </Table>
     <TableContextMenu menu={menu} onClose={closeContextMenu} />
+    {allocationItem && (
+      <LaborBudgetAllocationDialog
+        projectId={projectId}
+        item={allocationItem}
+        onClose={() => setAllocationItem(null)}
+        onSaved={async () => {
+          setAllocationItem(null);
+          await onChanged();
+        }}
+      />
+    )}
     </>
+  );
+};
+
+type LaborBudgetMember = { id: string; personName: string; roleName: string };
+type LaborBudgetAllocationDraft = {
+  projectMemberId: string;
+  plannedHours: number;
+  plannedHourlyCost: number;
+  remark: string;
+};
+
+interface LaborBudgetAllocationResponse {
+  budgetItem: { id: string; title: string; plannedHours: number; defaultHourlyCost: number };
+  members: LaborBudgetMember[];
+  allocations: Array<LaborBudgetAllocationDraft & { id: string; projectMember: LaborBudgetMember }>;
+}
+
+const LaborBudgetAllocationDialog = ({
+  projectId,
+  item,
+  onClose,
+  onSaved,
+}: {
+  projectId: string;
+  item: ProjectBudgetItem;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) => {
+  const runAction = useContext(BudgetHistoryContext);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [members, setMembers] = useState<LaborBudgetMember[]>([]);
+  const [defaultHourlyCost, setDefaultHourlyCost] = useState(0);
+  const [budgetPlannedHours, setBudgetPlannedHours] = useState(0);
+  const [allocations, setAllocations] = useState<LaborBudgetAllocationDraft[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    void api.get<LaborBudgetAllocationResponse>(`/api/projects/${projectId}/budget-items/${item.id}/labor-allocations`)
+      .then((response) => {
+        if (!active) return;
+        setMembers(response.members);
+        setDefaultHourlyCost(response.budgetItem.defaultHourlyCost);
+        setBudgetPlannedHours(response.budgetItem.plannedHours);
+        setAllocations(response.allocations.map((allocation) => ({
+          projectMemberId: allocation.projectMemberId,
+          plannedHours: allocation.plannedHours,
+          plannedHourlyCost: allocation.plannedHourlyCost,
+          remark: allocation.remark,
+        })));
+      })
+      .catch((error) => active && alert(error instanceof Error ? error.message : "加载人员预算分摊失败"))
+      .finally(() => active && setLoading(false));
+    return () => { active = false; };
+  }, [item.id, projectId]);
+
+  const updateAllocation = (index: number, patch: Partial<LaborBudgetAllocationDraft>) => {
+    setAllocations((current) => current.map((allocation, allocationIndex) => (
+      allocationIndex === index ? { ...allocation, ...patch } : allocation
+    )));
+  };
+  const totalHours = allocations.reduce((sum, allocation) => sum + (Number.isFinite(allocation.plannedHours) ? allocation.plannedHours : 0), 0);
+  const totalCost = allocations.reduce((sum, allocation) => (
+    sum + Math.max(0, allocation.plannedHours || 0) * Math.max(0, allocation.plannedHourlyCost || 0)
+  ), 0);
+  const save = async () => {
+    if (allocations.some((allocation) => !allocation.projectMemberId)) {
+      alert("请选择每条人员预算分摊对应的项目成员");
+      return;
+    }
+    setSaving(true);
+    try {
+      await runAction(`更新人力预算「${item.person || item.groupName || "条目"}」的人员分摊`, [item.id], () => (
+        api.put(`/api/projects/${projectId}/budget-items/${item.id}/labor-allocations`, { allocations })
+      ));
+      await onSaved();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "保存人员预算分摊失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <Card className="max-h-[calc(100vh-2rem)] w-full max-w-5xl overflow-auto">
+        <CardHeader className="pb-2">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <CardTitle className="text-sm">人员预算分摊</CardTitle>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {item.groupName || "人力"} / {item.person || "未命名人员"}。此处的人员与小时成本将作为人员挣值的默认预算归集口径。
+              </p>
+            </div>
+            <div className="text-right text-xs text-muted-foreground">
+              <div>预算工时：<strong className="text-foreground">{formatAmount(budgetPlannedHours)} h</strong></div>
+              <div>已分摊：<strong className={cn("text-foreground", Math.abs(totalHours - budgetPlannedHours) > 0.01 && "text-amber-600")}>{formatAmount(totalHours)} h</strong></div>
+              <div>分摊成本：<strong className="text-foreground">{formatAmount(totalCost)}</strong></div>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {loading ? <div className="py-8 text-center text-sm text-muted-foreground">加载中...</div> : (
+            <>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>项目成员</TableHead>
+                    <TableHead className="w-32 text-right">计划工时</TableHead>
+                    <TableHead className="w-36 text-right">小时成本</TableHead>
+                    <TableHead>备注</TableHead>
+                    <TableHead className="w-16" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {allocations.map((allocation, index) => (
+                    <TableRow key={`${allocation.projectMemberId}-${index}`}>
+                      <TableCell className="p-2">
+                        <Select
+                          value={allocation.projectMemberId}
+                          onChange={(event) => updateAllocation(index, { projectMemberId: event.target.value })}
+                          className="h-8 text-xs"
+                        >
+                          <option value="">请选择成员</option>
+                          {members.map((member) => (
+                            <option key={member.id} value={member.id}>{member.personName}（{member.roleName}）</option>
+                          ))}
+                        </Select>
+                      </TableCell>
+                      <TableCell className="p-2">
+                        <Input type="number" min={0} step="0.5" value={allocation.plannedHours} onChange={(event) => updateAllocation(index, { plannedHours: Number(event.target.value) || 0 })} className="h-8 text-right text-xs tabular-nums" />
+                      </TableCell>
+                      <TableCell className="p-2">
+                        <Input type="number" min={0} step="0.01" value={allocation.plannedHourlyCost} onChange={(event) => updateAllocation(index, { plannedHourlyCost: Number(event.target.value) || 0 })} className="h-8 text-right text-xs tabular-nums" />
+                      </TableCell>
+                      <TableCell className="p-2">
+                        <Input value={allocation.remark} onChange={(event) => updateAllocation(index, { remark: event.target.value })} className="h-8 text-xs" placeholder="可选" />
+                      </TableCell>
+                      <TableCell className="p-2 text-right">
+                        <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs text-destructive" onClick={() => setAllocations((current) => current.filter((_, allocationIndex) => allocationIndex !== index))}>移除</Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {allocations.length === 0 && (
+                    <TableRow><TableCell colSpan={5} className="h-20 text-center text-xs text-muted-foreground">尚未分摊。请添加项目成员后保存。</TableCell></TableRow>
+                  )}
+                </TableBody>
+              </Table>
+              <Button type="button" size="sm" variant="outline" className="h-8 text-xs" onClick={() => setAllocations((current) => [...current, { projectMemberId: "", plannedHours: 0, plannedHourlyCost: defaultHourlyCost, remark: "" }])}>
+                <Plus className="size-3.5" /> 添加人员
+              </Button>
+            </>
+          )}
+          <div className="flex justify-end gap-2 border-t border-border pt-3">
+            <Button type="button" size="sm" variant="outline" className="h-8 text-xs" disabled={saving} onClick={onClose}>取消</Button>
+            <Button type="button" size="sm" className="h-8 text-xs" disabled={loading || saving} onClick={() => void save()}>{saving ? "保存中..." : "保存分摊"}</Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
   );
 };
 

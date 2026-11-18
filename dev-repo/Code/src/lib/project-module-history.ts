@@ -33,6 +33,7 @@ interface ProjectBudgetSnapshot {
   module: "PROJECT_BUDGET";
   categories: StoredRecord[];
   items: StoredRecord[];
+  laborAllocations?: StoredRecord[];
   ganttLinks: Array<{ taskId: string; budgetItemId: string }>;
 }
 
@@ -110,9 +111,10 @@ const capturePayload = async (projectId: string, projectModule: ProjectModule): 
     };
   }
 
-  const [categories, items, ganttLinks] = await Promise.all([
+  const [categories, items, laborAllocations, ganttLinks] = await Promise.all([
     prisma.projectBudgetCategory.findMany({ where: { projectId }, orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }] }),
     prisma.projectBudgetItem.findMany({ where: { projectId }, orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }] }),
+    prisma.projectBudgetLaborAllocation.findMany({ where: { projectId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] }),
     prisma.projectGanttTask.findMany({
       where: { projectId, budgetItemId: { not: null } },
       select: { id: true, budgetItemId: true },
@@ -123,6 +125,7 @@ const capturePayload = async (projectId: string, projectModule: ProjectModule): 
     module: projectModule,
     categories: serializeRecords(categories as unknown as Array<Record<string, unknown>>),
     items: serializeRecords(items as unknown as Array<Record<string, unknown>>),
+    laborAllocations: serializeRecords(laborAllocations as unknown as Array<Record<string, unknown>>),
     ganttLinks: ganttLinks.flatMap((task) => task.budgetItemId
       ? [{ taskId: task.id, budgetItemId: task.budgetItemId }]
       : []),
@@ -341,12 +344,13 @@ const restoreProjectBudget = async (
   snapshot: ProjectBudgetSnapshot,
 ) => {
   const warnings: string[] = [];
-  const [currentItems, currentGanttLinks] = await Promise.all([
+  const [currentItems, currentGanttLinks, projectMembers] = await Promise.all([
     tx.projectBudgetItem.findMany({ where: { projectId }, select: { id: true } }),
     tx.projectGanttTask.findMany({
       where: { projectId, budgetItemId: { not: null } },
       select: { id: true, budgetItemId: true },
     }),
+    tx.projectMember.findMany({ where: { projectId }, select: { id: true } }),
   ]);
   const currentIds = new Set(currentItems.map((item) => item.id));
   const targetIds = new Set(snapshot.items.map((item) => item.id));
@@ -358,10 +362,20 @@ const restoreProjectBudget = async (
   const items = snapshot.items
     .filter((record) => targetCategoryIds.has(String(record.categoryId ?? "")))
     .map((record) => reviveRecord(record, projectId) as unknown as Prisma.ProjectBudgetItemCreateManyInput);
+  const validProjectMemberIds = new Set(projectMembers.map((member) => member.id));
+  const laborAllocations = (snapshot.laborAllocations ?? [])
+    .filter((record) => (
+      targetIds.has(String(record.budgetItemId ?? ""))
+      && validProjectMemberIds.has(String(record.projectMemberId ?? ""))
+    ))
+    .map((record) => reviveRecord(record, projectId) as unknown as Prisma.ProjectBudgetLaborAllocationCreateManyInput);
+  const missedLaborAllocations = (snapshot.laborAllocations ?? []).length - laborAllocations.length;
 
   await tx.projectBudgetCategory.deleteMany({ where: { projectId } });
   if (categories.length > 0) await tx.projectBudgetCategory.createMany({ data: categories });
   if (items.length > 0) await tx.projectBudgetItem.createMany({ data: items });
+  if (laborAllocations.length > 0) await tx.projectBudgetLaborAllocation.createMany({ data: laborAllocations });
+  if (missedLaborAllocations > 0) warnings.push(`${missedLaborAllocations} 条人员预算分摊对应的成员或预算条目已不存在，未能恢复`);
 
   const desiredLinks = new Map<string, string>();
   currentGanttLinks.forEach((link) => {

@@ -32,7 +32,7 @@ import {
 } from "@/lib/project-assistant-query";
 import { queryRagLite } from "@/lib/raglite-client";
 import { requireUser } from "@/lib/server-auth";
-import { hasProjectAccess } from "@/lib/project-access";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { buildDocumentAssistantContext, type DocumentExtractionResult } from "@/lib/assistant-document-processing";
 import { isDocumentRevisionRequest, reviseDocumentsWithSmallModel } from "@/lib/assistant-document-revision";
 import { buildAssistantSuggestions } from "@/lib/assistant-suggestions";
@@ -108,12 +108,10 @@ export async function GET(req: NextRequest) {
   if ("status" in user) return user;
   const runtime = await loadAssistantRuntimeConfig();
   const projectId = new URL(req.url).searchParams.get("projectId")?.trim() || "";
-  const cutoff = new Date(Date.now() - runtime.historyRetentionDays * 86_400_000);
-  await prisma.$transaction([
-    prisma.assistantChatMessage.deleteMany({ where: { createdAt: { lt: cutoff } } }),
-    prisma.assistantActionRun.deleteMany({ where: { createdAt: { lt: cutoff } } }),
-    prisma.assistantPlanRun.deleteMany({ where: { createdAt: { lt: cutoff } } }),
-  ]);
+  if (projectId) {
+    const accessError = await authorizeProjectAccess(user, projectId);
+    if (accessError) return accessError;
+  }
   const messages = await prisma.assistantChatMessage.findMany({
     where: { userId: user.userId, projectId },
     orderBy: { createdAt: "desc" },
@@ -221,8 +219,6 @@ type AssistantChatEmitter = (event: AssistantChatStreamEvent) => void;
 
 const handleAssistantChat = async (req: NextRequest, emit?: AssistantChatEmitter) => {
   const requestStartedAt = Date.now();
-  const user = await requireUser(req);
-  if ("status" in user) return user;
   const runtime = await loadAssistantRuntimeConfig();
   if (!runtime.enabled) return err("智能助手已由管理员停用", 503);
 
@@ -236,8 +232,11 @@ const handleAssistantChat = async (req: NextRequest, emit?: AssistantChatEmitter
   if (!message) return err("请输入需要查询的内容");
   if (message.length > 2000) return err("单次提问不能超过 2000 个字");
   const projectId = String(body.projectId || "").trim();
-  if (projectId && !await hasProjectAccess(user, projectId)) {
-    return err("无权访问当前项目", 403);
+  const user = await requireUser(req);
+  if ("status" in user) return user;
+  if (projectId) {
+    const accessError = await authorizeProjectAccess(user, projectId);
+    if (accessError) return accessError;
   }
   const history = Array.isArray(body.history)
     ? body.history.filter((item): item is AssistantMessageInput =>

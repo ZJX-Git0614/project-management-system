@@ -3,7 +3,11 @@ import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { ensureMutableProject, err, notFound, ok } from "@/lib/api-utils";
 import { getGanttPlanMutationBlockReasonForActor } from "@/lib/gantt-baseline-service";
-import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
+import { createProjectGanttTask, readProjectGanttTasks } from "@/modules/wbs";
+import {
+  isProjectAuthorizationResponse,
+  requireProjectPermission,
+} from "@/lib/project-authorization";
 import {
   estimatedHoursForDuration,
   isValidGanttDurationDays,
@@ -18,17 +22,9 @@ import {
 import {
   getProjectGanttCalendarMode,
   getOrderedGanttTasks,
-  materializeProjectGanttRelativeSchedule,
   parseGanttDependencyInput,
-  refreshProjectGanttDerivedState,
-  renumberProjectGanttTaskCodes,
-  replaceGanttTaskDependencies,
   serializeGanttTaskList,
 } from "@/lib/gantt-task-service";
-import {
-  resolveEffectiveGanttOwnerMemberIds,
-  synchronizeGanttOwnerHierarchy,
-} from "@/lib/gantt-owner-service";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -40,22 +36,16 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const user = await getAuthenticatedUser(req);
-  if (!user) return err("未登录", 401);
-  if (!(await userHasPermission(user, "project-gantt:view"))) return err("权限不足", 403);
+  const user = await requireProjectPermission(req, id, "project-gantt:view");
+  if (isProjectAuthorizationResponse(user)) return user;
 
   const project = await prisma.project.findUnique({ where: { id } });
   if (!project) return notFound("项目");
 
-  let tasks = await getOrderedGanttTasks(id);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(project.startDate) && tasks.some((task) => (
-    task.relativeStartOffsetDays != null || task.relativeFinishOffsetDays != null
-  ))) {
-    await materializeProjectGanttRelativeSchedule(id, project.startDate);
-    tasks = await getOrderedGanttTasks(id);
-  }
-
-  const response = ok(serializeGanttTaskList(tasks));
+  const response = ok(await readProjectGanttTasks({
+    projectId: id,
+    projectStartDate: project.startDate,
+  }));
   response.headers.set("Cache-Control", "private, no-store, max-age=0, must-revalidate");
   return response;
 }
@@ -65,9 +55,8 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const user = await getAuthenticatedUser(req);
-  if (!user) return err("未登录", 401);
-  if (!(await userHasPermission(user, "project-gantt:create"))) return err("权限不足", 403);
+  const user = await requireProjectPermission(req, id, "project-gantt:create");
+  if (isProjectAuthorizationResponse(user)) return user;
 
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
@@ -163,79 +152,34 @@ export async function POST(
     if (owners.length !== requestedOwnerMemberIds.length) return err("负责人必须来自当前项目组成员");
   }
 
-  const siblings = await prisma.projectGanttTask.findMany({
-    where: { projectId: id, parentId },
-    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }, { id: "asc" }],
-    select: { sortOrder: true, taskCategory: true },
+  const created = await createProjectGanttTask({
+    projectId: id,
+    parentId,
+    requestedOwnerMemberIds,
+    taskCategory,
+    taskName,
+    taskDescription,
+    plan,
+    actualStartDate: completion.actualStartDate,
+    actualEndDate: completion.actualEndDate,
+    actualStartSlot,
+    actualFinishSlot,
+    estimatedWorkHours,
+    actualWorkHours,
+    progress: completion.progress,
+    parentBoundaryMode,
+    schedulePriority,
+    userPriority,
+    effortDriven,
+    parallelizable,
+    isMilestone,
+    budgetItemId,
+    predecessorTask,
+    remark,
+    dependencies,
+    calendarMode,
   });
-  const categorySiblings = taskCategory
-    ? siblings.filter((task) => task.taskCategory === taskCategory)
-    : [];
-  const insertAfterSortOrder = categorySiblings.at(-1)?.sortOrder ?? siblings.at(-1)?.sortOrder ?? 0;
-  const sortOrder = insertAfterSortOrder + 1;
-
-  const task = await prisma.$transaction(async (tx) => {
-    const inheritedOwnerMemberIds = parentId
-      ? await resolveEffectiveGanttOwnerMemberIds({ tx, projectId: id, taskId: parentId })
-      : [];
-    // A new task is initially a leaf. A parent may aggregate several owners,
-    // but a leaf must have exactly zero or one direct responsible person.
-    const ownerMemberIds = requestedOwnerMemberIds.length > 0
-      ? requestedOwnerMemberIds
-      : inheritedOwnerMemberIds.length === 1 ? inheritedOwnerMemberIds : [];
-    const ownerMemberId = ownerMemberIds.length === 1 ? ownerMemberIds[0] : null;
-    await tx.projectGanttTask.updateMany({
-      where: { projectId: id, parentId, sortOrder: { gte: sortOrder } },
-      data: { sortOrder: { increment: 1 } },
-    });
-
-    const created = await tx.projectGanttTask.create({
-      data: {
-        projectId: id,
-        parentId,
-        ownerMemberId,
-        ownerLinks: ownerMemberIds.length > 0
-          ? { createMany: { data: ownerMemberIds.map((projectMemberId) => ({ projectMemberId })) } }
-          : undefined,
-        taskCode: "",
-        taskCategory,
-        taskName,
-        taskDescription,
-        startDate: plan.startDate,
-        finishDate: plan.finishDate,
-        durationDays: plan.durationDays,
-        durationMinutes: Math.round(plan.durationDays * 450),
-        actualStartDate: completion.actualStartDate,
-        actualEndDate: completion.actualEndDate,
-        startSlot: plan.startSlot,
-        finishSlot: plan.finishSlot,
-        actualStartSlot,
-        actualFinishSlot,
-        estimatedWorkHours,
-        actualWorkHours,
-        progress: completion.progress,
-        taskMode: plan.taskMode,
-        parentBoundaryMode,
-        schedulePriority,
-        userPriority,
-        effectivePriority: userPriority,
-        effortDriven,
-        parallelizable,
-        isMilestone,
-        budgetItemId,
-        predecessorTask,
-        remark,
-        sortOrder,
-      },
-    });
-    await replaceGanttTaskDependencies(tx, id, created.id, dependencies);
-    await synchronizeGanttOwnerHierarchy({ tx, projectId: id });
-    await tx.project.update({ where: { id }, data: { ganttRevision: { increment: 1 } } });
-    return created;
-  });
-  await renumberProjectGanttTaskCodes(id);
-  await refreshProjectGanttDerivedState(id, calendarMode);
-  const normalizedTask = serializeGanttTaskList(await getOrderedGanttTasks(id)).find((item) => item.id === task.id);
+  const normalizedTask = serializeGanttTaskList(await getOrderedGanttTasks(id)).find((item) => item.id === created.taskId);
   if (!normalizedTask) return err("新增任务后读取失败", 500);
 
   return ok(normalizedTask, 201);

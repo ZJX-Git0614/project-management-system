@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { authorizeProjectAccess } from "@/lib/project-authorization"
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import { ok, err, notFound, unauthorizedFromRequest, forbidden } from "@/lib/api-utils"
 import {
@@ -25,6 +26,8 @@ export async function PUT(
   const user = await getAuthenticatedUser(req);
   if (!user) return unauthorizedFromRequest(req);
   if (!await userHasPermission(user, "risk-register:edit")) return forbidden();
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
 
   const existing = await prisma.riskRegisterItem.findFirst({ where: { id: riskId, projectId: id } })
   if (!existing) return notFound("风险条目")
@@ -63,6 +66,8 @@ export async function DELETE(
   const user = await getAuthenticatedUser(req);
   if (!user) return unauthorizedFromRequest(req);
   if (!await userHasPermission(user, "risk-register:delete")) return forbidden();
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
 
   const existing = await prisma.riskRegisterItem.findFirst({ where: { id: riskId, projectId: id } })
   if (!existing) return notFound("风险条目")

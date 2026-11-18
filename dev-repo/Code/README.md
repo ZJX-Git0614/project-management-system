@@ -81,6 +81,8 @@ PORT=3000 npm run start
 
 访问 [http://localhost:3000](http://localhost:3000)。
 
+生产环境可将维护任务拆到独立进程。Web 进程设置 `PMS_DISABLE_EMBEDDED_SCHEDULERS=1` 后不再启动备份、审批和助手历史清理调度；另起一个使用同一数据库配置的进程运行 `npm run worker`。维护任务使用 PostgreSQL advisory lock，多个 worker 同时运行时只会有一个实例执行同一任务。未设置该开关时保留当前 Web 内嵌调度行为。
+
 ## 初始账号
 
 | 用户名 | 初始密码 | 角色 |
@@ -103,6 +105,7 @@ Docker 会启动 PostgreSQL 和 Web 服务，数据库数据保存在 `pgdata` �
 npm run dev        # 开发模式
 npm run build      # 生产构建
 npm run start      # 启动生产服务
+npm run worker     # 启动备份/审批/助手历史维护 worker
 npm run typecheck  # TypeScript 类型检查
 npm run lint       # ESLint 检查
 npm test           # 单元测试

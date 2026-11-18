@@ -11,6 +11,7 @@ import {
   publishProjectGanttBaseline,
 } from "@/lib/gantt-baseline-service";
 import { refreshProjectGanttDerivedState } from "@/lib/gantt-task-service";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { prisma } from "@/lib/prisma";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 
@@ -46,6 +47,8 @@ export async function GET(
   if (!await userHasPermission(user, "project-gantt:view")) return forbidden();
 
   const { id } = await params;
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
   try {
     const overview = await getProjectGanttBaselineOverview(id);
     const permissions = await getBaselinePermissionsForUser(id, user, overview.project);
@@ -67,6 +70,8 @@ export async function POST(
   const user = await getAuthenticatedUser(req);
   if (!user) return unauthorizedFromRequest(req);
   const { id } = await params;
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
   const body = await req.json().catch(() => ({})) as Record<string, unknown>;
   const action = String(body.action ?? "VALIDATE").trim().toUpperCase();
   const reason = String(body.reason ?? "").trim();

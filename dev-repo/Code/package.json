@@ -8,6 +8,7 @@
     "build": "next build --webpack",
     "start": "node scripts/next-cluster-server.mjs",
     "start:single": "PMS_WEB_WORKERS=1 node scripts/next-cluster-server.mjs",
+    "worker": "tsx scripts/maintenance-worker.ts",
     "start:local": "npm run db:prepare && PORT=3000 node scripts/next-cluster-server.mjs",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",

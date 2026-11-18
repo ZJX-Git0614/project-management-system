@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import type { Prisma } from "@prisma/client";
 
 import { err, notFound, ok } from "@/lib/api-utils";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import {
   buildGanttExcel,
@@ -31,6 +32,8 @@ export async function GET(
   const user = await getAuthenticatedUser(req);
   if (!user) return err("未登录", 401);
   if (!(await userHasPermission(user, "project-gantt:view"))) return err("权限不足", 403);
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
 
   const format = req.nextUrl.searchParams.get("format")?.toLowerCase();
   if (!format) return ok(await ganttTransferCapabilities());

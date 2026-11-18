@@ -1,15 +1,14 @@
 import { NextRequest } from "next/server";
 
-import { err, forbidden, ok, unauthorizedFromRequest } from "@/lib/api-utils";
-import { startApprovalWorkflow } from "@/lib/approval-workflow-server";
-import {
-  APPROVAL_BUSINESS_TYPES,
-  approvalBusinessIdForProjectExecutionExitGate,
-} from "@/lib/approval-workflow";
-import { gateCriteriaCreateData, serializeProjectExecutionGate } from "@/lib/project-execution-gate";
+import { err, ok } from "@/lib/api-utils";
+import { serializeProjectExecutionGate } from "@/lib/project-execution-gate";
 import { loadProjectExecutionGateEvaluation } from "@/lib/project-execution-gate-service";
 import { prisma } from "@/lib/prisma";
-import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
+import { requestExecutionGate } from "@/modules/execution";
+import {
+  isProjectAuthorizationResponse,
+  requireProjectPermission,
+} from "@/lib/project-authorization";
 
 type RouteContext = { params: Promise<{ id: string; executionId: string }> };
 
@@ -24,10 +23,9 @@ const serializeEvaluation = (evaluation: Awaited<ReturnType<typeof loadProjectEx
 });
 
 export async function GET(req: NextRequest, { params }: RouteContext) {
-  const user = await getAuthenticatedUser(req);
-  if (!user) return unauthorizedFromRequest(req);
-  if (!await userHasPermission(user, "project-gantt:view")) return forbidden();
   const { id: projectId, executionId } = await params;
+  const user = await requireProjectPermission(req, projectId, "project-gantt:view");
+  if (isProjectAuthorizationResponse(user)) return user;
   try {
     const loaded = await prisma.$transaction((tx) => loadProjectExecutionGateEvaluation(tx, projectId, executionId));
     const gates = await prisma.projectExecutionGate.findMany({
@@ -58,64 +56,22 @@ export async function GET(req: NextRequest, { params }: RouteContext) {
 }
 
 export async function POST(req: NextRequest, { params }: RouteContext) {
-  const user = await getAuthenticatedUser(req);
-  if (!user) return unauthorizedFromRequest(req);
-  if (!await userHasPermission(user, "project-execution:gate-request")) return forbidden();
   const { id: projectId, executionId } = await params;
+  const user = await requireProjectPermission(req, projectId, "project-execution:gate-request");
+  if (isProjectAuthorizationResponse(user)) return user;
   const body = await req.json().catch(() => ({})) as Record<string, unknown>;
   const requestNote = String(body.requestNote || "").trim();
   if (!requestNote) return err("请填写 Gate 放行申请说明");
   if (requestNote.length > 2000) return err("申请说明不能超过 2000 个字符");
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
-      const { project, execution, evaluation } = await loadProjectExecutionGateEvaluation(tx, projectId, executionId);
-      if (execution.status === "COMPLETED" || execution.status === "ARCHIVED") throw new Error("已完成或已归档的阶段不能重复申请出口 Gate");
-      if (!evaluation.passed) throw new Error(evaluation.criteria.filter((criterion) => criterion.required && criterion.status !== "PASSED").map((criterion) => criterion.summary).join("\n"));
-      const gate = await tx.projectExecutionGate.create({
-        data: {
-          projectId,
-          executionId,
-          status: "READY",
-          ganttRevision: evaluation.ganttRevision,
-          rangeHash: evaluation.rangeHash,
-          snapshotJson: JSON.stringify(serializeEvaluation(evaluation)),
-          requestNote,
-          criteria: { createMany: { data: gateCriteriaCreateData(evaluation.criteria) } },
-        },
-      });
-      return { project, execution, evaluation, gate };
-    });
-    const instance = await startApprovalWorkflow({
+    const result = await requestExecutionGate({
       projectId,
-      businessType: APPROVAL_BUSINESS_TYPES.PROJECT_EXECUTION_EXIT_GATE,
-      businessId: approvalBusinessIdForProjectExecutionExitGate(projectId, executionId),
+      executionId,
+      requestNote,
       requester: user,
-      payload: {
-        gateId: result.gate.id,
-        executionId,
-        executionName: result.execution.name,
-        ganttRevision: result.evaluation.ganttRevision,
-        rangeHash: result.evaluation.rangeHash,
-        snapshotHash: result.evaluation.snapshotHash,
-        requestNote,
-      },
     });
-    const gate = await prisma.projectExecutionGate.update({
-      where: { id: result.gate.id },
-      data: { status: "PENDING_APPROVAL", requestedAt: new Date(), approvalInstanceId: instance.id },
-    });
-    await prisma.operationHistory.create({
-      data: {
-        projectId,
-        entityType: "PROJECT_EXECUTION_GATE",
-        entityId: gate.id,
-        actionType: "REQUEST",
-        operator: user.displayName,
-        detail: `申请执行阶段「${result.execution.name}」出口 Gate 放行。审批实例：${instance.id}`,
-      },
-    });
-    return ok({ gate: serializeProjectExecutionGate(gate), approvalInstanceId: instance.id }, 201);
+    return ok({ gate: serializeProjectExecutionGate(result.gate), approvalInstanceId: result.approvalInstanceId }, 201);
   } catch (error) {
     return err(error instanceof Error ? error.message : "Gate 放行申请失败", 400);
   }

@@ -1,6 +1,7 @@
 import { rm } from "node:fs/promises";
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import { ensureMutableProject, err, notFound, ok, unauthorizedFromRequest, forbidden } from "@/lib/api-utils"
 import { getProjectDocumentPath } from "@/lib/project-document-storage";
@@ -17,6 +18,8 @@ export async function DELETE(
   const user = await getAuthenticatedUser(req);
   if (!user) return unauthorizedFromRequest(req);
   if (!await userHasPermission(user, "project-documents:delete")) return forbidden();
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
 
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;

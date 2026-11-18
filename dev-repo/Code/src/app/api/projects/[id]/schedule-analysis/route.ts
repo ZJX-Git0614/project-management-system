@@ -1,8 +1,8 @@
 import { NextRequest } from "next/server";
 
-import { hasAssistantProjectAccess } from "@/lib/assistant-project-access";
 import { err, ok } from "@/lib/api-utils";
 import { prisma } from "@/lib/prisma";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { requireUser } from "@/lib/server-auth";
 
 const parseResult = (value: string) => {
@@ -17,7 +17,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   const user = await requireUser(req);
   if ("status" in user) return user;
   const { id } = await params;
-  if (!(await hasAssistantProjectAccess(user, id))) return err("无权访问当前项目", 403);
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
   const runId = req.nextUrl.searchParams.get("runId")?.trim();
   if (runId) {
     const run = await prisma.scheduleAnalysisRun.findFirst({ where: { id: runId, projectId: id } });

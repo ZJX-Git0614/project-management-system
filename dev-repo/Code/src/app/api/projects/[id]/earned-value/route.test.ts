@@ -74,6 +74,7 @@ describe("PUT /api/projects/:id/earned-value", () => {
       data: {
         budgetAtCompletion: 1200,
         actualCost: 430,
+        actualCostMode: "LEGACY_MANUAL_TOTAL",
         budgetItemId: "budget-1",
       },
     });

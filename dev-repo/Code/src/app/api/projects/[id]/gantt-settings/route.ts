@@ -13,6 +13,7 @@ import {
   materializeProjectGanttRelativeSchedule,
   refreshProjectGanttDerivedState,
 } from "@/lib/gantt-task-service";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 
 export async function GET(
@@ -23,6 +24,8 @@ export async function GET(
   const user = await getAuthenticatedUser(req);
   if (!user) return unauthorizedFromRequest(req);
   if (!await userHasPermission(user, "project-gantt:view")) return forbidden();
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
   const project = await prisma.project.findUnique({
     where: { id },
     select: { ganttCalendarMode: true, ganttHardFinishDate: true, startDate: true },
@@ -48,6 +51,8 @@ export async function PUT(
   const user = await getAuthenticatedUser(req);
   if (!user) return unauthorizedFromRequest(req);
   if (!await userHasPermission(user, "project-gantt:edit")) return forbidden();
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
 

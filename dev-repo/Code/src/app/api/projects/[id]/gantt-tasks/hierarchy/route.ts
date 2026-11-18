@@ -4,6 +4,7 @@ import { ensureMutableProject, err, ok } from "@/lib/api-utils";
 import { getGanttPlanMutationBlockReasonForActor } from "@/lib/gantt-baseline-service";
 import type { GanttHierarchyDirection } from "@/lib/gantt-hierarchy";
 import { changeProjectGanttTaskHierarchy } from "@/lib/gantt-task-service";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { requireUser, userHasPermission } from "@/lib/server-auth";
 
 const DIRECTIONS = new Set<GanttHierarchyDirection>(["INDENT", "OUTDENT"]);
@@ -17,6 +18,8 @@ export async function PUT(
   if (!(await userHasPermission(user, "project-gantt:edit"))) return err("权限不足", 403);
 
   const { id } = await params;
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
   const baselineLockReason = await getGanttPlanMutationBlockReasonForActor({

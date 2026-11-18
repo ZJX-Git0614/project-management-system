@@ -74,4 +74,57 @@ describe("project restore multi-owner data", () => {
       { taskId: "task-1", projectMemberId: "member-a" },
     ]);
   });
+
+  it("keeps personnel budget, WBS assignments and worklogs referentially valid after account consolidation", () => {
+    const snapshot: ProjectDataSnapshot = {
+      projectId: "project-1",
+      projectName: "项目一",
+      tables: [
+        {
+          table: "ProjectMember",
+          columns: [],
+          rows: [
+            { id: "member-a", accountId: "source-a" },
+            { id: "member-b", accountId: "source-b" },
+          ],
+        },
+        {
+          table: "ProjectGanttTaskLaborAssignment",
+          columns: [],
+          rows: [
+            { taskId: "task-1", projectMemberId: "member-a" },
+            { taskId: "task-1", projectMemberId: "member-b" },
+          ],
+        },
+        {
+          table: "ProjectBudgetLaborAllocation",
+          columns: [],
+          rows: [
+            { id: "allocation-a", budgetItemId: "budget-1", projectMemberId: "member-a" },
+            { id: "allocation-b", budgetItemId: "budget-1", projectMemberId: "member-b" },
+          ],
+        },
+        {
+          table: "ProjectTaskWorklog",
+          columns: [],
+          rows: [{ id: "worklog-1", projectMemberId: "member-b" }],
+        },
+      ],
+    };
+
+    const transformed = transformProjectSnapshotAccounts(snapshot, new Map([
+      ["source-a", "target-account"],
+      ["source-b", "target-account"],
+    ]));
+
+    expect(transformed.tables.find((table) => table.table === "ProjectGanttTaskLaborAssignment")?.rows).toEqual([
+      { taskId: "task-1", projectMemberId: "member-a" },
+    ]);
+    expect(transformed.tables.find((table) => table.table === "ProjectBudgetLaborAllocation")?.rows).toEqual([
+      { id: "allocation-a", budgetItemId: "budget-1", projectMemberId: "member-a" },
+    ]);
+    expect(transformed.tables.find((table) => table.table === "ProjectTaskWorklog")?.rows).toEqual([
+      { id: "worklog-1", projectMemberId: "member-a" },
+    ]);
+  });
 });

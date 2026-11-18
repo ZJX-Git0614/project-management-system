@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 
 import { ensureMutableProject, err, ok } from "@/lib/api-utils";
 import { type ProjectModule } from "@/lib/module-history";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { requireProjectModule, restoreProjectModuleHistorySnapshot } from "@/lib/project-module-history";
 import { requireUser, userHasPermission } from "@/lib/server-auth";
 
@@ -18,6 +19,8 @@ export async function POST(
   const user = await requireUser(req);
   if ("status" in user) return user;
   const { id } = await params;
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
   const body = await req.json().catch(() => ({})) as Record<string, unknown>;

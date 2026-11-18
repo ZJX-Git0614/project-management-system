@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 
 import { prisma } from "@/lib/prisma";
 import { ensureMutableProject, err, notFound, ok } from "@/lib/api-utils";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import {
   getGanttPlanMutationBlockReasonForActor,
@@ -53,6 +54,8 @@ export async function PUT(
   const user = await getAuthenticatedUser(req);
   if (!user) return err("未登录", 401);
   if (!(await userHasPermission(user, "project-gantt:edit"))) return err("权限不足", 403);
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
 
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
@@ -186,6 +189,14 @@ export async function PUT(
   if (actualStartDate && !/^\d{4}-\d{2}-\d{2}$/.test(actualStartDate)) return err("实际开始时间格式应为 YYYY-MM-DD");
   if (completion.error) return err(completion.error);
   if (!Number.isFinite(requestedActualWorkHours) || requestedActualWorkHours < 0) return err("实际工时必须为大于或等于 0 的数字");
+  const actualCostMode = String(existing.actualCostMode ?? "AUTO_LABOR").trim().toUpperCase();
+  if (
+    "actualWorkHours" in body
+    && Math.abs(actualWorkHours - existing.actualWorkHours) > 0.001
+    && (actualCostMode === "AUTO_LABOR" || actualCostMode === "AUTO_PLUS_ADJUSTMENT")
+  ) {
+    return err("当前任务按人员工时自动核算，请在挣值分析中通过“登记工时”录入实际投入", 409, "TASK_WORKLOG_REQUIRED");
+  }
   if (budgetItemId) {
     const budgetItem = await prisma.projectBudgetItem.findFirst({ where: { id: budgetItemId, projectId: id }, select: { id: true } });
     if (!budgetItem) return notFound("预算条目");
@@ -468,6 +479,8 @@ export async function DELETE(
   const user = await getAuthenticatedUser(req);
   if (!user) return err("未登录", 401);
   if (!(await userHasPermission(user, "project-gantt:delete"))) return err("权限不足", 403);
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
 
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;

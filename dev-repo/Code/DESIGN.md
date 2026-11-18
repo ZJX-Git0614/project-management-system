@@ -2,8 +2,8 @@
 
 ## Source of truth
 - Status: Active
-- Last refreshed: 2026-08-05
-- Primary product surfaces: project list, project detail, gantt schedule, weekly items, risk register, budget management, role/account management, future intake/docs/modules.
+- Last refreshed: 2026-09-06
+- Primary product surfaces: project list, project detail, gantt schedule, weekly items, risk register, budget management, delivery management, procurement management, role/account management, future intake/docs/modules.
 - Evidence reviewed: `src/app/globals.css`, `src/components/app-shell.tsx`, `src/components/gantt-timeline.tsx`, `src/components/project-gantt-panel.tsx`, `src/components/item-panel.tsx`, `src/components/project-budget-panel.tsx`, `src/components/system-backup-panel.tsx`, `src/components/system-log-panel.tsx`, `src/components/project-restore-panel.tsx`, `src/components/ui/*`, `.omx/plans/remove-monthly-and-plane-inspired-roadmap.md`.
 
 ## Brand
@@ -12,18 +12,18 @@
 - Avoid: marketing-style hero pages, decorative cards, oversized text, single-purpose visual effects, broad gradients, visual noise.
 
 ## Product goals
-- Goals: help project managers track progress, weekly execution, cost, risk, and ownership with low friction.
+- Goals: help project managers track progress, weekly execution, cost, risk, delivery, procurement, and ownership with low friction.
 - Non-goals: becoming a generic issue tracker or copying Plane's full workspace/issue hierarchy.
-- Success signals: fewer horizontal table conflicts, faster filtering, fewer orphaned items, clearer ownership and status.
+- Success signals: fewer horizontal table conflicts, faster filtering, fewer orphaned items, clearer ownership and status, and no manual re-entry from released BOM data into procurement tracking.
 
 ## Personas and jobs
-- Primary personas: project manager, delivery lead, department manager, project member, administrator.
-- User jobs: maintain current project state, spot overdue/high-risk work, update weekly execution, review cost/risk status, keep decisions traceable.
+- Primary personas: project manager, delivery lead, procurement coordinator, department manager, project member, administrator.
+- User jobs: maintain current project state, spot overdue/high-risk work, update weekly execution, review cost/risk/delivery/procurement status, and keep decisions traceable.
 - Key contexts of use: repeated daily/weekly updates, meeting follow-ups, project review meetings, risk/cost checks.
 
 ## Information architecture
-- Primary navigation: project operations cockpit, project WBS management, project cost management, project risk management, system settings.
-- Core routes/screens: projects, project detail, gantt, weekly items, budget, risk register, roles/accounts.
+- Primary navigation: project operations cockpit, project WBS management, project delivery management, project procurement management, project cost management, project risk management, system settings.
+- Core routes/screens: projects, project detail, gantt, delivery list, delivery status, procurement, weekly items, budget, risk register, roles/accounts.
 - Content hierarchy: selected project first, then module-specific work surfaces.
 
 ## Design principles
@@ -42,7 +42,7 @@
 
 ## Components
 - Existing components to reuse: Button, Input, Select, Table, Card, Badge, Dialog, Tooltip.
-- New/changed components: saved-view bar, detail drawer, intake conversion panel, document action extraction, module summary table, unified table context menu, module-scoped undo/redo controls, transparent data-table surface, borderless table action buttons, borderless table icon buttons, service-status rows.
+- New/changed components: saved-view bar, detail drawer, intake conversion panel, document action extraction, module summary table, unified table context menu, module-scoped undo/redo controls, transparent data-table surface, borderless table action buttons, borderless table icon buttons, service-status rows, deliverable list, deliverable status editor, BOM revision/import dialog, procurement synchronization preview, procurement status timeline.
 - Variants and states: active/saved/default view, sequence-column row selection, contiguous/additive batch selection, inline edit hover, empty/error/loading.
 - Token/component ownership: follow `src/app/globals.css` variables and existing UI component sizing.
 
@@ -69,7 +69,7 @@
 
 ## Content voice
 - Tone: direct, operational, concise Chinese labels.
-- Terminology: use 项目WBS管理、项目事项管理、风险登记册、事项收集池、项目文档、项目阶段/模块；已撤销操作的恢复统一称为“重做”。
+- Terminology: use 项目WBS管理、项目事项管理、风险登记册、事项收集池、项目文档、项目阶段/模块、交付物清单、交付物状态管理、BOM版本、线缆清单、项目采购管理；已撤销操作的恢复统一称为“重做”。
 - Microcopy rules: avoid explaining UI mechanics in visible product copy unless needed for error/empty states.
 
 ## Table interaction conventions
@@ -107,3 +107,6 @@
 - [ ] Whether saved views are user-level, role-level, or project-level.
 - [ ] Whether project documents need rich text in phase one or structured markdown/plain text is enough.
 - [ ] Whether module undo/redo should later reject stale history when another user, assistant action, or browser tab has changed the same module.
+- [ ] Whether delivery acceptance and procurement ordering should be enforced by a mandatory workflow or remain configurable by project type and amount threshold.
+- [ ] Whether the BOM import template needs supplier part number, tax, currency, and manufacturer fields in the first release.
+- [ ] Whether cable-list lines should always synchronize to procurement, or be selected as an optional source at each BOM synchronization.

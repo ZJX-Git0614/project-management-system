@@ -9,6 +9,7 @@ import {
   type GanttInsertPlacement,
   type GanttPastePosition,
 } from "@/lib/gantt-task-service";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { requireUser, userHasPermission } from "@/lib/server-auth";
 
 const INSERT_PLACEMENTS = new Set<GanttInsertPlacement>(["SIBLING_BEFORE", "SIBLING_AFTER", "CHILD_FIRST", "CHILD_LAST"]);
@@ -21,6 +22,8 @@ export async function POST(
   const user = await requireUser(req);
   if ("status" in user) return user;
   const { id } = await params;
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
   const baselineLockReason = await getGanttPlanMutationBlockReasonForActor({

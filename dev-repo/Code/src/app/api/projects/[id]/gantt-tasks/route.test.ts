@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => {
   const tx = {
     projectGanttTask: {
+      findMany: vi.fn(),
       updateMany: vi.fn(),
       create: vi.fn(),
     },
@@ -78,6 +79,7 @@ describe("POST /api/projects/:id/gantt-tasks", () => {
     mocks.taskFindMany.mockResolvedValue([]);
     mocks.transaction.mockImplementation(async (callback) => callback(mocks.tx));
     mocks.tx.projectGanttTask.updateMany.mockResolvedValue({ count: 0 });
+    mocks.tx.projectGanttTask.findMany.mockResolvedValue([]);
     mocks.tx.projectGanttTask.create.mockResolvedValue({ id: "created-1" });
     mocks.tx.project.update.mockResolvedValue({});
     mocks.getProjectGanttCalendarMode.mockResolvedValue("NATURAL_DAY");

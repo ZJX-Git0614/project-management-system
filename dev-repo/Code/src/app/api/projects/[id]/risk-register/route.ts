@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { authorizeProjectAccess } from "@/lib/project-authorization"
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import { ok, err, notFound, unauthorizedFromRequest, forbidden } from "@/lib/api-utils"
 import {
@@ -20,6 +21,8 @@ export async function GET(
   const user = await getAuthenticatedUser(req);
   if (!user) return unauthorizedFromRequest(req);
   if (!await userHasPermission(user, "risk-register:view")) return forbidden();
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
 
   const project = await prisma.project.findUnique({ where: { id } })
   if (!project) return notFound("项目")
@@ -47,6 +50,8 @@ export async function POST(
   const user = await getAuthenticatedUser(req);
   if (!user) return unauthorizedFromRequest(req);
   if (!await userHasPermission(user, "risk-register:create")) return forbidden();
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
 
   const project = await prisma.project.findUnique({ where: { id } })
   if (!project) return notFound("项目")

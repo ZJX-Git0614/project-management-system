@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { ensureMutableProject, err, ok } from "@/lib/api-utils";
 import { getGanttPlanMutationBlockReasonForActor } from "@/lib/gantt-baseline-service";
 import { restoreProjectGanttHistorySnapshot } from "@/lib/gantt-task-service";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { requireUser, userHasPermission } from "@/lib/server-auth";
 
 export async function POST(
@@ -19,6 +20,8 @@ export async function POST(
   if (!canWrite.every(Boolean)) return err("恢复整个 WBS 需要新增、编辑和删除权限", 403);
 
   const { id } = await params;
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
   const baselineLockReason = await getGanttPlanMutationBlockReasonForActor({

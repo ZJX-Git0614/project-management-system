@@ -5,6 +5,7 @@ import { extname } from "node:path";
 
 import { ensureMutableProject, err, notFound, ok } from "@/lib/api-utils";
 import { getGanttPlanMutationBlockReasonForActor } from "@/lib/gantt-baseline-service";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 import { extractAssistantDocument } from "@/lib/assistant-document-processing";
 import { estimatedHoursForDuration, roundGanttHours } from "@/lib/gantt-calendar";
@@ -27,6 +28,8 @@ export async function POST(
   const { id } = await params;
   const user = await getAuthenticatedUser(req);
   if (!user) return err("未登录", 401);
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
 
   const project = await prisma.project.findUnique({ where: { id }, select: { id: true, name: true, startDate: true } });
   if (!project) return notFound("项目");

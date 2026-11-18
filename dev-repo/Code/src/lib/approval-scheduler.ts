@@ -1,5 +1,6 @@
 import { TodoType } from "@/domain/enums";
 import { runApprovalEffects } from "@/lib/approval-workflow-server";
+import { runWithMaintenanceLock } from "@/lib/maintenance-lock";
 import { prisma } from "@/lib/prisma";
 import { recordSystemEvent } from "@/lib/system-event-log";
 
@@ -61,10 +62,13 @@ export const runApprovalReminders = async (now = new Date()) => {
   return reminded;
 };
 
-const checkAndRun = async () => {
+export const runApprovalMaintenance = async () => {
   try {
-    await runApprovalEffects();
-    await runApprovalReminders();
+    return await runWithMaintenanceLock("pms:approval-maintenance", async () => {
+      await runApprovalEffects();
+      await runApprovalReminders();
+      return true;
+    });
   } catch (error) {
     console.error("[approval] scheduled check failed", error);
     await recordSystemEvent({
@@ -74,14 +78,15 @@ const checkAndRun = async () => {
       eventType: "APPROVAL_SCHEDULER_FAILED",
       message: error instanceof Error ? error.message : "审批催办或业务结果重试失败",
     });
+    return { acquired: false };
   }
 };
 
 export const startApprovalScheduler = () => {
   if (globalScheduler.ceastarApprovalSchedulerStarted) return;
   globalScheduler.ceastarApprovalSchedulerStarted = true;
-  const initialTimer = setTimeout(() => void checkAndRun(), 45_000);
-  const interval = setInterval(() => void checkAndRun(), 5 * 60 * 1000);
+  const initialTimer = setTimeout(() => void runApprovalMaintenance(), 45_000);
+  const interval = setInterval(() => void runApprovalMaintenance(), 5 * 60 * 1000);
   initialTimer.unref();
   interval.unref();
 };

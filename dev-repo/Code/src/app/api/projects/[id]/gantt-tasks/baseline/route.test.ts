@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   getAuthenticatedUser: vi.fn(),
   userHasPermission: vi.fn(),
+  hasProjectAccess: vi.fn(),
   projectFindUnique: vi.fn(),
   getProjectGanttBaselineOverview: vi.fn(),
   getGanttBaselinePermissions: vi.fn(),
@@ -16,6 +17,7 @@ vi.mock("@/lib/server-auth", () => ({
   getAuthenticatedUser: mocks.getAuthenticatedUser,
   userHasPermission: mocks.userHasPermission,
 }));
+vi.mock("@/lib/project-access", () => ({ hasProjectAccess: mocks.hasProjectAccess }));
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -44,6 +46,7 @@ describe("POST /api/projects/:id/gantt-tasks/baseline", () => {
       assignedRoleNames: ["项目经理"],
     });
     mocks.userHasPermission.mockResolvedValue(true);
+    mocks.hasProjectAccess.mockResolvedValue(true);
     mocks.projectFindUnique.mockResolvedValue({
       id: "project-1",
       ganttRevision: 42,

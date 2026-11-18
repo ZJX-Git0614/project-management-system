@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   ensureMutableProject: vi.fn(),
   getAuthenticatedUser: vi.fn(),
   userHasPermission: vi.fn(),
+  hasProjectAccess: vi.fn(),
   getGanttPlanMutationBlockReasonForActor: vi.fn(),
   clearProjectGanttTaskDurations: vi.fn(),
 }));
@@ -17,6 +18,7 @@ vi.mock("@/lib/server-auth", () => ({
   getAuthenticatedUser: mocks.getAuthenticatedUser,
   userHasPermission: mocks.userHasPermission,
 }));
+vi.mock("@/lib/project-access", () => ({ hasProjectAccess: mocks.hasProjectAccess }));
 vi.mock("@/lib/gantt-baseline-service", () => ({
   getGanttPlanMutationBlockReasonForActor: mocks.getGanttPlanMutationBlockReasonForActor,
 }));
@@ -33,6 +35,7 @@ describe("POST /api/projects/:id/gantt-tasks/:taskId/clear-duration", () => {
       assignedRoleNames: ["项目经理"],
     });
     mocks.userHasPermission.mockResolvedValue(true);
+    mocks.hasProjectAccess.mockResolvedValue(true);
     mocks.ensureMutableProject.mockResolvedValue(null);
     mocks.getGanttPlanMutationBlockReasonForActor.mockResolvedValue(null);
     mocks.clearProjectGanttTaskDurations.mockResolvedValue({

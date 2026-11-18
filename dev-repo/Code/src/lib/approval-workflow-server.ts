@@ -459,9 +459,10 @@ export const startApprovalWorkflow = async (params: {
   businessId: string;
   requester: AuthenticatedUser;
   payload?: Record<string, unknown>;
+  db?: Prisma.TransactionClient;
 }) => {
-  await ensureDefaultApprovalWorkflows(params.requester);
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
+  await ensureDefaultApprovalWorkflowsInTransaction(tx, params.requester);
   const project = await tx.project.findUnique({ where: { id: params.projectId }, select: { name: true } });
   if (!project) throw new Error("项目不存在");
   await assertProjectAccess(params.requester, params.projectId, tx);
@@ -567,7 +568,8 @@ export const startApprovalWorkflow = async (params: {
     },
   });
   return tx.approvalWorkflowInstance.findUniqueOrThrow({ where: { id: instance.id }, include: INSTANCE_INCLUDE });
-  }, { timeout: 15000 });
+  };
+  return params.db ? run(params.db) : prisma.$transaction(run, { timeout: 15000 });
 };
 
 const completeOpenTodos = (db: DbClient, instanceId: string, status = "DONE") => db.todoItem.updateMany({

@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { ensureMutableProject, err, ok } from "@/lib/api-utils";
 import { getGanttPlanMutationBlockReasonForActor } from "@/lib/gantt-baseline-service";
 import { deleteGanttTaskSubtrees, GanttRevisionConflictError, listGanttTaskDeletionBatches } from "@/lib/gantt-task-service";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { requireUser, userHasPermission } from "@/lib/server-auth";
 
 export async function GET(
@@ -14,6 +15,8 @@ export async function GET(
   if (!(await userHasPermission(user, "project-gantt:delete"))) return err("权限不足", 403);
 
   const { id } = await params;
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
 
@@ -30,6 +33,8 @@ export async function POST(
   if (!(await userHasPermission(user, "project-gantt:delete"))) return err("权限不足", 403);
 
   const { id } = await params;
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
   const baselineLockReason = await getGanttPlanMutationBlockReasonForActor({

@@ -32,7 +32,9 @@ const mocks = vi.hoisted(() => {
   }
 })
 
-vi.mock("@/lib/server-auth", () => ({ requireUser: mocks.requireUser }))
+vi.mock("@/lib/server-auth", () => ({
+  requireUser: mocks.requireUser,
+}))
 vi.mock("@/lib/assistant-settings", () => ({
   loadAssistantRuntimeConfig: mocks.loadAssistantRuntimeConfig,
   ASSISTANT_TOOL_CATALOG: [{

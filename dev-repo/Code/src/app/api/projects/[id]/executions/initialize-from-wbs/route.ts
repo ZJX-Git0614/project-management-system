@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 
 import { ensureMutableProject, err, forbidden, notFound, ok, unauthorizedFromRequest } from "@/lib/api-utils";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { prisma } from "@/lib/prisma";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 
@@ -12,6 +13,8 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
   if (!await userHasPermission(user, "project-gantt:create")) return forbidden();
 
   const { id: projectId } = await params;
+  const accessError = await authorizeProjectAccess(user, projectId);
+  if (accessError) return accessError;
   const readOnly = await ensureMutableProject(projectId);
   if (readOnly) return readOnly;
   const [project, existingCount, rootTasks] = await Promise.all([

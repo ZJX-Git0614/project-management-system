@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { ensureMutableProject, err, notFound, ok } from "@/lib/api-utils";
 import { normalizeStructureCount, placeRowsAroundAnchor, type FlatRowPosition } from "@/lib/flat-row-structure";
 import { prisma } from "@/lib/prisma";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { renumberRiskCodes } from "@/lib/risk-register-codes";
 import { requireUser, userHasPermission } from "@/lib/server-auth";
 
@@ -15,6 +16,8 @@ export async function POST(
   const { id: projectId } = await params;
   const user = await requireUser(req);
   if ("status" in user) return user;
+  const accessError = await authorizeProjectAccess(user, projectId);
+  if (accessError) return accessError;
 
   const project = await prisma.project.findUnique({ where: { id: projectId } });
   if (!project) return notFound("项目");

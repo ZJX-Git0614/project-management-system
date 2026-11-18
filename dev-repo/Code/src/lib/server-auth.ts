@@ -26,6 +26,21 @@ const parseRoles = (value: string) => {
   }
 };
 
+const permissionTreeByUser = new WeakMap<AuthenticatedUser, Promise<PermissionTreeState>>();
+
+const loadPermissionTree = async (): Promise<PermissionTreeState> => {
+  const stored = await prisma.permissionTree.findUnique({ where: { id: "default_tree" }, select: { data: true } });
+  let parsed: unknown;
+  try {
+    parsed = stored?.data ? JSON.parse(stored.data) : DEFAULT_PERMISSION_TREE;
+  } catch {
+    parsed = DEFAULT_PERMISSION_TREE;
+  }
+  return normalizePermissionTree(
+    parsed && typeof parsed === "object" ? parsed as Partial<PermissionTreeState> : undefined,
+  );
+};
+
 export async function getAuthenticatedUser(req: NextRequest): Promise<AuthenticatedUser | null> {
   const tokenUser = getUserFromRequest(req);
   if (!tokenUser) return null;
@@ -44,16 +59,12 @@ export async function getAuthenticatedUser(req: NextRequest): Promise<Authentica
 
 export async function userHasPermission(user: AuthenticatedUser, nodeKey: string) {
   if (user.assignedRoleNames.includes(ADMIN_ROLE_NAME)) return true;
-  const stored = await prisma.permissionTree.findUnique({ where: { id: "default_tree" }, select: { data: true } });
-  let parsed: unknown;
-  try {
-    parsed = stored?.data ? JSON.parse(stored.data) : DEFAULT_PERMISSION_TREE;
-  } catch {
-    parsed = DEFAULT_PERMISSION_TREE;
+  let treePromise = permissionTreeByUser.get(user);
+  if (!treePromise) {
+    treePromise = loadPermissionTree();
+    permissionTreeByUser.set(user, treePromise);
   }
-  const tree = normalizePermissionTree(
-    parsed && typeof parsed === "object" ? parsed as Partial<PermissionTreeState> : undefined,
-  );
+  const tree = await treePromise;
   return user.assignedRoleNames.some((roleName) => hasPermission(tree, roleName, nodeKey));
 }
 

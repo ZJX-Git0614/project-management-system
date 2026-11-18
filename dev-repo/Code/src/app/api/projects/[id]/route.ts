@@ -2,6 +2,7 @@ import { rm } from "node:fs/promises"
 import { NextRequest } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { ok, err, forbidden, notFound, ensureMutableProject, unauthorizedFromRequest } from "@/lib/api-utils"
+import { authorizeProjectAccess } from "@/lib/project-authorization"
 import { APPROVAL_BUSINESS_TYPES, approvalBusinessIdForProjectStatus } from "@/lib/approval-workflow"
 import { serializeApprovalInstance, startApprovalWorkflow } from "@/lib/approval-workflow-server"
 import {
@@ -23,6 +24,8 @@ export async function GET(
   const user = await getAuthenticatedUser(req)
   if (!user) return unauthorizedFromRequest(req)
   if (!await userHasPermission(user, "project-info:view")) return forbidden()
+  const accessError = await authorizeProjectAccess(user, id)
+  if (accessError) return accessError
 
   const project = await prisma.project.findUnique({
     where: { id },
@@ -71,6 +74,8 @@ export async function PUT(
   const { id } = await params
   const user = await getAuthenticatedUser(req)
   if (!user) return unauthorizedFromRequest(req)
+  const accessError = await authorizeProjectAccess(user, id)
+  if (accessError) return accessError
 
   const existing = await prisma.project.findUnique({ where: { id } })
   if (!existing) return notFound("项目")
@@ -159,6 +164,8 @@ export async function DELETE(
   const { id } = await params
   const user = await requireSystemAdmin(req)
   if ("status" in user) return user
+  const accessError = await authorizeProjectAccess(user, id)
+  if (accessError) return accessError
 
   const existing = await prisma.project.findUnique({ where: { id } })
   if (!existing) return notFound("项目")

@@ -7,6 +7,7 @@ import {
   type GanttNetworkDiagramKind,
 } from "@/lib/gantt-network-diagram";
 import { prisma } from "@/lib/prisma";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 
 const safeFileName = (value: string) => value.replace(/[\\/:*?"<>|\r\n]+/g, "_").slice(0, 80) || "project";
@@ -35,6 +36,8 @@ export async function GET(
   const user = await getAuthenticatedUser(req);
   if (!user) return err("未登录", 401);
   if (!(await userHasPermission(user, "project-gantt:view"))) return err("权限不足", 403);
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
 
   const requestedKind = req.nextUrl.searchParams.get("diagram")?.toUpperCase() ?? "";
   if (!isGanttNetworkDiagramKind(requestedKind)) {

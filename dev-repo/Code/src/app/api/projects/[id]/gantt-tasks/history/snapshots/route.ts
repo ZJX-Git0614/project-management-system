@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 
 import { ensureMutableProject, err, ok } from "@/lib/api-utils";
 import { captureProjectGanttHistorySnapshot } from "@/lib/gantt-task-service";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { requireUser, userHasPermission } from "@/lib/server-auth";
 
 export async function POST(
@@ -18,6 +19,8 @@ export async function POST(
   if (!canWrite.some(Boolean)) return err("权限不足", 403);
 
   const { id } = await params;
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
   const mutableError = await ensureMutableProject(id);
   if (mutableError) return mutableError;
   const body = await req.json().catch(() => ({})) as Record<string, unknown>;

@@ -47,7 +47,7 @@ const params = { params: Promise.resolve({ id: "project-1", memberId: "member-1"
 describe("project member removal", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.getAuthenticatedUser.mockResolvedValue({ displayName: "管理员" });
+    mocks.getAuthenticatedUser.mockResolvedValue({ displayName: "管理员", assignedRoleNames: ["管理员"] });
     mocks.userHasPermission.mockResolvedValue(true);
     mocks.projectFindUnique.mockResolvedValue({ id: "project-1", status: "IN_PROGRESS" });
     mocks.projectMemberFindFirst.mockResolvedValue({

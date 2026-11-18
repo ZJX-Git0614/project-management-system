@@ -6,6 +6,7 @@ import {
   approvalBusinessIdForWbsTaskProgressSubmission,
 } from "@/lib/approval-workflow";
 import { serializeApprovalInstance, startApprovalWorkflow } from "@/lib/approval-workflow-server";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 
 export async function POST(
@@ -17,6 +18,8 @@ export async function POST(
   if (!await userHasPermission(user, "project-gantt:view")) return forbidden();
 
   const { id, taskId } = await params;
+  const accessError = await authorizeProjectAccess(user, id);
+  if (accessError) return accessError;
   const body = await req.json().catch(() => ({})) as Record<string, unknown>;
   try {
     const approval = await startApprovalWorkflow({

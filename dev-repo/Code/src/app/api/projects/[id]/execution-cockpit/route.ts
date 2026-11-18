@@ -5,6 +5,7 @@ import { evaluateProjectExecutionHealth } from "@/lib/project-execution-health";
 import { resolveProjectExecutionScope, serializeProjectExecution } from "@/lib/project-execution";
 import { serializeProjectExecutionGate } from "@/lib/project-execution-gate";
 import { prisma } from "@/lib/prisma";
+import { authorizeProjectAccess } from "@/lib/project-authorization";
 import { getAuthenticatedUser, userHasPermission } from "@/lib/server-auth";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -15,6 +16,8 @@ export async function GET(req: NextRequest, { params }: RouteContext) {
   if (!await userHasPermission(user, "project-gantt:view")) return forbidden();
 
   const { id: projectId } = await params;
+  const accessError = await authorizeProjectAccess(user, projectId);
+  if (accessError) return accessError;
   const [project, canViewMatters, canViewRisks] = await Promise.all([
     prisma.project.findUnique({ where: { id: projectId }, select: { id: true, name: true, status: true, ganttRevision: true } }),
     userHasPermission(user, "weekly-items:view"),
